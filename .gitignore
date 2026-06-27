@@ -1,0 +1,62 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Virtual environments ───────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+.env/
+
+# ── Environment & secrets ──────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.env
+
+# ── Personal portfolio data (민감 데이터) ────────────────────────────────────────
+pfp/data/holdings.json
+pfp/data/trade_log.json
+pfp/lens_trader/lens_trader/report_log.json
+pfp/lens_trader/lens_trader/signals.json
+pfp/lens_trader/lens_trader/trade_log.json
+
+# ── Generated outputs ──────────────────────────────────────────────────────────
+pfp/outputs/
+*.docx
+*.pdf
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+
+# ── Node / Frontend ───────────────────────────────────────────────────────────
+node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+
+# ── IDE / Claude Code ─────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.claude/
+**/.claude/
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
+*.log
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

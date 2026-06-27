@@ -1,0 +1,27 @@
+{
+  "timestamp": "2026-06-22T10:30:00",
+  "macro_block": false,
+  "signals": [
+    {
+      "ticker": "NVDA",
+      "action": "BUY",
+      "strategy": "momentum_breakout",
+      "strength": 0.87,
+      "price": 145.20
+    },
+    {
+      "ticker": "ANET",
+      "action": "BUY",
+      "strategy": "bb_mean_reversion",
+      "strength": 0.74,
+      "price": 88.50
+    },
+    {
+      "ticker": "AAPL",
+      "action": "SELL",
+      "strategy": "k_means_regime_exit",
+      "strength": 0.81,
+      "price": 194.30
+    }
+  ]
+}
