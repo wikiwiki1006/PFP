@@ -239,25 +239,31 @@ def run_macro_agents(
 
     results: dict[int, str] = {}
 
+    elapsed: dict[int, float] = {}
+
     def _call(ag: dict):
+        import time
+        t0 = time.time()
         try:
             text = call_claude(ag["prompt"], model, ag["max_tokens"], ag.get("use_search", False))
-            return ag["id"], text
+            return ag["id"], text, time.time() - t0
         except Exception as exc:
-            return ag["id"], f"[오류: {exc}]"
+            return ag["id"], f"[오류: {exc}]", time.time() - t0
 
     with ThreadPoolExecutor(max_workers=min(len(agent_map), 6)) as executor:
         futures = [executor.submit(_call, ag) for ag in agent_map.values()]
         for f in as_completed(futures):
-            ag_id, text = f.result()
+            ag_id, text, t = f.result()
             results[ag_id] = text
+            elapsed[ag_id] = round(t, 2)
 
     return [
         {
-            "id":    ag["id"],
-            "label": ag["label"],
-            "text":  results.get(ag["id"], "[오류: 결과 없음]"),
-            "ok":    not results.get(ag["id"], "").startswith("[오류"),
+            "id":      ag["id"],
+            "name":    ag["label"],
+            "text":    results.get(ag["id"], "[오류: 결과 없음]"),
+            "elapsed": elapsed.get(ag["id"], 0.0),
+            "ok":      not results.get(ag["id"], "").startswith("[오류"),
         }
         for ag in all_agents if ag["id"] in selected_ids
     ]

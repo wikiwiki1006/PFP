@@ -76,7 +76,7 @@ export default function Dashboard() {
               title="Portfolio Beta"
               value={m.portfolio_beta.toFixed(2)}
               icon={<Activity className="w-4 h-4" />}
-              subtitle={`Alpha vs S&P: ${m.alpha_vs_sp500.toFixed(2)}%`}
+              subtitle={`Alpha vs S&P: ${m.alpha_vs_sp500 != null ? m.alpha_vs_sp500.toFixed(2) : 'N/A'}%`}
             />
             <MetricCard
               title="VIX"

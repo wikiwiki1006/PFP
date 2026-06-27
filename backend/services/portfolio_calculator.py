@@ -43,11 +43,12 @@ def build_equity_curve(
             running = 0.0
             for _, row in t_log.iterrows():
                 q = float(row.get("q", 0))
-                if row["type"] == "ADD":
+                trade_type = row["type"]
+                if trade_type in ("ADD", "BUY"):
                     running += q
-                elif row["type"] == "SOLD":
+                elif trade_type in ("SOLD", "SELL"):
                     running -= q
-                elif row["type"] == "UPDATE":
+                elif trade_type == "UPDATE":
                     running = q
                 qty_series.loc[qty_series.index >= row["date"]] = running
             holdings_matrix[t] = qty_series
@@ -71,22 +72,39 @@ def equity_curve_to_records(
     curve: pd.Series,
     benchmark_df: pd.DataFrame | None = None,
 ) -> list[dict]:
-    """에쿼티 커브를 API 응답용 레코드 리스트로 변환."""
-    perf = (curve / curve.iloc[0] - 1) * 100
+    """에쿼티 커브를 API 응답용 레코드 리스트로 변환. value/benchmark_value 모두 달러 금액."""
+    # Strip leading near-zero entries (days before the first real investment).
+    # Any entry worth less than 0.1 % of the peak is treated as "pre-investment".
+    peak = float(curve.max()) if not curve.empty else 0.0
+    threshold = peak * 0.001
+    meaningful = curve[curve > threshold]
+    if not meaningful.empty:
+        curve = curve.loc[meaningful.index[0]:]
 
-    sp500_perf = None
+    sp500_indexed = None
     if benchmark_df is not None and "^GSPC" in benchmark_df.columns:
-        b = benchmark_df["^GSPC"].reindex(curve.index).ffill()
-        sp500_perf = (b / b.iloc[0] - 1) * 100
+        b = benchmark_df["^GSPC"].reindex(curve.index).ffill().bfill()
+        b_clean = b.dropna()
+        if len(b_clean) > 0:
+            sp500_indexed = b / float(b_clean.iloc[0]) * float(curve.iloc[0])
+
+    def _bv(date):
+        if sp500_indexed is None or date not in sp500_indexed.index:
+            return None
+        v = sp500_indexed.loc[date]
+        if pd.isna(v):
+            return None
+        return round(float(v), 2)
 
     records = []
-    for date, p_val in perf.items():
-        rec = {
-            "date":      date.strftime("%Y-%m-%d"),
-            "portfolio": round(float(p_val), 4),
-            "sp500":     round(float(sp500_perf.loc[date]), 4) if sp500_perf is not None and date in sp500_perf.index else None,
-        }
-        records.append(rec)
+    for date, val in curve.items():
+        if pd.isna(val):
+            continue
+        records.append({
+            "date":            date.strftime("%Y-%m-%d"),
+            "value":           round(float(val), 2),
+            "benchmark_value": _bv(date),
+        })
     return records
 
 
@@ -172,13 +190,17 @@ def calculate_metrics(
     beta = calculate_portfolio_beta(holdings, close_df)
     vix  = float(curr.get("^VIX", 18.0))
 
-    alpha = None
+    alpha = 0.0
     if "^GSPC" in close_df.columns:
-        p_perf = (equity_curve / equity_curve.iloc[0] - 1) * 100
-        b_sp   = close_df["^GSPC"].reindex(equity_curve.index).ffill()
-        b_perf = (b_sp / b_sp.iloc[0] - 1) * 100
         try:
-            alpha = round(float(p_perf.iloc[-1]) - float(b_perf.iloc[-1]), 4)
+            p_perf = (equity_curve / equity_curve.iloc[0] - 1) * 100
+            b_sp   = close_df["^GSPC"].reindex(equity_curve.index).ffill().bfill()
+            b_first = b_sp.dropna().iloc[0] if len(b_sp.dropna()) > 0 else None
+            if b_first is not None and float(b_first) != 0:
+                b_perf = (b_sp / float(b_first) - 1) * 100
+                a_val = float(p_perf.iloc[-1]) - float(b_perf.iloc[-1])
+                if a_val == a_val:  # not NaN
+                    alpha = round(a_val, 4)
         except Exception:
             pass
 
@@ -223,17 +245,21 @@ def get_holdings_detail(holdings: dict, close_df: pd.DataFrame) -> list[dict]:
             pnl_pct = (price / info["avg"] - 1) * 100 if info["avg"] > 0 else 0.0
 
         value = price * info["q"]
-        weight = (value / total_equity * 100) if total_equity else 0.0
+        avg_cost = float(info["avg"])
+        qty = float(info["q"])
+        pnl = round((price - avg_cost) * qty, 2)
 
         rows.append({
-            "ticker":     t,
-            "avg":        round(float(info["avg"]), 2),
-            "shares":     float(info["q"]),
-            "price":      round(price, 2),
-            "chg_pct":    round(chg_pct, 4),
-            "pnl_pct":    round(pnl_pct, 4),
-            "value":      round(value, 2),
-            "weight_pct": round(weight, 2),
+            "ticker":        t,
+            "sector":        info.get("sector", "Other"),
+            "qty":           qty,
+            "avg_cost":      round(avg_cost, 2),
+            "current_price": round(price, 2),
+            "chg_pct":       round(chg_pct, 4),
+            "pnl_pct":       round(pnl_pct, 4),
+            "pnl":           pnl,
+            "market_value":  round(value, 2),
+            "weight":        round(value / total_equity, 4) if total_equity else 0.0,
         })
     return rows
 

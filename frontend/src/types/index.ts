@@ -15,7 +15,7 @@ export interface PortfolioMetrics {
 export interface EquityCurvePoint {
   date: string
   value: number
-  benchmark_value: number
+  benchmark_value: number | null
 }
 
 export interface Holding {
@@ -48,14 +48,13 @@ export interface SectorWeights {
 export interface Trade {
   date: string
   ticker: string
-  type: 'BUY' | 'SELL'
+  type: 'ADD' | 'SOLD' | 'UPDATE' | 'BUY' | 'SELL'
   q: number
   price: number
   memo?: string
 }
 
 export interface TradeForm {
-  date: string
   ticker: string
   type: 'BUY' | 'SELL'
   q: number
@@ -89,15 +88,18 @@ export interface MacroData {
   unemployment: number
   cpi: number
   gdp: number
+  y10?: number
+  y2?: number
   t10y2y: number
   bamlh0a0hym2: number
+  source?: string
 }
 
 export interface NewsItem {
   ticker: string
   headline: string
   url: string
-  datetime: string
+  datetime: number
 }
 
 export interface DoomRadar {
@@ -111,9 +113,14 @@ export interface DoomRadar {
 
 export interface EarningsEvent {
   ticker: string
-  event_type: string
-  date: string
-  value: number
+  earn_date: string
+  div_date: string
+  div_yield: string
+}
+
+export interface CorrelationMatrix {
+  tickers: string[]
+  matrix: number[][]
 }
 
 // Signals Types
@@ -124,7 +131,8 @@ export interface SignalPick {
   entry: number
   target: number
   stop: number
-  upside: number
+  upside: number | null
+  downside: number | null
   reason: string
 }
 
@@ -132,12 +140,12 @@ export interface ScanResult {
   long_picks: SignalPick[]
   short_picks: SignalPick[]
   scanned: number
-  doom: boolean
+  doom: DoomRadar
 }
 
 export interface PairsSignal {
   current_z: number
-  current_signal: string
+  current_signal: string | null
   beta: number
   correlation: number
   is_valid_pair: boolean
@@ -145,7 +153,7 @@ export interface PairsSignal {
 }
 
 export interface MeanReversionSignal {
-  current_signal: string
+  current_signal: string | null
   current_price: number
   upper_band: number
   lower_band: number
@@ -155,27 +163,26 @@ export interface MeanReversionSignal {
 }
 
 export interface MomentumSignal {
-  current_signal: string
+  current_signal: string | null
   current_price: number
-  resistance: number
+  resistance: number | null
   is_breakout_today: boolean
   volume_surge: boolean
   volume_ratio: number
 }
 
-export interface MultiSignal {
+export interface RegimeChartPoint {
+  date: string
+  price: number
+  regime: string
+}
+
+export interface MarketRegime {
   ticker: string
-  mean_reversion: {
-    current_signal: string
-    current_z: number
-    pct_b: number
-  }
-  momentum: {
-    current_signal: string
-    is_breakout_today: boolean
-  }
-  signals_agree: boolean
-  combined_view: string
+  current_regime: string
+  regime_pct: { Bull: number; Sideways: number; Bear: number }
+  n_regimes: number
+  chart_data: RegimeChartPoint[]
 }
 
 // Optimizer Types
@@ -220,6 +227,7 @@ export interface MonteCarloPortfolioResult {
   median_return: number
   var_95: number
   message: string
+  histogram?: Array<{ bin: number; count: number }>
 }
 
 export interface MonteCarloStockResult {
@@ -227,6 +235,19 @@ export interface MonteCarloStockResult {
   probability_touch: number
   message: string
   current_price: number
+  histogram?: Array<{ bin: number; count: number }>
+  paths?: number[][]
+}
+
+export interface MonteCarloMacroResult {
+  probability_above_zero: number
+  var_95: number
+  cvar_95: number
+  mean_return: number
+  median_return: number
+  histogram: Array<{ bin: number; count: number }>
+  paths: number[][]
+  message: string
 }
 
 // Macro AI Types
@@ -240,10 +261,11 @@ export interface MacroModes {
 }
 
 export interface MacroAgent {
-  id: string
+  id: string | number
   name: string
   text: string
   elapsed: number
+  ok?: boolean
 }
 
 export interface VerdictCard {
@@ -268,4 +290,52 @@ export interface MacroAnalysisResult {
 export interface AnalystFeedback {
   feedback: string
   metrics_snapshot: Partial<PortfolioMetrics>
+}
+
+// Reports Types
+export interface DailyBriefResult {
+  report: string
+  price_data: { [ticker: string]: {
+    close: number
+    chg_pct: number
+    day_pnl: number
+    total_pnl: number
+    sector: string
+  }}
+  file_path: string
+  logs: string[]
+}
+
+export interface ReportFile {
+  name: string
+  type: 'daily' | 'equity' | 'industry'
+  size_kb: number
+  mtime: number
+}
+
+export interface Industry {
+  id: string
+  name_kr: string
+  name_en: string
+  tagline: string
+  benchmark: string
+  coverage: string
+  icon: string
+}
+
+export interface EquityReportResult {
+  ticker: string
+  company_name: string
+  sections: { [key: string]: string }
+  raw: string
+  file_path: string
+  telegram_sent: boolean
+}
+
+export interface IndustryReportResult {
+  industry_id: string
+  sections: { [key: string]: string }
+  raw: string
+  file_path: string
+  telegram_sent: boolean
 }

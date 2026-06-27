@@ -297,7 +297,7 @@ def generate_proxy_factors(
     smb = 0.15 * mkt + rng.normal(0, 0.006, n)
     hml = -0.10 * mkt + rng.normal(0, 0.006, n)
     mom = 0.05  * mkt + rng.normal(0, 0.007, n)
-    return pd.DataFrame({"Market": mkt, "SMB(Size)": smb, "HML(Value)": hml, "MOM(Momentum)": mom})
+    return pd.DataFrame({"Market": mkt, "SMB": smb, "HML": hml, "MOM": mom})
 
 
 def factor_analysis(

@@ -9,7 +9,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.routers import portfolio, market, macro, signals, optimizer
+from backend.routers import portfolio, market, macro, signals, optimizer, reports
 
 app = FastAPI(
     title="Personal Financial Platform API",
@@ -39,6 +39,7 @@ app.include_router(market.router)
 app.include_router(macro.router)
 app.include_router(signals.router)
 app.include_router(optimizer.router)
+app.include_router(reports.router)
 
 
 @app.get("/")

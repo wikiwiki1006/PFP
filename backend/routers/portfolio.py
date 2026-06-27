@@ -124,18 +124,21 @@ def get_trades():
 
 @router.post("/trades")
 def add_trade(body: AddTradeRequest):
-    """거래 이력 추가 + holdings 자동 업데이트."""
+    """거래 이력 추가 + holdings 자동 업데이트. BUY→ADD, SELL→SOLD 자동 변환."""
     holdings  = _load_holdings()
     trade_log = _load_trade_log()
     ticker = body.ticker.upper()
 
-    if ticker not in holdings and body.type == "ADD":
-        raise HTTPException(status_code=404, detail=f"{ticker} 미존재. 먼저 종목을 추가하세요.")
+    _type_map = {"BUY": "ADD", "SELL": "SOLD"}
+    trade_type = _type_map.get(body.type.upper(), body.type.upper())
+
+    if ticker not in holdings and trade_type == "ADD":
+        holdings[ticker] = {"q": 0.0, "avg": float(body.price or 0), "sector": "Other"}
 
     record = {
         "date":   datetime.now().strftime("%Y-%m-%d"),
         "ticker": ticker,
-        "type":   body.type,
+        "type":   trade_type,
         "q":      body.q,
         "price":  body.price,
         "memo":   body.memo,
@@ -144,11 +147,16 @@ def add_trade(body: AddTradeRequest):
 
     if ticker in holdings:
         q = float(body.q)
-        if body.type == "ADD":
-            holdings[ticker]["q"] = round(holdings[ticker]["q"] + q, 6)
-        elif body.type == "SOLD":
+        price = float(body.price or 0)
+        if trade_type == "ADD":
+            prev_q = holdings[ticker]["q"]
+            prev_avg = holdings[ticker].get("avg", price)
+            new_q = prev_q + q
+            holdings[ticker]["avg"] = round((prev_avg * prev_q + price * q) / new_q, 4) if new_q > 0 else price
+            holdings[ticker]["q"] = round(new_q, 6)
+        elif trade_type == "SOLD":
             holdings[ticker]["q"] = max(0.0, round(holdings[ticker]["q"] - q, 6))
-        elif body.type == "UPDATE":
+        elif trade_type == "UPDATE":
             holdings[ticker]["q"] = q
 
     _save_holdings(holdings)
@@ -168,7 +176,7 @@ def get_metrics():
         raise HTTPException(status_code=400, detail="보유 종목 없음")
 
     tickers = [t for t in holdings if t != "CASH"]
-    close_df = get_close_df(tickers)
+    close_df = get_close_df(tickers, period="1y", ttl=300)
 
     equity_curve = build_equity_curve(holdings, trade_log, close_df)
     return calculate_metrics(holdings, close_df, equity_curve)
@@ -187,21 +195,10 @@ def get_equity_curve(benchmark: Optional[str] = "sp500"):
         raise HTTPException(status_code=400, detail="보유 종목 없음")
 
     tickers = [t for t in holdings if t != "CASH"]
-    close_df = get_close_df(tickers)
+    close_df = get_close_df(tickers, period="2y", ttl=300)
 
     equity_curve = build_equity_curve(holdings, trade_log, close_df)
     records = equity_curve_to_records(equity_curve, close_df)
-
-    if benchmark == "nasdaq" and "^IXIC" in close_df.columns:
-        b = close_df["^IXIC"].reindex(equity_curve.index).ffill()
-        b_perf = (b / b.iloc[0] - 1) * 100
-        for rec in records:
-            date = rec["date"]
-            try:
-                rec["nasdaq"] = round(float(b_perf.loc[date]), 4)
-            except Exception:
-                rec["nasdaq"] = None
-
     return records
 
 
@@ -213,31 +210,30 @@ def get_holdings_detail_endpoint():
         return []
 
     tickers = [t for t in holdings if t != "CASH"]
-    close_df = get_close_df(tickers)
+    close_df = get_close_df(tickers, period="5d", ttl=60)
     return get_holdings_detail(holdings, close_df)
 
 
 @router.get("/sector-weights")
 def get_sector_weights():
-    """섹터별 평가액 비중."""
+    """섹터별 평가액 비중을 {sector: weight_fraction} 형태로 반환."""
     holdings = _load_holdings()
     if not holdings:
-        return []
+        return {}
 
     tickers = [t for t in holdings if t != "CASH"]
-    close_df = get_close_df(tickers) if tickers else None
+    close_df = get_close_df(tickers, period="5d", ttl=60) if tickers else None
 
-    rows = {}
+    rows: dict[str, float] = {}
     for t, info in holdings.items():
         price = 1.0 if t == "CASH" else (
-            float(close_df.iloc[-1].get(t, 0)) if close_df is not None else 0.0
+            float(close_df.iloc[-1].get(t, 0)) if close_df is not None and t in close_df.columns else 0.0
         )
         val = price * info["q"]
-        sector = info.get("sector", "기타")
+        sector = info.get("sector", "Other")
         rows[sector] = rows.get(sector, 0) + val
 
     total = sum(rows.values())
-    return [
-        {"sector": s, "value": round(v, 2), "weight_pct": round(v / total * 100, 2)}
-        for s, v in sorted(rows.items(), key=lambda x: -x[1])
-    ] if total > 0 else []
+    if total <= 0:
+        return {}
+    return {s: round(v / total, 4) for s, v in sorted(rows.items(), key=lambda x: -x[1])}

@@ -1,12 +1,13 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import Layout from './components/Layout'
-import Dashboard from './pages/Dashboard'
-import Portfolio from './pages/Portfolio'
-import Market from './pages/Market'
-import Signals from './pages/Signals'
+import Home from './pages/Home'
+import AlphaTerminal from './pages/AlphaTerminal'
+import MacroScenario from './pages/MacroScenario'
+import MonteCarlo from './pages/MonteCarlo'
 import Optimizer from './pages/Optimizer'
-import MacroAnalysis from './pages/MacroAnalysis'
+import TimingEngine from './pages/TimingEngine'
+import LensReport from './pages/LensReport'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -24,12 +25,13 @@ export default function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/" element={<Layout />}>
-            <Route index element={<Dashboard />} />
-            <Route path="portfolio" element={<Portfolio />} />
-            <Route path="market" element={<Market />} />
-            <Route path="signals" element={<Signals />} />
+            <Route index element={<Home />} />
+            <Route path="terminal" element={<AlphaTerminal />} />
+            <Route path="macro" element={<MacroScenario />} />
+            <Route path="monte-carlo" element={<MonteCarlo />} />
             <Route path="optimizer" element={<Optimizer />} />
-            <Route path="macro" element={<MacroAnalysis />} />
+            <Route path="timing" element={<TimingEngine />} />
+            <Route path="lens" element={<LensReport />} />
           </Route>
         </Routes>
       </BrowserRouter>

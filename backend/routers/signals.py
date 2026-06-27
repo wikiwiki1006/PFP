@@ -21,6 +21,7 @@ from backend.services.trading_signals import (
     pairs_trading_signal,
     mean_reversion_signal,
     momentum_breakout_signal,
+    detect_market_regime,
 )
 
 router = APIRouter(prefix="/api/signals", tags=["signals"])
@@ -39,13 +40,18 @@ def _load_holdings() -> dict:
     return raw.get("my_holdings", raw)
 
 
+_SEVERITY_MAP = {"위기": 5, "경고": 3, "정상": 1}
+
+
 def _doom_radar_dict() -> dict:
     macro = fetch_macro_doom_indicators()
     doom  = evaluate_doom_radar(macro["rate_spread"], macro["hy_spread"])
+    sev_str = doom.get("severity", "정상")
+    sev_num = _SEVERITY_MAP.get(sev_str, 2 if doom["is_doom"] else 1)
     return {
         "is_doom":     doom["is_doom"],
-        "severity":    doom["severity"],
-        "comment":     doom["comment"],
+        "severity":    sev_num,
+        "comment":     doom.get("comment", ""),
         "rate_spread": round(macro["rate_spread"], 3),
         "hy_spread":   round(macro["hy_spread"], 3),
         "source":      macro["source"],
@@ -249,4 +255,47 @@ def multi_signal(
             "STRONG SELL" if mr_signal == "SELL" and mb_signal is None else
             "MIXED"
         ),
+    }
+
+
+@router.get("/regime")
+def market_regime(
+    ticker: str = Query(default="^GSPC", description="분석 티커 (기본: S&P500)"),
+    period: str = Query(default="2y", description="기간 (1y/2y/3y)"),
+):
+    """K-means 기반 시장 국면 감지 (Bull/Sideways/Bear)."""
+    ticker   = ticker.upper()
+    close_df = get_close_df([ticker], period=period, ttl=300)
+
+    if ticker not in close_df.columns:
+        raise HTTPException(status_code=400, detail=f"{ticker} 데이터 없음")
+
+    price  = close_df[ticker].dropna()
+    result = detect_market_regime(price)
+
+    regime_counts = {}
+    if "regime_series" in result:
+        import pandas as pd
+        rs = pd.Series(result["regime_series"])
+        counts = rs.value_counts()
+        total  = len(rs)
+        for r_name in ["Bull", "Sideways", "Bear"]:
+            regime_counts[r_name] = round(counts.get(r_name, 0) / total * 100, 1) if total > 0 else 0.0
+
+    chart_data = []
+    if "regime_series" in result and close_df is not None:
+        price_series = close_df[ticker].dropna()
+        for i, (date, regime) in enumerate(zip(price_series.index, result.get("regime_series", []))):
+            chart_data.append({
+                "date":   date.strftime("%Y-%m-%d"),
+                "price":  round(float(price_series.iloc[i]), 2),
+                "regime": regime,
+            })
+
+    return {
+        "ticker":          ticker,
+        "current_regime":  result.get("current_regime", "Unknown"),
+        "regime_pct":      regime_counts,
+        "n_regimes":       result.get("n_regimes", 3),
+        "chart_data":      chart_data[-252:],
     }

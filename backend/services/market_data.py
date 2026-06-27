@@ -2,7 +2,7 @@
 services/market_data.py
 ────────────────────────
 yfinance / FRED 데이터 수집. Streamlit 의존 없음.
-캐시는 functools.lru_cache + TTL 방식으로 처리.
+캐시는 TTL 방식으로 처리.
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import pandas as pd
 import yfinance as yf
 
 
-# ── TTL 캐시 (Streamlit st.cache_data 없이 동일 효과) ──────────────────────────
+# ── TTL 캐시 ──────────────────────────────────────────────────────────────────
 
 _cache: dict[str, tuple[float, Any]] = {}
 
@@ -36,53 +36,62 @@ def clear_cache():
 
 # ── 시세 ────────────────────────────────────────────────────────────────────────
 
+SNAPSHOT_TICKERS = ["SPY", "QQQ", "BTC-USD", "^VIX", "NVDA", "AAPL", "MSFT"]
+
 ALWAYS_FETCH = [
     "^GSPC", "^IXIC", "^KS11", "^KQ11",
     "XLK", "XLF", "XLE", "XLY", "XLV", "XLI", "XLB",
     "BTC-USD", "GC=F", "^VIX", "^TNX", "^IRX", "CL=F",
-    "USDKRW=X", "SPY",
+    "USDKRW=X", "SPY", "QQQ", "NVDA", "AAPL", "MSFT",
 ]
 
 GICS_SECTOR_ETFS = [
-    ("TECHNOLOGY",          "XLK"),
-    ("FINANCIALS",          "XLF"),
-    ("COMMUNICATION",       "XLC"),
-    ("CONSUMER_DISC",       "XLY"),
-    ("HEALTHCARE",          "XLV"),
-    ("INDUSTRIALS",         "XLI"),
-    ("CONSUMER_STAPLES",    "XLP"),
-    ("ENERGY",              "XLE"),
-    ("UTILITIES",           "XLU"),
-    ("MATERIALS",           "XLB"),
-    ("REAL_ESTATE",         "XLRE"),
+    ("TECHNOLOGY",        "XLK"),
+    ("FINANCIALS",        "XLF"),
+    ("COMMUNICATION",     "XLC"),
+    ("CONSUMER_DISC",     "XLY"),
+    ("HEALTHCARE",        "XLV"),
+    ("INDUSTRIALS",       "XLI"),
+    ("CONSUMER_STAPLES",  "XLP"),
+    ("ENERGY",            "XLE"),
+    ("UTILITIES",         "XLU"),
+    ("MATERIALS",         "XLB"),
+    ("REAL_ESTATE",       "XLRE"),
 ]
 
 SECTOR_ETF_TICKERS = [etf for _, etf in GICS_SECTOR_ETFS]
 
 
-def get_close_df(tickers: list[str], period: str = "5y", ttl: int = 300) -> pd.DataFrame:
+def get_close_df(tickers: list[str], period: str = "2y", ttl: int = 300) -> pd.DataFrame:
     all_tickers = list(set(tickers + ALWAYS_FETCH))
     key = f"close_{','.join(sorted(all_tickers))}_{period}"
 
     def _fetch():
         data = yf.download(all_tickers, period=period, progress=False, auto_adjust=True)
-        return data["Close"].ffill()
+        if isinstance(data.columns, pd.MultiIndex):
+            return data["Close"].ffill()
+        return data.ffill()
 
     return _cached(key, ttl, _fetch)
 
 
-def get_sector_etf_df(ttl: int = 60) -> pd.DataFrame:
+def _get_sector_etf_df_1mo(ttl: int = 300) -> pd.DataFrame:
     def _fetch():
-        data = yf.download(SECTOR_ETF_TICKERS, period="5d", progress=False, auto_adjust=True)
-        return data["Close"].ffill()
+        data = yf.download(SECTOR_ETF_TICKERS, period="1mo", progress=False, auto_adjust=True)
+        if isinstance(data.columns, pd.MultiIndex):
+            return data["Close"].ffill()
+        return data.ffill()
+    return _cached("sector_etf_1mo", ttl, _fetch)
 
-    return _cached("sector_etf", ttl, _fetch)
+
+def get_sector_etf_df(ttl: int = 60) -> pd.DataFrame:
+    return _get_sector_etf_df_1mo(ttl)
 
 
 def get_sector_changes() -> dict[str, float]:
-    """{ 'XLK': 1.23, 'XLF': -0.45, ... } 형태로 섹터 ETF 등락률 반환."""
+    """{ 'XLK': 1.23, 'XLF': -0.45, ... } 형태로 섹터 ETF 1일 등락률 반환."""
     try:
-        df = get_sector_etf_df()
+        df = _get_sector_etf_df_1mo()
         if df.empty or len(df) < 2:
             return {}
         cur, prev = df.iloc[-1], df.iloc[-2]
@@ -98,24 +107,36 @@ def get_sector_changes() -> dict[str, float]:
 
 
 def get_sector_table() -> list[dict]:
-    """섹터 ETF 상세 테이블: [{ sector, ticker, price, chg_pct }, ...]"""
+    """섹터 ETF 상세 테이블: [{ sector, etf, price, change_1d_pct, change_1w_pct, change_1m_pct }, ...]"""
     try:
-        df = get_sector_etf_df()
+        df = _get_sector_etf_df_1mo()
         if df.empty or len(df) < 2:
             return []
-        cur, prev = df.iloc[-1], df.iloc[-2]
+
+        cur = df.iloc[-1]
+        prev_1d = df.iloc[-2]
+        prev_1w = df.iloc[-6] if len(df) >= 6 else df.iloc[0]
+        prev_1m = df.iloc[0]
+
+        def _chg(c, p):
+            if pd.isna(c) or pd.isna(p) or float(p) == 0:
+                return 0.0
+            return round((float(c) / float(p) - 1) * 100, 2)
+
         rows = []
         for label, etf in GICS_SECTOR_ETFS:
             if etf not in df.columns:
                 continue
-            c, p = cur.get(etf), prev.get(etf)
-            if pd.isna(c) or pd.isna(p) or p == 0:
+            c = cur.get(etf)
+            if pd.isna(c):
                 continue
             rows.append({
-                "sector": label,
-                "ticker": etf,
-                "price": round(float(c), 2),
-                "chg_pct": round((float(c) / float(p) - 1) * 100, 2),
+                "sector":        label,
+                "etf":           etf,
+                "price":         round(float(c), 2),
+                "change_1d_pct": _chg(c, prev_1d.get(etf)),
+                "change_1w_pct": _chg(c, prev_1w.get(etf)),
+                "change_1m_pct": _chg(c, prev_1m.get(etf)),
             })
         return rows
     except Exception:
@@ -128,24 +149,56 @@ def get_fred_macro(ttl: int = 3600) -> dict:
     def _fetch():
         try:
             import pandas_datareader.data as web
-            start = datetime.now() - timedelta(days=90)
-            df = web.DataReader(["FEDFUNDS", "UNRATE", "DGS10", "DGS2"], "fred", start).ffill().dropna()
-            y10 = float(df["DGS10"].iloc[-1])
-            y2  = float(df["DGS2"].iloc[-1])
+            start = datetime.now() - timedelta(days=500)
+            series = ["FEDFUNDS", "UNRATE", "DGS10", "DGS2", "CPIAUCSL", "A191RL1Q225SBEA", "BAMLH0A0HYM2"]
+            df = web.DataReader(series, "fred", start)
+
+            def _last(col):
+                s = df[col].dropna() if col in df else pd.Series(dtype=float)
+                return float(s.iloc[-1]) if len(s) else None
+
+            fed_rate     = _last("FEDFUNDS") or 5.33
+            unemployment = _last("UNRATE")   or 3.9
+            y10          = _last("DGS10")    or 4.2
+            y2           = _last("DGS2")     or 4.5
+            t10y2y       = round(y10 - y2, 3)
+
+            cpi = 0.0
+            if "CPIAUCSL" in df:
+                cpi_s = df["CPIAUCSL"].dropna()
+                if len(cpi_s) >= 13:
+                    cpi = round((float(cpi_s.iloc[-1]) / float(cpi_s.iloc[-13]) - 1) * 100, 2)
+                elif len(cpi_s) > 0:
+                    cpi = 3.4
+
+            gdp = 0.0
+            if "A191RL1Q225SBEA" in df:
+                gdp_s = df["A191RL1Q225SBEA"].dropna()
+                if len(gdp_s) > 0:
+                    gdp = round(float(gdp_s.iloc[-1]), 2)
+
+            hy_raw = _last("BAMLH0A0HYM2") or 3.5
+            bamlh0a0hym2 = round(hy_raw * 100, 1)
+
             return {
-                "fed_rate":     float(df["FEDFUNDS"].iloc[-1]),
-                "unemployment": float(df["UNRATE"].iloc[-1]),
-                "y10": y10,
-                "y2":  y2,
-                "spread_10_2": round(y10 - y2, 3),
-                "source": "FRED",
+                "fed_rate":      round(fed_rate, 2),
+                "unemployment":  round(unemployment, 2),
+                "cpi":           cpi,
+                "gdp":           gdp,
+                "y10":           round(y10, 3),
+                "y2":            round(y2, 3),
+                "t10y2y":        t10y2y,
+                "bamlh0a0hym2":  bamlh0a0hym2,
+                "source":        "FRED",
             }
         except Exception:
             return {
                 "fed_rate": 5.33, "unemployment": 3.9,
+                "cpi": 3.4, "gdp": 2.1,
                 "y10": 4.2, "y2": 4.5,
-                "spread_10_2": round(4.2 - 4.5, 3),
-                "source": "기본값(FRED 접속실패)",
+                "t10y2y": round(4.2 - 4.5, 3),
+                "bamlh0a0hym2": 350.0,
+                "source": "fallback",
             }
 
     return _cached("fred_macro", ttl, _fetch)
@@ -171,7 +224,7 @@ def get_doom_radar(ttl: int = 300) -> dict:
             reasons.append(f"HY스프레드 급등({hy_spread:.1f}%)")
 
         return {
-            "is_doom":    is_doom,
+            "is_doom":     is_doom,
             "rate_spread": rate_spread,
             "hy_spread":   hy_spread,
             "reason":      " / ".join(reasons) if reasons else "정상 범위",
@@ -192,20 +245,27 @@ def get_portfolio_news(tickers: list[str], max_per: int = 2, max_macro: int = 4,
             out = []
             for n in news_list[:max_n]:
                 content = n.get("content", n)
-                title = content.get("title") or n.get("title")
+                headline = content.get("title") or n.get("title") or n.get("headline")
+                url = (
+                    (content.get("canonicalUrl") or {}).get("url")
+                    or content.get("url")
+                    or n.get("link")
+                    or n.get("url")
+                    or ""
+                )
                 ts = content.get("pubDate") or n.get("providerPublishTime")
-                if not title:
+                if not headline:
                     continue
                 if isinstance(ts, str):
                     try:
-                        pub_dt = pd.to_datetime(ts)
+                        pub_unix = int(pd.to_datetime(ts).timestamp())
                     except Exception:
-                        pub_dt = pd.Timestamp.now()
+                        pub_unix = int(datetime.now().timestamp())
                 elif isinstance(ts, (int, float)):
-                    pub_dt = pd.to_datetime(ts, unit="s")
+                    pub_unix = int(ts)
                 else:
-                    pub_dt = pd.Timestamp.now()
-                out.append({"ticker": tag, "title": title.strip(), "time": pub_dt})
+                    pub_unix = int(datetime.now().timestamp())
+                out.append({"ticker": tag, "headline": headline.strip(), "url": url, "datetime": pub_unix})
             return out
 
         for t in tickers:
@@ -222,16 +282,8 @@ def get_portfolio_news(tickers: list[str], max_per: int = 2, max_macro: int = 4,
             except Exception:
                 continue
 
-        items.sort(key=lambda x: x["time"], reverse=True)
-        return [
-            {
-                "ticker":   x["ticker"],
-                "title":    x["title"],
-                "time":     x["time"].isoformat() if hasattr(x["time"], "isoformat") else str(x["time"]),
-                "is_macro": x["ticker"] == "MACRO",
-            }
-            for x in items[:18]
-        ]
+        items.sort(key=lambda x: x["datetime"], reverse=True)
+        return items[:18]
 
     return _cached(key, ttl, _fetch)
 
@@ -244,7 +296,9 @@ def get_earnings_dividends(tickers: list[str], ttl: int = 3600) -> list[dict]:
     def _fetch():
         result = []
         for t in tickers:
-            earn_date = div_date = div_yield = "N/A"
+            earn_date = "N/A"
+            div_date  = "-"
+            div_yield = "0%"
             try:
                 tk = yf.Ticker(t)
                 try:
@@ -260,8 +314,14 @@ def get_earnings_dividends(tickers: list[str], ttl: int = 3600) -> list[dict]:
                     if len(divs) > 0:
                         div_date = divs.index[-1].strftime("%b %d")
                     dy = (tk.info or {}).get("dividendYield")
-                    if dy:
-                        div_yield = f"{dy*100:.2f}%" if dy < 1 else f"{dy:.2f}%"
+                    if dy and dy > 0:
+                        # yfinance may return decimal (0.0047) or percent (0.47) form.
+                        # Values < 0.10 are almost certainly raw decimals → multiply by 100.
+                        # Values >= 0.10 are already in percent form → use directly.
+                        pct = dy * 100 if dy < 0.10 else dy
+                        div_yield = f"{pct:.2f}%"
+                    else:
+                        div_yield = "0%"
                 except Exception:
                     pass
             except Exception:
@@ -275,35 +335,31 @@ def get_earnings_dividends(tickers: list[str], ttl: int = 3600) -> list[dict]:
 # ── 시장 스냅샷 ─────────────────────────────────────────────────────────────────
 
 def get_market_snapshot(close_df: pd.DataFrame) -> dict:
-    """현재 주요 지수/자산 현재가 + 전일대비 등락률."""
+    """WATCH_TICKERS 현재가/전일대비를 {prices: {ticker: {...}}, timestamp} 형태로 반환."""
     if close_df.empty or len(close_df) < 2:
-        return {}
+        return {"prices": {}, "timestamp": datetime.now().isoformat()}
 
     cur, prev = close_df.iloc[-1], close_df.iloc[-2]
+    prices = {}
 
-    def _val(ticker):
+    for ticker in SNAPSHOT_TICKERS:
         if ticker not in close_df.columns:
-            return None, None
+            continue
         c = cur.get(ticker)
         p = prev.get(ticker)
         if pd.isna(c):
-            return None, None
-        chg = (float(c) / float(p) - 1) * 100 if (p and not pd.isna(p)) else None
-        return float(c), chg
-
-    sp500, sp500_chg       = _val("^GSPC")
-    nasdaq, nasdaq_chg     = _val("^IXIC")
-    kospi, kospi_chg       = _val("^KS11")
-    vix, _                 = _val("^VIX")
-    btc, _                 = _val("BTC-USD")
-    gold, _                = _val("GC=F")
-    wti, _                 = _val("CL=F")
-    usd_krw, _             = _val("USDKRW=X")
+            continue
+        c_f = float(c)
+        p_f = float(p) if p is not None and not pd.isna(p) else c_f
+        change_1d = round(c_f - p_f, 2)
+        change_1d_pct = round((c_f / p_f - 1) * 100, 4) if p_f != 0 else 0.0
+        prices[ticker] = {
+            "price":        round(c_f, 2),
+            "change_1d":    change_1d,
+            "change_1d_pct": change_1d_pct,
+        }
 
     return {
-        "sp500": sp500, "sp500_chg": sp500_chg,
-        "nasdaq": nasdaq, "nasdaq_chg": nasdaq_chg,
-        "kospi": kospi, "kospi_chg": kospi_chg,
-        "vix": vix, "btc": btc, "gold": gold,
-        "wti": wti, "usd_krw": usd_krw,
+        "prices":    prices,
+        "timestamp": datetime.now().isoformat(),
     }
