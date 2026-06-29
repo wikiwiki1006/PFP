@@ -46,10 +46,10 @@ class AddTradeRequest(BaseModel):
     q: float
     price: Optional[float] = None
     memo: Optional[str] = None
+    date: Optional[str] = None   # YYYY-MM-DD, 없으면 오늘
 
 
 class UpdateHoldingRequest(BaseModel):
-    ticker: str
     q: float
     avg: float
     sector: Optional[str] = None

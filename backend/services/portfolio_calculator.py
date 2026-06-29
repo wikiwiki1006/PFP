@@ -6,8 +6,19 @@ Streamlit / yfinance 의존 없음 — 순수 NumPy/Pandas.
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pandas as pd
+
+
+def _safe(v, default: float = 0.0) -> float:
+    """NaN/Inf/None → default. JSON-safe 숫자 보장."""
+    try:
+        f = float(v)
+        return f if math.isfinite(f) else default
+    except (TypeError, ValueError):
+        return default
 
 
 # ── 에쿼티 커브 ────────────────────────────────────────────────────────────────
@@ -47,10 +58,10 @@ def build_equity_curve(
                 if trade_type in ("ADD", "BUY"):
                     running += q
                 elif trade_type in ("SOLD", "SELL"):
-                    running -= q
+                    running = max(0.0, running - q)
                 elif trade_type == "UPDATE":
                     running = q
-                qty_series.loc[qty_series.index >= row["date"]] = running
+                qty_series.loc[qty_series.index >= row["date"]] = max(0.0, running)
             holdings_matrix[t] = qty_series
 
         for t in stock_tickers:
@@ -73,8 +84,7 @@ def equity_curve_to_records(
     benchmark_df: pd.DataFrame | None = None,
 ) -> list[dict]:
     """에쿼티 커브를 API 응답용 레코드 리스트로 변환. value/benchmark_value 모두 달러 금액."""
-    # Strip leading near-zero entries (days before the first real investment).
-    # Any entry worth less than 0.1 % of the peak is treated as "pre-investment".
+    # 매수 이전 0인 구간을 제거 — 차트는 항상 첫 투자일부터 시작
     peak = float(curve.max()) if not curve.empty else 0.0
     threshold = peak * 0.001
     meaningful = curve[curve > threshold]
@@ -174,12 +184,12 @@ def calculate_metrics(
     stock_tickers = [t for t in holdings if t != "CASH" and t in close_df.columns]
     cash_val = holdings.get("CASH", {}).get("q", 0)
 
-    total_equity  = sum(_price(t)      * holdings[t]["q"] for t in stock_tickers) + cash_val
-    prev_equity   = sum(_prev_price(t) * holdings[t]["q"] for t in stock_tickers) + cash_val
-    total_cost    = sum(holdings[t]["avg"] * holdings[t]["q"] for t in stock_tickers) + cash_val
-    today_chg_val = total_equity - prev_equity
-    today_chg_pct = (today_chg_val / prev_equity * 100) if prev_equity else 0.0
-    total_rtn     = (total_equity / total_cost - 1) * 100 if total_cost else 0.0
+    total_equity  = _safe(sum(_price(t)      * holdings[t]["q"] for t in stock_tickers) + cash_val)
+    prev_equity   = _safe(sum(_prev_price(t) * holdings[t]["q"] for t in stock_tickers) + cash_val)
+    total_cost    = _safe(sum(_safe(holdings[t]["avg"]) * _safe(holdings[t]["q"]) for t in stock_tickers) + cash_val)
+    today_chg_val = _safe(total_equity - prev_equity)
+    today_chg_pct = _safe((today_chg_val / prev_equity * 100) if prev_equity else 0.0)
+    total_rtn     = _safe((total_equity / total_cost - 1) * 100 if total_cost else 0.0)
 
     def _perf(days):
         if len(equity_curve) >= days + 1:
@@ -228,38 +238,40 @@ def get_holdings_detail(holdings: dict, close_df: pd.DataFrame) -> list[dict]:
     prev = close_df.iloc[-2]
 
     total_equity = sum(
-        float(curr.get(t, 0)) * info["q"]
+        _safe(curr.get(t, 0)) * _safe(info["q"])
         for t, info in holdings.items() if t != "CASH" and t in close_df.columns
-    ) + holdings.get("CASH", {}).get("q", 0)
+    ) + _safe(holdings.get("CASH", {}).get("q", 0))
+    total_equity = _safe(total_equity)
 
     rows = []
     for t, info in holdings.items():
         if t == "CASH":
-            price = 1.0
+            price   = 1.0
             chg_pct = 0.0
             pnl_pct = 0.0
         else:
-            price = float(curr.get(t, 0)) if t in close_df.columns else 0.0
-            p_price = float(prev.get(t, price)) if t in prev.index else price
-            chg_pct = (price / p_price - 1) * 100 if p_price else 0.0
-            pnl_pct = (price / info["avg"] - 1) * 100 if info["avg"] > 0 else 0.0
+            price   = _safe(curr.get(t, 0)) if t in close_df.columns else 0.0
+            p_price = _safe(prev.get(t, price)) if t in prev.index else price
+            chg_pct = _safe((price / p_price - 1) * 100) if p_price else 0.0
+            avg     = _safe(info.get("avg", 0))
+            pnl_pct = _safe((price / avg - 1) * 100) if avg > 0 else 0.0
 
-        value = price * info["q"]
-        avg_cost = float(info["avg"])
-        qty = float(info["q"])
-        pnl = round((price - avg_cost) * qty, 2)
+        avg_cost = _safe(info.get("avg", 0))
+        qty      = _safe(info.get("q", 0))
+        value    = _safe(price * qty)
+        pnl      = _safe((price - avg_cost) * qty)
 
         rows.append({
             "ticker":        t,
             "sector":        info.get("sector", "Other"),
-            "qty":           qty,
+            "qty":           round(qty, 4),
             "avg_cost":      round(avg_cost, 2),
             "current_price": round(price, 2),
             "chg_pct":       round(chg_pct, 4),
             "pnl_pct":       round(pnl_pct, 4),
-            "pnl":           pnl,
+            "pnl":           round(pnl, 2),
             "market_value":  round(value, 2),
-            "weight":        round(value / total_equity, 4) if total_equity else 0.0,
+            "weight":        round(_safe(value / total_equity), 4) if total_equity else 0.0,
         })
     return rows
 

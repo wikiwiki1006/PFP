@@ -5,15 +5,14 @@ routers/optimizer.py
 """
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel
 
+from backend.db.portfolio_repo import get_holdings as db_get_holdings
 from backend.services.market_data import get_close_df
 from backend.services.optimizer import (
     optimize_max_sharpe,
@@ -32,16 +31,9 @@ from backend.services.monte_carlo import (
 
 router = APIRouter(prefix="/api/optimizer", tags=["optimizer"])
 
-_DATA_DIR = Path(__file__).parent.parent.parent / "pfp" / "data"
-_DB_FILE  = _DATA_DIR / "holdings.json"
 
-
-def _load_holdings() -> dict:
-    if not _DB_FILE.exists():
-        return {}
-    with open(_DB_FILE) as f:
-        raw = json.load(f)
-    return raw.get("my_holdings", raw)
+def _uid(x: Optional[str]) -> str:
+    return (x or "default").strip() or "default"
 
 
 def _fetch_returns(tickers: list[str], period: str = "1y") -> pd.DataFrame:
@@ -117,7 +109,7 @@ class MacroMCRequest(BaseModel):
 @router.post("/max-sharpe")
 def max_sharpe(req: MaxSharpeRequest):
     """과거 데이터 기반 Max Sharpe Ratio 포트폴리오 최적화."""
-    tickers = req.tickers or [t for t in _load_holdings() if t != "CASH"]
+    tickers = req.tickers or [t for t in db_get_holdings("default") if t != "CASH"]
     if not tickers:
         raise HTTPException(status_code=400, detail="보유 종목 없음")
 
@@ -132,8 +124,9 @@ def max_sharpe(req: MaxSharpeRequest):
 @router.post("/black-litterman")
 def black_litterman(req: BlackLittermanRequest):
     """Black-Litterman + 시장 국면 시그널 결합 최적화."""
-    holdings = _load_holdings()
+    holdings = db_get_holdings("default")
     tickers  = req.tickers or [t for t in holdings if t != "CASH"]
+
     if not tickers:
         raise HTTPException(status_code=400, detail="보유 종목 없음")
 
@@ -161,7 +154,7 @@ def black_litterman(req: BlackLittermanRequest):
 @router.post("/factor-analysis")
 def run_factor_analysis(req: FactorAnalysisRequest):
     """Fama-French 스타일 4팩터 분석 (대용 팩터 자동 생성)."""
-    tickers = req.tickers or [t for t in _load_holdings() if t != "CASH"]
+    tickers = req.tickers or [t for t in db_get_holdings("default") if t != "CASH"]
     if not tickers:
         raise HTTPException(status_code=400, detail="보유 종목 없음")
 
@@ -189,7 +182,7 @@ def run_factor_analysis(req: FactorAnalysisRequest):
 @router.post("/montecarlo/portfolio")
 def mc_portfolio(req: PortfolioMCRequest):
     """포트폴리오 목표 수익률 달성 확률 (기본 GBM)."""
-    tickers = req.tickers or [t for t in _load_holdings() if t != "CASH"]
+    tickers = req.tickers or [t for t in db_get_holdings("default") if t != "CASH"]
     if not tickers:
         raise HTTPException(status_code=400, detail="보유 종목 없음")
 
@@ -242,7 +235,7 @@ def mc_stock(req: StockMCRequest):
 @router.post("/montecarlo/macro")
 def mc_macro(req: MacroMCRequest):
     """매크로 시나리오(금리·환율 충격) 반영 점프-확산 몬테카를로."""
-    tickers = req.tickers or [t for t in _load_holdings() if t != "CASH"]
+    tickers = req.tickers or [t for t in db_get_holdings("default") if t != "CASH"]
     if not tickers:
         raise HTTPException(status_code=400, detail="보유 종목 없음")
 

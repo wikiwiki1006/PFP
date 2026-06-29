@@ -126,8 +126,18 @@ def analyst_feedback(req: AnalystFeedbackRequest):
 @router.get("/analyst-feedback/auto")
 def analyst_feedback_auto():
     """포트폴리오 + 시장 데이터를 자동으로 수집해 AI 피드백 생성."""
-    holdings  = _load_holdings()
-    trade_log = _load_trade_log()
+    from backend.db.portfolio_repo import (
+        get_holdings as _db_get_holdings,
+        get_trade_log as _db_get_trade_log,
+    )
+    from backend.db import is_available as _db_ok
+
+    if _db_ok():
+        holdings  = _db_get_holdings("default")
+        trade_log = _db_get_trade_log("default")
+    else:
+        holdings  = _load_holdings()
+        trade_log = _load_trade_log()
 
     if not holdings:
         raise HTTPException(status_code=400, detail="보유 종목 없음")

@@ -46,12 +46,13 @@ export interface SectorWeights {
 }
 
 export interface Trade {
+  id?: number
   date: string
   ticker: string
   type: 'ADD' | 'SOLD' | 'UPDATE' | 'BUY' | 'SELL'
   q: number
-  price: number
-  memo?: string
+  price: number | null
+  memo?: string | null
 }
 
 export interface TradeForm {
@@ -60,6 +61,7 @@ export interface TradeForm {
   q: number
   price: number
   memo?: string
+  date?: string   // YYYY-MM-DD, 없으면 서버가 오늘로 처리
 }
 
 // Market Types

@@ -1,0 +1,219 @@
+"""
+backend/db/scheduler.py
+─────────────────────────
+공통 시장 데이터 백그라운드 갱신 스케줄러.
+
+갱신 주기:
+  - market_snapshot (현재가)       : 60초마다
+  - market_prices (일별 종가)      : 12시간마다 (stale 티커만)
+  - macro_data / doom_radar       : 60분마다
+  - sector_data                   : 5분마다
+"""
+from __future__ import annotations
+
+import logging
+import threading
+import time
+
+logger = logging.getLogger(__name__)
+
+_stop_event = threading.Event()
+_thread: threading.Thread | None = None
+
+# 주기 (초)
+_SNAPSHOT_INTERVAL   = 60        # 1분
+_SECTOR_INTERVAL     = 300       # 5분
+_MACRO_INTERVAL      = 3600      # 1시간
+_HISTORY_INTERVAL    = 43200     # 12시간
+
+
+def start():
+    global _thread
+    _stop_event.clear()
+    _thread = threading.Thread(target=_loop, name="pfp-scheduler", daemon=True)
+    _thread.start()
+    logger.info("백그라운드 스케줄러 시작 (snapshot 60s / sector 5m / macro 1h / history 12h)")
+
+
+def stop():
+    _stop_event.set()
+    logger.info("백그라운드 스케줄러 정지 요청")
+
+
+def _loop():
+    last_sector  = 0.0
+    last_macro   = 0.0
+    last_history = 0.0
+
+    while not _stop_event.is_set():
+        now = time.time()
+
+        # ① 스냅샷: 60초마다 (현재가 + 오늘치 종가)
+        _run_safe("snapshot", _update_snapshot)
+
+        # ② 섹터: 5분마다
+        if now - last_sector >= _SECTOR_INTERVAL:
+            _run_safe("sector", _update_sector)
+            last_sector = now
+
+        # ③ 매크로 + 도약 레이더: 1시간마다
+        if now - last_macro >= _MACRO_INTERVAL:
+            _run_safe("macro", _update_macro)
+            last_macro = now
+
+        # ④ 가격 이력: 12시간마다 (stale 티커만)
+        if now - last_history >= _HISTORY_INTERVAL:
+            _run_safe("history", _update_history)
+            last_history = now
+
+        _stop_event.wait(_SNAPSHOT_INTERVAL)
+
+
+def _run_safe(name: str, fn):
+    try:
+        fn()
+    except Exception as e:
+        logger.warning(f"스케줄러 작업 '{name}' 실패: {e}")
+
+
+# ── 개별 갱신 함수 ─────────────────────────────────────────────────────────────
+
+def _update_snapshot():
+    """ALWAYS_FETCH 티커의 최근 2일치 데이터 수집 → snapshot + prices 동시 갱신."""
+    import yfinance as yf
+    from backend.services.market_data import ALWAYS_FETCH, SECTOR_ETF_TICKERS
+    from backend.db.market_cache import save_snapshot, save_prices_to_db
+
+    tickers = list(set(ALWAYS_FETCH + SECTOR_ETF_TICKERS))
+    try:
+        data = yf.download(tickers, period="2d", progress=False, auto_adjust=True)
+        if data.empty:
+            return
+        close_df = (
+            data["Close"].ffill()
+            if hasattr(data.columns, "levels")
+            else data.ffill()
+        )
+        if close_df.empty or len(close_df) < 2:
+            return
+
+        # market_prices 오늘치 갱신
+        save_prices_to_db(close_df)
+
+        # market_snapshot 갱신
+        cur_row  = close_df.iloc[-1]
+        prev_row = close_df.iloc[-2]
+        snap = {}
+        for t in close_df.columns:
+            c = cur_row.get(t)
+            p = prev_row.get(t)
+            if c is None or (hasattr(c, '__float__') and c != c):  # NaN check
+                continue
+            import math
+            if math.isnan(float(c)):
+                continue
+            c_f = float(c)
+            p_f = float(p) if p is not None and not math.isnan(float(p)) else c_f
+            snap[str(t)] = {
+                "price":        round(c_f, 4),
+                "change_1d":    round(c_f - p_f, 4),
+                "change_1d_pct": round((c_f / p_f - 1) * 100, 4) if p_f else 0.0,
+            }
+        save_snapshot(snap)
+        logger.debug(f"snapshot 갱신 완료: {len(snap)}개 티커")
+    except Exception as e:
+        logger.warning(f"_update_snapshot yfinance 실패: {e}")
+
+
+def _update_sector():
+    """섹터 ETF 성과 데이터 갱신 → common_cache 저장."""
+    from backend.services.market_data import get_sector_table, get_sector_changes
+    from backend.db.market_cache import save_common
+
+    try:
+        table   = get_sector_table()
+        changes = get_sector_changes()
+        save_common("sector_table",   table,   ttl_seconds=_SECTOR_INTERVAL * 2)
+        save_common("sector_changes", changes, ttl_seconds=_SECTOR_INTERVAL * 2)
+        logger.debug("sector 갱신 완료")
+    except Exception as e:
+        logger.warning(f"_update_sector 실패: {e}")
+
+
+def _update_macro():
+    """FRED 매크로 + 도약 레이더 갱신 → common_cache 저장."""
+    from backend.services.market_data import get_fred_macro, get_doom_radar
+    from backend.db.market_cache import save_common
+
+    try:
+        macro = get_fred_macro(ttl=0)   # TTL=0 으로 강제 갱신
+        doom  = get_doom_radar(ttl=0)
+        save_common("macro_data",  macro, ttl_seconds=_MACRO_INTERVAL * 2)
+        save_common("doom_radar",  doom,  ttl_seconds=_MACRO_INTERVAL * 2)
+        logger.debug("macro/doom_radar 갱신 완료")
+    except Exception as e:
+        logger.warning(f"_update_macro 실패: {e}")
+
+
+def _update_history():
+    """2년치 가격 이력 stale 티커 재수집."""
+    from backend.services.market_data import ALWAYS_FETCH, SECTOR_ETF_TICKERS
+    from backend.db.market_cache import prefetch_tickers
+
+    tickers = list(set(ALWAYS_FETCH + SECTOR_ETF_TICKERS))
+    logger.info(f"가격 이력 갱신 시작: {len(tickers)}개 티커")
+    prefetch_tickers(tickers, period="2y")
+    logger.info("가격 이력 갱신 완료")
+
+
+# ── 사용자 개인 데이터 즉시 갱신 (API 요청 시 호출) ───────────────────────────
+
+def refresh_user_prices(tickers: list[str]):
+    """
+    사용자가 새로고침 버튼을 눌렀을 때 개인 포트폴리오 티커의 최신 가격 강제 수집.
+    """
+    import yfinance as yf
+    from backend.db.market_cache import save_prices_to_db, save_snapshot
+    from backend.services.market_data import _cache   # in-memory 캐시 무효화용
+
+    if not tickers:
+        return
+    try:
+        data = yf.download(tickers, period="5d", progress=False, auto_adjust=True)
+        if data.empty:
+            return
+        close_df = (
+            data["Close"].ffill()
+            if hasattr(data.columns, "levels")
+            else data.ffill()
+        )
+        if close_df.empty:
+            return
+        save_prices_to_db(close_df)
+
+        # 스냅샷도 갱신
+        if len(close_df) >= 2:
+            import math
+            cur_row, prev_row = close_df.iloc[-1], close_df.iloc[-2]
+            snap = {}
+            for t in close_df.columns:
+                c = cur_row.get(t)
+                p = prev_row.get(t)
+                if c is None or math.isnan(float(c)):
+                    continue
+                c_f = float(c)
+                p_f = float(p) if p is not None and not math.isnan(float(p)) else c_f
+                snap[str(t)] = {
+                    "price": round(c_f, 4),
+                    "change_1d": round(c_f - p_f, 4),
+                    "change_1d_pct": round((c_f / p_f - 1) * 100, 4) if p_f else 0.0,
+                }
+            save_snapshot(snap)
+
+        # in-memory 캐시 무효화 (해당 티커 포함 키 제거)
+        keys_to_del = [k for k in list(_cache.keys()) if any(t in k for t in tickers)]
+        for k in keys_to_del:
+            _cache.pop(k, None)
+        logger.info(f"사용자 개인 데이터 갱신 완료: {tickers}")
+    except Exception as e:
+        logger.warning(f"refresh_user_prices 실패: {e}")

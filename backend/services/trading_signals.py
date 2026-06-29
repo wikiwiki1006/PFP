@@ -19,18 +19,18 @@ SP500_NASDAQ_UNIVERSE = [
     "AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","TSLA","AVGO","COST",
     "NFLX","AMD","ADBE","QCOM","INTC","TXN","MU","AMAT","LRCX","KLAC",
     "SNPS","CDNS","MRVL","ORCL","CRM","PANW","CRWD","FTNT","DDOG","ZS",
-    "TEAM","WDAY","SNOW","MDB","NET","OKTA","HUBS","VEEV","ANSS","IDXX",
+    "TEAM","WDAY","SNOW","MDB","NET","OKTA","HUBS","VEEV","IDXX",
     "ISRG","REGN","VRTX","BIIB","GILD","AMGN","ILMN","MRNA","DXCM","EW",
     "JPM","BAC","WFC","GS","MS","BLK","SPGI","MCO","ICE","CME",
-    "BRK-B","V","MA","AXP","PYPL","SQ","COF","DFS","AIG","MET",
-    "UNH","CVS","HUM","CI","ELV","MCK","ABC","CAH","DHR","TMO",
+    "BRK-B","V","MA","AXP","PYPL","XYZ","COF","AIG","MET",
+    "UNH","CVS","HUM","CI","ELV","MCK","CAH","DHR","TMO",
     "ABT","MDT","SYK","BSX","BDX","ZBH","BAX","HCA","IQV","A",
     "XOM","CVX","COP","EOG","SLB","PSX","MPC","VLO","HAL","OXY",
     "LLY","PFE","MRK","BMY","JNJ","ABBV","ZTS","ALNY","INCY","JAZZ",
     "HD","LOW","TGT","WMT","EBAY","ETSY","CHWY",
     "BA","LMT","RTX","NOC","GD","TDG","HEI","KTOS",
     "GM","F","RIVN","ON","TE","APH","GLW","MPWR",
-    "ANET","CSCO","NTAP","PSTG","NTNX","HPE","DELL","WDC","STX",
+    "ANET","CSCO","NTAP","NTNX","HPE","DELL","WDC","STX",
 ]
 
 

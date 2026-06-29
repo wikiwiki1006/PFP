@@ -4,6 +4,9 @@ uvicorn[standard]>=0.29.0
 python-dotenv>=1.0.0
 pydantic>=2.0.0
 
+# PostgreSQL
+psycopg2-binary>=2.9.9
+
 # 데이터
 yfinance>=0.2.40
 pandas>=2.0.0

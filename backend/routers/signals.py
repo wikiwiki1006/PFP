@@ -5,13 +5,13 @@ routers/signals.py
 """
 from __future__ import annotations
 
-import json
-from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query
 
+from backend.db.portfolio_repo import get_holdings as db_get_holdings
 from backend.services.market_data import get_close_df
 from backend.services.trading_signals import (
     SP500_NASDAQ_UNIVERSE,
@@ -26,18 +26,11 @@ from backend.services.trading_signals import (
 
 router = APIRouter(prefix="/api/signals", tags=["signals"])
 
-_DATA_DIR = Path(__file__).parent.parent.parent / "pfp" / "data"
-_DB_FILE  = _DATA_DIR / "holdings.json"
-
 _scan_cache: dict = {}
 
 
-def _load_holdings() -> dict:
-    if not _DB_FILE.exists():
-        return {}
-    with open(_DB_FILE) as f:
-        raw = json.load(f)
-    return raw.get("my_holdings", raw)
+def _uid(x: Optional[str]) -> str:
+    return (x or "default").strip() or "default"
 
 
 _SEVERITY_MAP = {"위기": 5, "경고": 3, "정상": 1}
@@ -81,29 +74,63 @@ def scan_universe(
 
     extra    = []
     if include_portfolio:
-        extra = [t for t in _load_holdings() if t != "CASH"]
+        extra = [t for t in db_get_holdings("default") if t != "CASH"]
 
     universe = sorted(set(SP500_NASDAQ_UNIVERSE + extra))
 
+    import logging as _logging
+    _logger = _logging.getLogger(__name__)
+
     try:
-        data      = yf.download(universe, period="6mo", progress=False, auto_adjust=True)
-        price_df  = data["Close"].ffill()
-        volume_df = data["Volume"].ffill() if "Volume" in data.columns.get_level_values(0) else None
+        _yf_log = _logging.getLogger("yfinance")
+        _prev = _yf_log.level
+        _yf_log.setLevel(_logging.CRITICAL)
+        try:
+            data = yf.download(universe, period="6mo", progress=False, auto_adjust=True)
+        finally:
+            _yf_log.setLevel(_prev)
+
+        if data is None or data.empty:
+            raise HTTPException(status_code=503, detail="시장 데이터를 가져올 수 없습니다. 잠시 후 다시 시도하세요.")
+
+        # yfinance는 단일 티커 반환 시 flat DataFrame, 복수 시 MultiIndex 반환
+        if isinstance(data.columns, pd.MultiIndex):
+            lvl0 = data.columns.get_level_values(0)
+            close_raw  = data["Close"]  if "Close"  in lvl0 else pd.DataFrame()
+            volume_raw = data["Volume"] if "Volume" in lvl0 else None
+        else:
+            # flat 구조 (단일 티커 또는 버전 차이)
+            close_raw  = data[["Close"]]  if "Close"  in data.columns else pd.DataFrame()
+            volume_raw = data[["Volume"]] if "Volume" in data.columns else None
+
+        if not isinstance(close_raw, pd.DataFrame) or close_raw.empty:
+            raise HTTPException(status_code=503, detail="종가 데이터를 가져올 수 없습니다.")
+
+        price_df  = close_raw.ffill().dropna(axis=1, how="all")
+        volume_df = volume_raw.ffill() if volume_raw is not None else None
+
+        _logger.info(f"스캔 데이터 로드 완료: {price_df.shape[1]}개 티커 × {len(price_df)}일")
 
         raw = scan_universe_with_targets(price_df, volume_df, top_n=top_n)
 
         def _clean(picks: list[dict]) -> list[dict]:
             out = []
             for p in picks:
+                def _f(v):
+                    try:
+                        r = float(v)
+                        return r if (r == r and abs(r) != float('inf')) else None  # NaN/Inf → None
+                    except Exception:
+                        return None
                 out.append({
                     "ticker":   p.get("ticker", ""),
                     "method":   p.get("method", ""),
-                    "score":    round(float(p.get("score", 0)), 2),
-                    "entry":    round(float(p.get("entry", 0)), 2),
-                    "target":   round(float(p.get("target", 0)), 2),
-                    "stop":     round(float(p.get("stop", 0)), 2),
-                    "upside":   round(float(p["upside"]), 2)   if p.get("upside")   is not None else None,
-                    "downside": round(float(p["downside"]), 2) if p.get("downside") is not None else None,
+                    "score":    round(_f(p.get("score", 0)) or 0, 2),
+                    "entry":    round(_f(p.get("entry", 0)) or 0, 2),
+                    "target":   round(_f(p.get("target", 0)) or 0, 2),
+                    "stop":     round(_f(p.get("stop", 0)) or 0, 2),
+                    "upside":   round(_f(p["upside"]), 2)   if p.get("upside")   is not None else None,
+                    "downside": round(_f(p["downside"]), 2) if p.get("downside") is not None else None,
                     "reason":   p.get("reason", ""),
                 })
             return out
@@ -116,16 +143,17 @@ def scan_universe(
         }
         _scan_cache["last"] = result
         return result
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"스캔 실패: {e}")
+        _logger.error(f"스캔 실패 상세: {type(e).__name__}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"스캔 실패: {type(e).__name__}: {e}")
 
 
 @router.get("/scan/cached")
 def get_cached_scan():
-    """마지막 스캔 결과 반환 (재실행 없이 빠르게 조회)."""
-    if not _scan_cache.get("last"):
-        raise HTTPException(status_code=404, detail="스캔 결과 없음. POST /api/signals/scan 먼저 실행")
-    return _scan_cache["last"]
+    """마지막 스캔 결과 반환. 스캔 전이면 빈 결과 반환."""
+    return _scan_cache.get("last") or {"long_picks": [], "short_picks": [], "scanned": 0, "doom": None}
 
 
 @router.get("/pairs")

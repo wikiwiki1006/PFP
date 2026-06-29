@@ -47,6 +47,25 @@ export const addHolding = async (ticker: string, body: { q: number; avg: number;
 export const deleteHolding = async (ticker: string): Promise<void> =>
   { await api.delete(`/api/portfolio/holdings/${ticker}`) }
 
+export const updateTrade = async (id: number, body: {
+  date: string; ticker: string; type: string; q: number; price?: number; memo?: string
+}): Promise<void> =>
+  { await api.put(`/api/portfolio/trades/${id}`, body) }
+
+export const deleteTrade = async (id: number): Promise<void> =>
+  { await api.delete(`/api/portfolio/trades/${id}`) }
+
+export const getTickerPrice = async (ticker: string): Promise<{
+  ticker: string; price: number; name: string; currency: string; sector?: string
+}> =>
+  (await api.get('/api/portfolio/ticker-price', { params: { ticker } })).data
+
+export const searchTickers = async (q: string): Promise<{ ticker: string; name: string }[]> =>
+  (await api.get('/api/portfolio/ticker-search', { params: { q, limit: 5 } })).data
+
+export const autoDetectSectors = async (): Promise<{ updated: { ticker: string; sector: string }[]; count: number }> =>
+  (await api.post('/api/portfolio/auto-sector')).data
+
 // ── Market ─────────────────────────────────────────────────────────────────────
 export const getMarketSnapshot = async (): Promise<MarketSnapshot> =>
   (await api.get('/api/market/snapshot')).data

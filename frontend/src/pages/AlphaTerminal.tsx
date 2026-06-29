@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react'
+import React, { useState, useMemo, useRef, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   AreaChart, Area, PieChart, Pie, Cell, Sector,
@@ -8,7 +8,7 @@ import ReactMarkdown from 'react-markdown'
 import {
   Shield, Zap, MessageSquare, RefreshCw,
   Plus, Trash2, Edit3, Check, X, Play, FileText, ChevronRight,
-  PanelRightClose, PanelRightOpen, Download,
+  PanelRightClose, PanelRightOpen, Download, History,
 } from 'lucide-react'
 import {
   getPortfolioMetrics, getEquityCurve, getHoldingsDetail, getSectorWeights,
@@ -16,9 +16,24 @@ import {
   getSignalsDoomRadar, getAnalystFeedback, getCachedScan, runSignalScan,
   postTrade, updateHolding, deleteHolding, getHoldings,
   generateDailyBrief, getDailyBriefHistory, getDailyBriefFile,
-  getIndexPrices,
+  getIndexPrices, getTrades, updateTrade, deleteTrade, getTickerPrice, searchTickers,
+  autoDetectSectors,
 } from '@/api'
 import { cn } from '@/lib/utils'
+
+// null/NaN-safe 숫자 포맷터
+const fn = (v: number | null | undefined, d = 2) => ((v == null || isNaN(v as number)) ? 0 : v).toFixed(d)
+const fp = (v: number | null | undefined, d = 2, sign = true) => {
+  const n = (v == null || isNaN(v as number)) ? 0 : (v as number)
+  return sign ? `${n >= 0 ? '+' : ''}${n.toFixed(d)}%` : `${n.toFixed(d)}%`
+}
+const fv = (v: number | null | undefined) => (v == null || isNaN(v as number)) ? 0 : (v as number)
+
+const SECTORS = [
+  'Technology','Healthcare','Financials','Consumer Discretionary',
+  'Consumer Staples','Energy','Industrials','Materials',
+  'Real Estate','Utilities','Communication Services','Other',
+]
 
 const SECTOR_COLORS = [
   '#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6',
@@ -30,14 +45,29 @@ const SECTOR_COLORS = [
 function Marquee({ snapshot }: { snapshot: any }) {
   if (!snapshot?.prices) return null
   const pairs = Object.entries(snapshot.prices as Record<string, any>)
-  const seg = pairs.map(([t, v]) => {
-    const p: number = v.change_1d_pct
-    return `${t}  $${v.price.toFixed(2)}  ${p >= 0 ? '+' : ''}${p.toFixed(2)}%`
-  }).join('     ·     ')
+
+  const renderItems = (suffix = '') =>
+    pairs.map(([t, v]) => {
+      const p = fv(v?.change_1d_pct)
+      const col = p >= 0 ? '#ef4444' : '#3b82f6'
+      const price = fv(v?.price)
+      if (!price) return null  // 가격 없으면 표시 안 함
+      return (
+        <span key={t + suffix} className="inline-flex items-center gap-1 mr-6 font-mono text-[14px]">
+          <span className="font-bold text-[#e2e8f0]">{t}</span>
+          <span className="text-[#cbd5e1]">${fn(price)}</span>
+          <span style={{ color: col }}>{fp(p)}</span>
+        </span>
+      )
+    })
+
   return (
     <div className="overflow-hidden bg-[#070d18] border-b border-[#1e2d40] py-1.5 select-none">
-      <div className="whitespace-nowrap text-[12px] font-mono animate-marquee inline-block text-[#64748b]">
-        {seg + '     ·     ' + seg}
+      <div className="whitespace-nowrap animate-marquee inline-block">
+        {renderItems('')}
+        <span className="text-[#1e2d40] mr-6">·</span>
+        {renderItems('_2')}
+        <span className="text-[#1e2d40] mr-6">·</span>
       </div>
     </div>
   )
@@ -69,29 +99,47 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
     staleTime: 300_000,
   })
 
-  const data = useCallback((): { date: string; port: number; sp: number; nasdaq?: number }[] => {
+  // 날짜 기반 필터링 — 정확히 1M/3M/1Y 전부터 오늘까지
+  const filterByRange = (all: any[]) => {
+    if (range === 'ALL' || !all.length) return all
+    const today  = new Date()
+    const cutoff = new Date(today)
+    if (range === '1M')      cutoff.setMonth(today.getMonth() - 1)
+    else if (range === '3M') cutoff.setMonth(today.getMonth() - 3)
+    else if (range === '1Y') cutoff.setFullYear(today.getFullYear() - 1)
+    const cutStr = cutoff.toISOString().split('T')[0]
+    return all.filter(d => d.date >= cutStr)
+  }
+
+  const data = useMemo((): { date: string; port: number; sp: number; nasdaq?: number }[] => {
     const all: any[] = curveQ.data || []
-    const days = range === '1M' ? 21 : range === '3M' ? 63 : range === '1Y' ? 252 : all.length
-    const sliced = all.slice(-days)
-    if (sliced.length < 2) return []
-    const ip = sliced[0]?.value, ib = sliced[0]?.benchmark_value
-    if (!ip || !ib) return []
+    const sliced = filterByRange(all)
+    if (!sliced.length) return []
+    const ip = sliced[0]?.value
+    if (!ip || ip <= 0) return []
+    const ib = sliced[0]?.benchmark_value  // null일 수 있음
 
-    const nasdaqMap  = new Map((nasdaqQ.data || []).map(d => [d.date, d.close]))
-    const nasdaqBase = nasdaqMap.get(sliced[0].date) ?? [...nasdaqMap.values()][0]
+    const nasdaqMap  = new Map((nasdaqQ.data || []).map((d: any) => [d.date, d.close]))
+    const nasdaqBase = nasdaqMap.get(sliced[0].date) ?? [...nasdaqMap.values()][0] as number | undefined
 
-    return sliced.map(d => {
-      const nc = nasdaqMap.get(d.date)
+    const safeCalc = (n: number, base: number): number => {
+      if (!base || !isFinite(base) || !isFinite(n)) return 0
+      const r = (n / base - 1) * 100
+      return isNaN(r) || !isFinite(r) ? 0 : +r.toFixed(2)
+    }
+
+    return sliced.map((d: any) => {
+      const nc = nasdaqMap.get(d.date) as number | undefined
       return {
         date:   d.date,
-        port:   +((d.value / ip - 1) * 100).toFixed(2),
-        sp:     +((d.benchmark_value / ib - 1) * 100).toFixed(2),
-        nasdaq: nc && nasdaqBase ? +((nc / nasdaqBase - 1) * 100).toFixed(2) : undefined,
+        port:   safeCalc(d.value, ip),
+        sp:     ib != null && d.benchmark_value != null ? safeCalc(d.benchmark_value, ib) : 0,
+        nasdaq: nc != null && nasdaqBase != null ? safeCalc(nc, nasdaqBase) : undefined,
       }
     })
-  }, [curveQ.data, range, nasdaqQ.data])()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [curveQ.data, range, nasdaqQ.data])
 
-  // "2025-10-19" → "25.10.19"
   const fmtDate = (v: string) => {
     const p = v?.split('-')
     return p?.length === 3 ? `${p[0].slice(2)}.${p[1]}.${p[2]}` : v
@@ -113,19 +161,16 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
 
   return (
     <div className="px-4 pt-3 pb-2 border-b border-[#1e2d40]">
-      {/* Header */}
       <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
         <div className="flex items-center gap-4 flex-wrap">
           <span className="text-[11px] text-[#94a3b8] font-bold tracking-[3px] uppercase">Equity Curve</span>
-
           <div className="flex items-center gap-2">
             <svg width="20" height="5"><line x1="0" y1="2.5" x2="20" y2="2.5" stroke="#00e6ff" strokeWidth="2.5" /></svg>
             <span className="text-sm font-mono font-bold tabular-nums"
               style={{ color: portPct >= 0 ? '#10b981' : '#ef4444' }}>
-              Portfolio {portPct >= 0 ? '+' : ''}{portPct.toFixed(2)}%
+              Portfolio {fp(portPct)}
             </span>
           </div>
-
           {(bm === 'sp500' || bm === 'both') && (
             <div className="flex items-center gap-2">
               <svg width="20" height="5">
@@ -134,11 +179,10 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
                 <line x1="14" y1="2.5" x2="20" y2="2.5" stroke="#64748b" strokeWidth="1.5" />
               </svg>
               <span className="text-sm font-mono text-[#64748b] tabular-nums">
-                S&P {spPct >= 0 ? '+' : ''}{spPct.toFixed(2)}%
+                S&P {fp(spPct)}
               </span>
             </div>
           )}
-
           {(bm === 'nasdaq' || bm === 'both') && (
             <div className="flex items-center gap-2">
               <svg width="20" height="5">
@@ -147,27 +191,24 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
                 <line x1="14" y1="2.5" x2="20" y2="2.5" stroke="#a78bfa" strokeWidth="1.5" />
               </svg>
               <span className="text-sm font-mono text-[#a78bfa] tabular-nums">
-                NASDAQ {nqPct >= 0 ? '+' : ''}{nqPct.toFixed(2)}%
+                NASDAQ {fp(nqPct)}
               </span>
             </div>
           )}
-
           <span className="text-sm font-mono font-bold tabular-nums px-2 py-0.5 rounded"
             style={{
               color: alpha >= 0 ? '#10b981' : '#ef4444',
               backgroundColor: alpha >= 0 ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)',
             }}>
-            α {alpha >= 0 ? '+' : ''}{alpha.toFixed(2)}%
+            α {fp(alpha)}
           </span>
         </div>
 
-        {/* Controls */}
         <div className="flex items-center gap-2">
-          {/* Benchmark selector */}
           <div className="flex gap-0.5 bg-[#070d18] border border-[#1e2d40] rounded p-0.5">
             {BM_BTNS.map(b => (
               <button key={b.key} onClick={() => setBm(b.key)}
-                className={cn('text-[11px] px-2.5 py-1 rounded font-bold transition-colors',
+                className={cn('text-[11px] px-2.5 py-1 rounded font-bold transition-colors duration-100',
                   bm === b.key ? '' : 'text-[#4a5568] hover:text-[#64748b]'
                 )}
                 style={bm === b.key ? { backgroundColor: b.color + '28', color: b.color } : {}}>
@@ -175,11 +216,10 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
               </button>
             ))}
           </div>
-          {/* Range selector */}
           <div className="flex gap-0.5 bg-[#070d18] border border-[#1e2d40] rounded p-0.5">
             {(['1M', '3M', '1Y', 'ALL'] as const).map(r => (
               <button key={r} onClick={() => setRange(r)}
-                className={cn('text-[11px] px-2.5 py-1 rounded font-bold transition-colors',
+                className={cn('text-[11px] px-2.5 py-1 rounded font-bold transition-colors duration-100',
                   range === r ? 'bg-[#00e6ff]/15 text-[#00e6ff]' : 'text-[#4a5568] hover:text-[#64748b]'
                 )}>
                 {r}
@@ -189,8 +229,24 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
         </div>
       </div>
 
-      {/* Chart */}
-      <ResponsiveContainer width="100%" height={230}>
+      {/* 로딩 상태 */}
+      {curveQ.isLoading && (
+        <div className="flex items-center justify-center" style={{ height: 300 }}>
+          <span className="text-[13px] text-[#334155] font-mono">로드 중…</span>
+        </div>
+      )}
+
+      {/* 데이터 없음 */}
+      {!curveQ.isLoading && !data.length && (
+        <div className="flex items-center justify-center" style={{ height: 300 }}>
+          <span className="text-[13px] text-[#334155] font-mono">데이터 없음</span>
+        </div>
+      )}
+
+      {/* 차트 — ResponsiveContainer를 고정 높이 div로 감쌈 (width 계산 타이밍 버그 방지) */}
+      {!curveQ.isLoading && data.length > 0 && (
+      <div style={{ width: '100%', height: 300 }}>
+      <ResponsiveContainer width="100%" height="100%">
         <AreaChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
           <defs>
             <linearGradient id="gPort" x1="0" y1="0" x2="0" y2="1">
@@ -231,138 +287,575 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
           />
           {(bm === 'sp500' || bm === 'both') && (
             <Area type="monotone" dataKey="sp" stroke="#64748b" strokeWidth={1.5}
-              strokeDasharray="4 3" fill="url(#gSP)" dot={false} />
+              strokeDasharray="4 3" fill="url(#gSP)" dot={false}
+              isAnimationActive={false} />
           )}
           {(bm === 'nasdaq' || bm === 'both') && (
             <Area type="monotone" dataKey="nasdaq" stroke="#a78bfa" strokeWidth={1.5}
-              strokeDasharray="4 3" fill="url(#gNQ)" dot={false} />
+              strokeDasharray="4 3" fill="url(#gNQ)" dot={false}
+              isAnimationActive={false} />
           )}
           <Area type="monotone" dataKey="port" stroke="#00e6ff" strokeWidth={2.5}
-            fill="url(#gPort)" dot={false} />
+            fill="url(#gPort)" dot={false}
+            isAnimationActive={false} />
         </AreaChart>
       </ResponsiveContainer>
+      </div>
+      )}
     </div>
   )
 }
 
-// ── Holdings ──────────────────────────────────────────────────────────────────
+// ── Holdings + History Panel ──────────────────────────────────────────────────
 function HoldingsPanel({ holdQ }: { holdQ: any }) {
   const qc = useQueryClient()
+  const [view, setView] = useState<'holdings' | 'history'>('holdings')
+
+  // ── Holdings edit state ────────────────────────────────────────────────
   const [editTicker, setEditTicker] = useState<string | null>(null)
-  const [editVals,   setEditVals]   = useState({ q: 0, avg: 0 })
-  const [form, setForm] = useState({ ticker: '', type: 'BUY', q: 0, price: 0 })
+  const [editVals,   setEditVals]   = useState({ q: 0, avg: 0, sector: 'Other' })
+  const editValsRef = useRef({ q: 0, avg: 0, sector: 'Other' })
+
+  // editValsRef: stale closure 방지용 — 입력값 최신 상태 추적
+  useEffect(() => { editValsRef.current = editVals }, [editVals])
+
+  // ── SELL 인라인 폼 state ───────────────────────────────────────────────
+  const [sellTicker,       setSellTicker]       = useState<string | null>(null)
+  const [sellVals,         setSellVals]         = useState({ q: 0, price: 0, date: '' })
+  const sellValsRef = useRef({ q: 0, price: 0, date: '' })
+  const [sellPriceLoading, setSellPriceLoading] = useState(false)
+  // sellValsRef: stale closure 방지 — 입력값 최신 상태 추적
+  useEffect(() => { sellValsRef.current = sellVals }, [sellVals])
+
+  // ── 자동 섹터 분류: 페이지 최초 로드 시 Other 섹터 종목 자동 분류 ────────
+  const autoSectorRan = useRef(false)
+  useEffect(() => {
+    if (autoSectorRan.current || holdQ.isLoading) return
+    const holdings: any[] = holdQ.data || []
+    const hasOther = holdings.some((h: any) => !h.sector || h.sector === 'Other')
+    if (hasOther) {
+      autoSectorRan.current = true
+      autoDetectSectors().then(res => {
+        if (res.count > 0) {
+          qc.invalidateQueries({ queryKey: ['holdings-detail'] })
+          qc.invalidateQueries({ queryKey: ['sector-weights'] })
+        }
+      }).catch(() => {})
+    } else if (holdings.length > 0) {
+      autoSectorRan.current = true  // 이미 모두 분류됨
+    }
+  }, [holdQ.data, holdQ.isLoading, qc])
+
+  // ── Trade form state ───────────────────────────────────────────────────
+  const todayStr = useMemo(() => new Date().toISOString().slice(0, 10), [])
+  const [form,        setForm]        = useState({ ticker: '', type: 'BUY', q: 0, price: 0, date: todayStr })
+  const [suggestions, setSuggestions] = useState<{ ticker: string; name: string }[]>([])
+  const [showSug,     setShowSug]     = useState(false)
+  const [sugIdx,      setSugIdx]      = useState(-1)
+  const [tickerError, setTickerError] = useState('')
+  const [priceLoading,setPriceLoading]= useState(false)
+  const tickerInputRef = useRef<HTMLInputElement>(null)
+
+  // ── History edit state ─────────────────────────────────────────────────
+  const [editTradeId,   setEditTradeId]   = useState<number | null>(null)
+  const [editTradeVals, setEditTradeVals] = useState({ date: '', q: 0, price: 0, memo: '' })
+
+  const tradesQ = useQuery({ queryKey: ['trades'], queryFn: getTrades, enabled: view === 'history', staleTime: 30_000 })
+
+  const _invalidateAll = () => {
+    qc.invalidateQueries({ queryKey: ['holdings-detail'] })
+    qc.invalidateQueries({ queryKey: ['holdings-raw'] })
+    qc.invalidateQueries({ queryKey: ['trades'] })
+    qc.invalidateQueries({ queryKey: ['sector-weights'] })
+    qc.invalidateQueries({ queryKey: ['equity-curve'] })
+    qc.invalidateQueries({ queryKey: ['portfolio-metrics'] })
+  }
 
   const updateMut = useMutation({
-    mutationFn: ({ ticker, q, avg }: any) => updateHolding(ticker, { q, avg }),
-    onSuccess: () => { setEditTicker(null); qc.invalidateQueries({ queryKey: ['holdings-detail'] }) },
+    mutationFn: ({ ticker, q, avg, sector }: any) => updateHolding(ticker, { q, avg, sector }),
+    onSuccess: _invalidateAll,
+    onError: (e: any) => alert(`편집 실패: ${e?.response?.data?.detail || e.message}`),
   })
   const deleteMut = useMutation({
     mutationFn: (ticker: string) => deleteHolding(ticker),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['holdings-detail'] }),
+    onSuccess: _invalidateAll,
+    onError: (e: any) => alert(`삭제 실패: ${e?.response?.data?.detail || e.message}`),
   })
   const tradeMut = useMutation({
-    mutationFn: (f: typeof form) => postTrade({ ticker: f.ticker, type: f.type as any, q: f.q, price: f.price }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['holdings-detail'] })
-      qc.invalidateQueries({ queryKey: ['holdings-raw'] })
-      setForm(f => ({ ...f, ticker: '', q: 0, price: 0 }))
+    mutationFn: (f: typeof form) => postTrade({ ticker: f.ticker, type: f.type as any, q: f.q, price: f.price, date: f.date }),
+    onSuccess: (_data, vars) => {
+      _invalidateAll()
+      setForm(f => ({ ...f, ticker: '', q: 0, price: 0, date: new Date().toISOString().slice(0, 10) }))
+      setTickerError('')
+      // BUY 후 섹터 자동 분류 (백그라운드 스레드 완료 대기 후 재조회)
+      if (vars.type === 'BUY') {
+        setTimeout(() => {
+          autoDetectSectors().then(res => {
+            if (res.count > 0) _invalidateAll()
+          }).catch(() => {})
+        }, 3000)
+      }
+    },
+    onError: (e: any) => {
+      const msg = e?.response?.data?.detail || e.message
+      setTickerError(`거래 실패: ${msg}`)
     },
   })
+  const sellMut = useMutation({
+    mutationFn: ({ ticker, q, price, date }: any) => postTrade({ ticker, type: 'SELL', q, price, date }),
+    onSuccess: () => { setSellTicker(null); _invalidateAll() },
+    onError: (e: any) => alert(`SELL 실패: ${e?.response?.data?.detail || e.message}`),
+  })
+  const updateTradeMut = useMutation({
+    mutationFn: ({ id, ticker, type, vals }: any) => updateTrade(id, {
+      date: vals.date, ticker, type, q: vals.q, price: vals.price, memo: vals.memo,
+    }),
+    // 거래 수정 → holdings도 재계산됨 (백엔드 _recalculate_holding_from_trades)
+    onSuccess: () => { setEditTradeId(null); _invalidateAll() },
+    onError: (e: any) => alert(`거래 수정 실패: ${e?.response?.data?.detail || e.message}`),
+  })
+  const deleteTradeMut = useMutation({
+    mutationFn: (id: number) => deleteTrade(id),
+    // 거래 삭제 → holdings도 재계산됨 (백엔드 _recalculate_holding_from_trades)
+    onSuccess: _invalidateAll,
+    onError: (e: any) => alert(`거래 삭제 실패: ${e?.response?.data?.detail || e.message}`),
+  })
+
+  // SELL 인라인 폼 열기 — 현재 보유수량 + 현재가 자동 설정
+  const openSell = async (h: any) => {
+    setSellTicker(h.ticker)
+    setSellVals({ q: h.qty ?? 0, price: h.current_price ?? 0, date: new Date().toISOString().slice(0, 10) })
+    if (!h.current_price) {
+      setSellPriceLoading(true)
+      try {
+        const r = await getTickerPrice(h.ticker)
+        setSellVals(v => ({ ...v, price: r.price }))
+      } catch {} finally { setSellPriceLoading(false) }
+    }
+  }
+
+  // ── Ticker 검색 (전체 미국 상장) ─────────────────────────────────────
+  // 입력 중 300ms debounce 후 API 검색
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const handleTickerChange = (val: string) => {
+    const upper = val.toUpperCase()
+    setForm(f => ({ ...f, ticker: upper }))
+    setTickerError('')
+    setSugIdx(-1)
+    if (upper.length === 0) { setSuggestions([]); setShowSug(false); return }
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    debounceRef.current = setTimeout(async () => {
+      try {
+        const res = await searchTickers(upper)
+        setSuggestions(res)
+        setShowSug(res.length > 0)
+      } catch { setSuggestions([]); setShowSug(false) }
+    }, 200)
+  }
+
+  const selectSuggestion = async (ticker: string) => {
+    setForm(f => ({ ...f, ticker }))
+    setSuggestions([]); setShowSug(false); setSugIdx(-1); setTickerError('')
+    await fetchAndSetPrice(ticker)
+  }
+
+  const fetchAndSetPrice = async (ticker: string) => {
+    if (!ticker) return
+    setPriceLoading(true)
+    try {
+      const result = await getTickerPrice(ticker)
+      setForm(f => ({ ...f, price: result.price }))
+      setTickerError('')
+    } catch {
+      setTickerError(`"${ticker}"은(는) 유효하지 않은 티커입니다. 다시 시도해주세요.`)
+      setForm(f => ({ ...f, ticker: '', price: 0 }))
+    } finally {
+      setPriceLoading(false)
+    }
+  }
+
+  const handleTickerKeyDown = (e: React.KeyboardEvent) => {
+    if (!showSug || suggestions.length === 0) return
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      setSugIdx(i => Math.min(i + 1, suggestions.length - 1))
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      setSugIdx(i => Math.max(i - 1, 0))
+    } else if (e.key === 'Enter' && sugIdx >= 0) {
+      e.preventDefault()
+      selectSuggestion(suggestions[sugIdx].ticker)
+    } else if (e.key === 'Escape') {
+      setShowSug(false); setSugIdx(-1)
+    }
+  }
+
+  const handleTickerBlur = () => {
+    setTimeout(() => {
+      setShowSug(false); setSugIdx(-1)
+      const t = form.ticker.trim()
+      if (t && !form.price) fetchAndSetPrice(t)
+    }, 180)
+  }
+
+  // QTY 마우스 스크롤
+  const handleQtyWheel = (e: React.WheelEvent) => {
+    e.preventDefault()
+    setForm(f => ({ ...f, q: Math.max(0, f.q + (e.deltaY < 0 ? 1 : -1)) }))
+  }
+
+  // History 최신순
+  const trades = (tradesQ.data || []).slice().reverse()
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
-      <div className="text-[11px] text-[#94a3b8] font-bold tracking-[3px] uppercase px-3 py-2.5 border-b border-[#1e2d40] flex-shrink-0 bg-[#070d18]">
-        Holdings
-      </div>
-      <div className="flex-1 overflow-y-auto min-h-0">
-        <table className="w-full">
-          <thead className="sticky top-0 bg-[#07101c] z-10">
-            <tr className="text-[#64748b] border-b border-[#1e2d40]">
-              {['Ticker', 'Avg', 'Qty', 'Price', '1D%', 'P&L', 'Wt', ''].map(h => (
-                <th key={h} className="text-left py-2.5 px-2.5 font-semibold text-[11px] tracking-wider">{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {(holdQ.data || []).map((h: any) => (
-              <tr key={h.ticker} className="border-b border-[#0f172a] hover:bg-[#0a1525] group transition-colors">
-                {editTicker === h.ticker ? (
-                  <>
-                    <td className="py-2 px-2.5 font-mono font-bold text-sm text-[#e2e8f0]">{h.ticker}</td>
-                    <td className="py-2 px-2.5">
-                      <input type="number" value={editVals.avg}
-                        onChange={e => setEditVals(v => ({ ...v, avg: +e.target.value }))}
-                        className="w-18 bg-[#1e2d40] border border-[#334155] text-sm text-[#e2e8f0] rounded px-2 py-1" />
-                    </td>
-                    <td className="py-2 px-2.5">
-                      <input type="number" value={editVals.q}
-                        onChange={e => setEditVals(v => ({ ...v, q: +e.target.value }))}
-                        className="w-14 bg-[#1e2d40] border border-[#334155] text-sm text-[#e2e8f0] rounded px-2 py-1" />
-                    </td>
-                    <td colSpan={4} />
-                    <td className="py-2 px-2.5">
-                      <div className="flex gap-1.5">
-                        <button onClick={() => updateMut.mutate({ ticker: h.ticker, q: editVals.q, avg: editVals.avg })}
-                          className="text-[#10b981] hover:text-[#34d399]"><Check className="w-4 h-4" /></button>
-                        <button onClick={() => setEditTicker(null)}
-                          className="text-[#ef4444] hover:text-[#f87171]"><X className="w-4 h-4" /></button>
-                      </div>
-                    </td>
-                  </>
-                ) : (
-                  <>
-                    <td className="py-2 px-2.5 font-mono font-bold text-[15px] text-[#e2e8f0]">{h.ticker}</td>
-                    <td className="py-2 px-2.5 font-mono text-[12px] text-[#94a3b8]">${h.avg_cost.toFixed(0)}</td>
-                    <td className="py-2 px-2.5 font-mono text-[12px] text-[#94a3b8]">{h.qty}</td>
-                    <td className="py-2 px-2.5 font-mono text-[12px] text-[#cbd5e1]">${h.current_price.toFixed(1)}</td>
-                    <td className="py-2 px-2.5 font-mono text-[13px] font-bold" style={{ color: h.pnl_pct >= 0 ? '#10b981' : '#ef4444' }}>
-                      {h.pnl_pct >= 0 ? '+' : ''}{h.pnl_pct.toFixed(1)}%
-                    </td>
-                    <td className="py-2 px-2.5 font-mono text-[13px] font-bold" style={{ color: h.pnl >= 0 ? '#10b981' : '#ef4444' }}>
-                      {h.pnl >= 0 ? '+' : ''}{Math.abs(h.pnl).toFixed(0)}
-                    </td>
-                    <td className="py-2 px-2.5 font-mono text-[12px] text-[#94a3b8]">{(h.weight * 100).toFixed(0)}%</td>
-                    <td className="py-2 px-2.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <div className="flex gap-1">
-                        <button onClick={() => { setEditTicker(h.ticker); setEditVals({ q: h.qty, avg: h.avg_cost }) }}
-                          className="text-[#374151] hover:text-[#3b82f6] transition-colors"><Edit3 className="w-3.5 h-3.5" /></button>
-                        <button onClick={() => deleteMut.mutate(h.ticker)}
-                          className="text-[#374151] hover:text-[#ef4444] transition-colors"><Trash2 className="w-3.5 h-3.5" /></button>
-                      </div>
-                    </td>
-                  </>
-                )}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <div className="flex-shrink-0 border-t border-[#1e2d40] px-3 py-2 bg-[#060b14] flex items-center gap-2 flex-wrap">
-        <input value={form.ticker} onChange={e => setForm(f => ({ ...f, ticker: e.target.value.toUpperCase() }))}
-          placeholder="Ticker"
-          className="w-16 bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#e2e8f0] rounded px-2 py-1.5 placeholder-[#334155] focus:outline-none focus:border-[#3b82f6]" />
-        <select value={form.type} onChange={e => setForm(f => ({ ...f, type: e.target.value }))}
-          className="bg-[#0b1220] border border-[#1e2d40] text-sm text-[#94a3b8] rounded px-2 py-1.5 focus:outline-none focus:border-[#3b82f6]">
-          <option value="BUY">BUY</option><option value="SELL">SELL</option>
-        </select>
-        <input type="number" value={form.q || ''} onChange={e => setForm(f => ({ ...f, q: +e.target.value }))}
-          placeholder="Qty"
-          className="w-14 bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#e2e8f0] rounded px-2 py-1.5 placeholder-[#334155] focus:outline-none focus:border-[#3b82f6]" />
-        <input type="number" value={form.price || ''} onChange={e => setForm(f => ({ ...f, price: +e.target.value }))}
-          placeholder="Price"
-          className="w-20 bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#e2e8f0] rounded px-2 py-1.5 placeholder-[#334155] focus:outline-none focus:border-[#3b82f6]" />
-        <button onClick={() => tradeMut.mutate(form)} disabled={!form.ticker || !form.q || !form.price}
-          className="bg-[#1d4ed8] hover:bg-[#2563eb] disabled:opacity-40 text-white rounded px-3 py-1.5 transition-colors text-sm font-bold">
-          <Plus className="w-4 h-4" />
+      {/* 탭 헤더 */}
+      <div className="flex items-center border-b border-[#1e2d40] flex-shrink-0 bg-[#070d18]">
+        <button onClick={() => setView('holdings')}
+          className={cn('text-[11px] font-bold tracking-[3px] uppercase px-3 py-2.5 transition-colors',
+            view === 'holdings' ? 'text-[#e2e8f0] border-b-2 border-[#3b82f6]' : 'text-[#4a5568] hover:text-[#64748b]')}>
+          Holdings
+        </button>
+        <button onClick={() => setView('history')}
+          className={cn('flex items-center gap-1.5 text-[11px] font-bold tracking-[3px] uppercase px-3 py-2.5 transition-colors',
+            view === 'history' ? 'text-[#e2e8f0] border-b-2 border-[#3b82f6]' : 'text-[#4a5568] hover:text-[#64748b]')}>
+          <History className="w-3 h-3" />History
         </button>
       </div>
+
+      {/* ── Holdings 뷰 ─────────────────────────────────────────────────── */}
+      {view === 'holdings' && (
+        <>
+          <div className="flex-1 overflow-y-auto min-h-0">
+            <table className="w-full">
+              <thead className="sticky top-0 bg-[#07101c] z-10">
+                <tr className="text-[#64748b] border-b border-[#1e2d40]">
+                  {['Ticker','Avg','Qty','Price','1D%','P&L','Wt','',''].map((hd, i) => (
+                    <th key={i} className="text-left py-2.5 px-2.5 font-semibold text-[11px] tracking-wider">{hd}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {(holdQ.data || []).map((h: any) => (
+                  <React.Fragment key={h.ticker}>
+                  <tr className="border-b border-[#0f172a] hover:bg-[#0a1525] group transition-colors">
+                    {editTicker === h.ticker ? (
+                      <>
+                        <td className="py-2 px-2.5 font-mono font-bold text-sm text-[#e2e8f0]">{h.ticker}</td>
+                        <td className="py-2 px-2.5">
+                          <input type="number" value={editVals.avg}
+                            onChange={e => setEditVals(v => ({ ...v, avg: +e.target.value }))}
+                            className="w-16 bg-[#1e2d40] border border-[#334155] text-sm text-[#e2e8f0] rounded px-2 py-1" />
+                        </td>
+                        <td className="py-2 px-2.5">
+                          <input type="number" value={editVals.q}
+                            onChange={e => setEditVals(v => ({ ...v, q: +e.target.value }))}
+                            className="w-14 bg-[#1e2d40] border border-[#334155] text-sm text-[#e2e8f0] rounded px-2 py-1" />
+                        </td>
+                        <td colSpan={4} />
+                        <td className="py-2 px-2.5">
+                          <div className="flex gap-1.5">
+                            {/* onPointerDown: blur보다 먼저 발화, editValsRef로 최신값 보장 */}
+                            <button type="button"
+                              onPointerDown={e => {
+                                e.preventDefault()
+                                const v = editValsRef.current
+                                setEditTicker(null)
+                                updateMut.mutate({ ticker: h.ticker, q: v.q, avg: v.avg, sector: h.sector })
+                              }}
+                              className="text-[#10b981] hover:text-[#34d399]">
+                              <Check className="w-4 h-4" />
+                            </button>
+                            <button type="button"
+                              onPointerDown={e => {
+                                e.preventDefault()
+                                setEditTicker(null)
+                              }}
+                              className="text-[#ef4444] hover:text-[#f87171]">
+                              <X className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </td>
+                      </>
+                    ) : (
+                      <>
+                        <td className="py-2 px-2.5 font-mono font-bold text-[15px] text-[#e2e8f0]">{h.ticker}</td>
+                        <td className="py-2 px-2.5 font-mono text-[12px] text-[#94a3b8]">${fn(h.avg_cost, 0)}</td>
+                        <td className="py-2 px-2.5 font-mono text-[12px] text-[#94a3b8]">{fv(h.qty)}</td>
+                        <td className="py-2 px-2.5 font-mono text-[12px] text-[#cbd5e1]">${fn(h.current_price, 1)}</td>
+                        <td className="py-2 px-2.5 font-mono text-[13px] font-bold" style={{ color: fv(h.pnl_pct) >= 0 ? '#10b981' : '#ef4444' }}>
+                          {fp(h.pnl_pct, 1)}
+                        </td>
+                        <td className="py-2 px-2.5 font-mono text-[13px] font-bold" style={{ color: fv(h.pnl) >= 0 ? '#10b981' : '#ef4444' }}>
+                          {fp(h.pnl, 0)}
+                        </td>
+                        <td className="py-2 px-2.5 font-mono text-[12px] text-[#94a3b8]">{fn(fv(h.weight) * 100, 0)}%</td>
+                        {/* SELL 버튼 */}
+                        <td className="py-2 px-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <button type="button"
+                            onPointerDown={e => { e.preventDefault(); openSell(h) }}
+                            className="text-[10px] font-bold text-[#f59e0b] border border-[#f59e0b]/40 rounded px-1.5 py-0.5 hover:bg-[#f59e0b]/15 transition-colors">
+                            SELL
+                          </button>
+                        </td>
+                        {/* Edit / Delete */}
+                        <td className="py-2 px-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <div className="flex gap-1">
+                            <button type="button"
+                              onPointerDown={e => {
+                                e.preventDefault()
+                                setEditTicker(h.ticker)
+                                const newVals = { q: h.qty, avg: h.avg_cost, sector: h.sector || 'Other' }
+                                setEditVals(newVals)
+                                editValsRef.current = newVals
+                              }}
+                              className="text-[#374151] hover:text-[#3b82f6] transition-colors">
+                              <Edit3 className="w-3.5 h-3.5" />
+                            </button>
+                            <button type="button"
+                              onClick={() => {
+                                if (window.confirm(`${h.ticker} 보유를 삭제하시겠습니까?`))
+                                  deleteMut.mutate(h.ticker)
+                              }}
+                              className="text-[#374151] hover:text-[#ef4444] transition-colors">
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </td>
+                      </>
+                    )}
+                  </tr>
+                  {/* 인라인 SELL 폼 */}
+                  {sellTicker === h.ticker && (
+                    <tr className="border-b border-[#f59e0b]/20 bg-[#0a0e18]">
+                      <td colSpan={9} className="px-3 py-2">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-[#f59e0b] font-mono font-bold text-[12px] flex-shrink-0">SELL {h.ticker}</span>
+                          <input type="number" value={sellVals.q || ''}
+                            onChange={e => setSellVals(v => ({ ...v, q: +e.target.value }))}
+                            placeholder="Qty" min={0.001} step={0.001}
+                            className="w-16 bg-[#1e2d40] border border-[#334155] text-sm text-[#e2e8f0] rounded px-2 py-1" />
+                          <input type="number" value={sellVals.price || ''}
+                            onChange={e => setSellVals(v => ({ ...v, price: +e.target.value }))}
+                            placeholder={sellPriceLoading ? '조회중…' : 'Price'}
+                            disabled={sellPriceLoading}
+                            className="w-20 bg-[#1e2d40] border border-[#334155] text-sm text-[#e2e8f0] rounded px-2 py-1" />
+                          <input type="date" value={sellVals.date}
+                            onChange={e => setSellVals(v => ({ ...v, date: e.target.value }))}
+                            max={todayStr}
+                            className="bg-[#1e2d40] border border-[#334155] text-sm text-[#94a3b8] rounded px-2 py-1 [color-scheme:dark]" />
+                          <button type="button"
+                            onClick={() => {
+                              const v = sellValsRef.current
+                              if (v.q > 0 && v.price > 0 && !sellMut.isPending)
+                                sellMut.mutate({ ticker: h.ticker, q: v.q, price: v.price, date: v.date })
+                            }}
+                            className="bg-[#f59e0b]/15 border border-[#f59e0b]/40 text-[#f59e0b] rounded px-3 py-1 text-[12px] font-bold hover:bg-[#f59e0b]/25 transition-colors">
+                            {sellMut.isPending ? '…' : '확인'}
+                          </button>
+                          <button type="button" onClick={() => setSellTicker(null)}
+                            className="text-[#64748b] hover:text-[#94a3b8] text-[12px]">취소</button>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                  </React.Fragment>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* 거래 입력 폼 */}
+          <div className="flex-shrink-0 border-t border-[#1e2d40] px-3 py-2 bg-[#060b14] space-y-2">
+            {tickerError && (
+              <div className="text-[11px] text-[#ef4444] flex items-center gap-1">
+                <X className="w-3 h-3" />{tickerError}
+              </div>
+            )}
+            <div className="flex items-center gap-2 flex-wrap">
+              {/* Ticker — 전체 미국 티커 검색 */}
+              <div className="relative">
+                <input
+                  ref={tickerInputRef}
+                  value={form.ticker}
+                  onChange={e => handleTickerChange(e.target.value)}
+                  onBlur={handleTickerBlur}
+                  onKeyDown={handleTickerKeyDown}
+                  placeholder="Ticker"
+                  autoComplete="off"
+                  className="w-24 bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#e2e8f0] rounded px-2 py-1.5 placeholder-[#334155] focus:outline-none focus:border-[#3b82f6]"
+                />
+                {showSug && suggestions.length > 0 && (
+                  <div className="absolute bottom-full mb-1 left-0 z-50 bg-[#0b1220] border border-[#1e2d40] rounded shadow-xl min-w-[180px]">
+                    {suggestions.map((s, idx) => (
+                      <button key={s.ticker}
+                        onMouseDown={e => { e.preventDefault(); selectSuggestion(s.ticker) }}
+                        className={cn(
+                          'flex items-center gap-2 w-full text-left px-3 py-2 transition-colors',
+                          idx === sugIdx ? 'bg-[#1e2d40] text-[#e2e8f0]' : 'text-[#94a3b8] hover:bg-[#0f1e30] hover:text-[#e2e8f0]'
+                        )}>
+                        <span className="font-mono font-bold text-[13px] flex-shrink-0">{s.ticker}</span>
+                        <span className="text-[11px] text-[#475569] truncate">{s.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* BUY / SELL */}
+              <select value={form.type} onChange={e => setForm(f => ({ ...f, type: e.target.value }))}
+                className="bg-[#0b1220] border border-[#1e2d40] text-sm text-[#94a3b8] rounded px-2 py-1.5 focus:outline-none focus:border-[#3b82f6]">
+                <option value="BUY">BUY</option>
+                <option value="SELL">SELL</option>
+              </select>
+
+              {/* QTY — 스크롤 지원 */}
+              <input type="number" value={form.q || ''}
+                onChange={e => setForm(f => ({ ...f, q: +e.target.value }))}
+                onWheel={handleQtyWheel}
+                placeholder="Qty" min={0} step={1}
+                className="w-14 bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#e2e8f0] rounded px-2 py-1.5 placeholder-[#334155] focus:outline-none focus:border-[#3b82f6]"
+              />
+
+              {/* Price — 직접 입력만 (현재가 자동 조회 유지) */}
+              <input type="number" value={form.price || ''}
+                onChange={e => setForm(f => ({ ...f, price: +e.target.value }))}
+                placeholder={priceLoading ? '조회중…' : 'Price'}
+                disabled={priceLoading}
+                className="w-24 bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#e2e8f0] rounded px-2 py-1.5 placeholder-[#334155] focus:outline-none focus:border-[#3b82f6]"
+              />
+
+              {/* Date — 매수/매도 날짜 */}
+              <input type="date" value={form.date}
+                onChange={e => setForm(f => ({ ...f, date: e.target.value }))}
+                max={todayStr}
+                className="bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#94a3b8] rounded px-2 py-1.5 focus:outline-none focus:border-[#3b82f6] [color-scheme:dark]"
+              />
+
+              {/* Submit — onPointerDown으로 ticker blur보다 먼저 발화 */}
+              <button type="button"
+                onPointerDown={e => {
+                  e.preventDefault()
+                  if (form.ticker && form.q && form.price && !priceLoading && !tradeMut.isPending)
+                    tradeMut.mutate(form)
+                }}
+                disabled={!form.ticker || !form.q || !form.price || priceLoading || tradeMut.isPending}
+                className="bg-[#1d4ed8] hover:bg-[#2563eb] disabled:opacity-40 text-white rounded px-3 py-1.5 transition-colors text-sm font-bold">
+                <Plus className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* ── History 뷰 ──────────────────────────────────────────────────── */}
+      {view === 'history' && (
+        <div className="flex-1 overflow-y-auto min-h-0">
+          {tradesQ.isLoading && <div className="text-center py-4 text-sm text-[#64748b]">로드 중…</div>}
+          {!tradesQ.isLoading && trades.length === 0 && (
+            <div className="flex items-center justify-center h-full text-sm text-[#4a5568]">거래 기록 없음</div>
+          )}
+          <table className="w-full">
+            <thead className="sticky top-0 bg-[#07101c] z-10">
+              <tr className="text-[#64748b] border-b border-[#1e2d40]">
+                {['Date', 'Ticker', 'Type', 'Qty', 'Price', 'Memo', ''].map(h => (
+                  <th key={h} className="text-left py-2.5 px-2 font-semibold text-[11px] tracking-wider">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {trades.map((t: any) => (
+                <tr key={t.id} className="border-b border-[#0f172a] hover:bg-[#0a1525] group transition-colors">
+                  {editTradeId === t.id ? (
+                    <>
+                      <td className="py-1.5 px-2">
+                        <input type="date" value={editTradeVals.date}
+                          onChange={e => setEditTradeVals(v => ({ ...v, date: e.target.value }))}
+                          className="w-28 bg-[#1e2d40] border border-[#334155] text-[12px] text-[#e2e8f0] rounded px-1 py-1" />
+                      </td>
+                      <td className="py-1.5 px-2 font-mono font-bold text-sm text-[#e2e8f0]">{t.ticker}</td>
+                      <td className="py-1.5 px-2 text-[12px]"
+                        style={{ color: t.type === 'ADD' || t.type === 'BUY' ? '#10b981' : '#ef4444' }}>
+                        {t.type}
+                      </td>
+                      <td className="py-1.5 px-2">
+                        <input type="number" value={editTradeVals.q}
+                          onChange={e => setEditTradeVals(v => ({ ...v, q: +e.target.value }))}
+                          className="w-14 bg-[#1e2d40] border border-[#334155] text-[12px] text-[#e2e8f0] rounded px-1 py-1" />
+                      </td>
+                      <td className="py-1.5 px-2">
+                        <input type="number" value={editTradeVals.price}
+                          onChange={e => setEditTradeVals(v => ({ ...v, price: +e.target.value }))}
+                          className="w-18 bg-[#1e2d40] border border-[#334155] text-[12px] text-[#e2e8f0] rounded px-1 py-1" />
+                      </td>
+                      <td className="py-1.5 px-2">
+                        <input value={editTradeVals.memo}
+                          onChange={e => setEditTradeVals(v => ({ ...v, memo: e.target.value }))}
+                          className="w-24 bg-[#1e2d40] border border-[#334155] text-[12px] text-[#e2e8f0] rounded px-1 py-1" />
+                      </td>
+                      <td className="py-1.5 px-2">
+                        <div className="flex gap-1.5">
+                          <button
+                            onMouseDown={e => e.preventDefault()}
+                            onClick={() => updateTradeMut.mutate({ id: t.id, ticker: t.ticker, type: t.type, vals: editTradeVals })}
+                            className="text-[#10b981] hover:text-[#34d399]">
+                            <Check className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onMouseDown={e => e.preventDefault()}
+                            onClick={() => setEditTradeId(null)}
+                            className="text-[#ef4444] hover:text-[#f87171]">
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </td>
+                    </>
+                  ) : (
+                    <>
+                      <td className="py-2 px-2 font-mono text-[11px] text-[#64748b]">{t.date}</td>
+                      <td className="py-2 px-2 font-mono font-bold text-[13px] text-[#e2e8f0]">{t.ticker}</td>
+                      <td className="py-2 px-2 text-[11px] font-bold"
+                        style={{ color: t.type === 'ADD' || t.type === 'BUY' ? '#10b981' : '#ef4444' }}>
+                        {t.type}
+                      </td>
+                      <td className="py-2 px-2 font-mono text-[12px] text-[#94a3b8]">{t.q}</td>
+                      <td className="py-2 px-2 font-mono text-[12px] text-[#cbd5e1]">{t.price ? `$${t.price}` : '—'}</td>
+                      <td className="py-2 px-2 text-[11px] text-[#475569] max-w-[80px] truncate">{t.memo || ''}</td>
+                      <td className="py-2 px-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <div className="flex gap-1">
+                          <button onClick={() => {
+                            setEditTradeId(t.id)
+                            setEditTradeVals({ date: t.date, q: t.q, price: t.price || 0, memo: t.memo || '' })
+                          }} className="text-[#374151] hover:text-[#3b82f6]"><Edit3 className="w-3 h-3" /></button>
+                          <button
+                            onClick={() => { if (confirm('삭제하시겠습니까?')) deleteTradeMut.mutate(t.id) }}
+                            className="text-[#374151] hover:text-[#ef4444]"><Trash2 className="w-3 h-3" /></button>
+                        </div>
+                      </td>
+                    </>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   )
 }
 
-// ── Sectors (animated donut) ──────────────────────────────────────────────────
-function SectorsPanel({ sectorData }: { sectorData: Record<string, number> }) {
+// ── Sectors (donut + hover ticker tooltip) ────────────────────────────────────
+function SectorsPanel({
+  sectorData,
+  rawHoldings,
+}: {
+  sectorData: Record<string, number>
+  rawHoldings: Record<string, any>
+}) {
   const [active, setActive] = useState(0)
+  const [mousePos, setMousePos] = useState({ x: 0, y: 0 })
+  const [hoveredSector, setHoveredSector] = useState<string | null>(null)
 
   const data = Object.entries(sectorData)
     .sort(([, a], [, b]) => b - a)
@@ -372,23 +865,35 @@ function SectorsPanel({ sectorData }: { sectorData: Record<string, number> }) {
       fill: SECTOR_COLORS[i % SECTOR_COLORS.length],
     }))
 
+  // 섹터별 티커 목록
+  const sectorTickers: Record<string, string[]> = {}
+  Object.entries(rawHoldings || {}).forEach(([ticker, info]) => {
+    if (ticker === 'CASH') return
+    const sec = (info as any).sector || 'Other'
+    if (!sectorTickers[sec]) sectorTickers[sec] = []
+    sectorTickers[sec].push(ticker)
+  })
+
   const renderActiveShape = (props: any) => {
     const { cx, cy, innerRadius, outerRadius, startAngle, endAngle, fill, payload, percent } = props
     return (
       <g>
-        <Sector cx={cx} cy={cy} innerRadius={outerRadius + 5} outerRadius={outerRadius + 9}
+        <Sector cx={cx} cy={cy} innerRadius={outerRadius + 6} outerRadius={outerRadius + 11}
           startAngle={startAngle} endAngle={endAngle} fill={fill} opacity={0.4} />
-        <Sector cx={cx} cy={cy} innerRadius={innerRadius} outerRadius={outerRadius + 4}
+        <Sector cx={cx} cy={cy} innerRadius={innerRadius} outerRadius={outerRadius + 5}
           startAngle={startAngle} endAngle={endAngle} fill={fill} />
-        <text x={cx} y={cy - 10} textAnchor="middle" fill="#94a3b8" fontSize={11} fontFamily="ui-monospace,monospace">
+        <text x={cx} y={cy - 12} textAnchor="middle" fill="#94a3b8" fontSize={11} fontFamily="ui-monospace,monospace">
           {payload.name.length > 10 ? payload.name.slice(0, 10) + '…' : payload.name}
         </text>
-        <text x={cx} y={cy + 12} textAnchor="middle" fill={fill} fontSize={18} fontWeight="700" fontFamily="ui-monospace,monospace">
+        <text x={cx} y={cy + 12} textAnchor="middle" fill={fill} fontSize={20} fontWeight="700" fontFamily="ui-monospace,monospace">
           {`${(percent * 100).toFixed(1)}%`}
         </text>
       </g>
     )
   }
+
+  const activeSectorName = data[active]?.name ?? null
+  const tooltipTickers = hoveredSector ? (sectorTickers[hoveredSector] || []) : []
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -396,27 +901,53 @@ function SectorsPanel({ sectorData }: { sectorData: Record<string, number> }) {
         Sectors
       </div>
       <div className="flex flex-1 min-h-0 overflow-hidden">
-        <div className="flex items-center justify-center" style={{ width: '46%' }}>
-          <PieChart width={150} height={150}>
+        {/* 원형 그래프 — 40% 증가: 150→210 */}
+        <div
+          className="flex items-center justify-center relative"
+          style={{ width: '50%' }}
+          onMouseMove={e => setMousePos({ x: e.clientX, y: e.clientY })}
+        >
+          <PieChart width={210} height={210}>
             <Pie
               activeIndex={active}
               activeShape={renderActiveShape}
               data={data}
-              cx={75} cy={75}
-              innerRadius={36} outerRadius={56}
+              cx={105} cy={105}
+              innerRadius={50} outerRadius={78}
               dataKey="value"
-              onMouseEnter={(_, i) => setActive(i)}
+              onMouseEnter={(entry: any, i: number) => {
+                setActive(i)
+                setHoveredSector(entry.name)
+              }}
+              onMouseLeave={() => setHoveredSector(null)}
               strokeWidth={0}
+              isAnimationActive={false}
             >
               {data.map((e, i) => (
                 <Cell key={i} fill={e.fill} opacity={active === i ? 1 : 0.6} />
               ))}
             </Pie>
           </PieChart>
+
+          {/* 마우스 옆 섹터 종목 툴팁 */}
+          {hoveredSector && tooltipTickers.length > 0 && (
+            <div
+              className="fixed z-50 bg-[#0b1220] border border-[#1e2d40] rounded shadow-lg px-3 py-2 pointer-events-none"
+              style={{ left: mousePos.x + 16, top: mousePos.y - 10 }}>
+              <div className="text-[10px] text-[#64748b] font-bold tracking-wider mb-1.5 uppercase">
+                {hoveredSector}
+              </div>
+              {tooltipTickers.map(t => (
+                <div key={t} className="text-[12px] font-mono text-[#cbd5e1]">{t}</div>
+              ))}
+            </div>
+          )}
         </div>
+
         <div className="flex-1 overflow-y-auto py-2 pr-3 space-y-1.5">
           {data.map((s, i) => (
-            <div key={s.name} onMouseEnter={() => setActive(i)}
+            <div key={s.name} onMouseEnter={() => { setActive(i); setHoveredSector(s.name) }}
+              onMouseLeave={() => setHoveredSector(null)}
               className={cn('flex items-center gap-2 px-1.5 py-1 rounded cursor-pointer transition-all',
                 active === i ? 'bg-[#0f172a]' : 'hover:bg-[#0a1020]'
               )}>
@@ -452,7 +983,6 @@ function CorrelationHeatmap({ data }: { data: { tickers: string[]; matrix: numbe
 
   const short = (t: string) => t.replace('^', '').replace('-USD', '').slice(0, 6)
 
-  // Smooth two-tone interpolation: blue (neg) → neutral → red (pos)
   const cellColors = (v: number, isDiag: boolean) => {
     if (isDiag) return { bg: 'rgba(255,255,255,0.04)', text: 'rgba(255,255,255,0.25)', border: 'rgba(255,255,255,0.06)' }
     const c = Math.max(-1, Math.min(1, v))
@@ -468,7 +998,6 @@ function CorrelationHeatmap({ data }: { data: { tickers: string[]; matrix: numbe
   }
 
   const n = data.tickers.length
-  // Adapt cell size to number of tickers
   const sz = n <= 8 ? 36 : n <= 12 ? 30 : 25
   const gap = 3
   const hv = hovered
@@ -486,7 +1015,6 @@ function CorrelationHeatmap({ data }: { data: { tickers: string[]; matrix: numbe
     <div className="select-none space-y-3">
       <div className="overflow-auto">
         <div style={{ display: 'inline-flex', flexDirection: 'column', gap: `${gap}px` }}>
-          {/* Column header row */}
           <div style={{ display: 'flex', gap: `${gap}px`, paddingLeft: `${sz + gap + 8}px` }}>
             {data.tickers.map((t, j) => (
               <div key={j} style={{ width: sz, textAlign: 'center' }}>
@@ -500,11 +1028,8 @@ function CorrelationHeatmap({ data }: { data: { tickers: string[]; matrix: numbe
               </div>
             ))}
           </div>
-
-          {/* Data rows */}
           {data.matrix.map((row, i) => (
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: `${gap}px` }}>
-              {/* Row label */}
               <div style={{ width: sz, paddingRight: 8, textAlign: 'right' }}>
                 <span style={{
                   fontSize: '9px', fontWeight: 700, fontFamily: 'monospace',
@@ -514,37 +1039,29 @@ function CorrelationHeatmap({ data }: { data: { tickers: string[]; matrix: numbe
                   {short(data.tickers[i])}
                 </span>
               </div>
-
-              {/* Cells */}
               {row.map((v, j) => {
                 const isDiag = i === j
                 const { bg, text, border } = cellColors(v, isDiag)
                 const isHov = hv?.i === i && hv?.j === j
-
                 return (
-                  <div
-                    key={j}
+                  <div key={j}
                     onMouseEnter={() => setHovered({ i, j })}
                     onMouseLeave={() => setHovered(null)}
                     style={{
-                      width: sz, height: sz,
-                      background: bg,
-                      borderRadius: 5,
+                      width: sz, height: sz, background: bg, borderRadius: 5,
                       border: `1px solid ${isHov ? 'rgba(255,255,255,0.25)' : border}`,
                       display: 'flex', alignItems: 'center', justifyContent: 'center',
                       cursor: 'default',
-                      transition: 'transform 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease',
+                      transition: 'transform 0.08s ease, box-shadow 0.08s ease',
                       transform: isHov ? 'scale(1.18)' : 'scale(1)',
                       boxShadow: isHov ? `0 0 10px ${bg}` : 'none',
-                      zIndex: isHov ? 10 : 1,
-                      position: 'relative',
-                    }}
-                  >
+                      zIndex: isHov ? 10 : 1, position: 'relative',
+                    }}>
                     {isDiag ? (
                       <span style={{ fontSize: 8, color: 'rgba(255,255,255,0.2)', fontWeight: 700 }}>●</span>
                     ) : (
                       <span style={{ fontSize: sz >= 32 ? 9 : 8, fontWeight: 700, color: text, fontFamily: 'monospace', lineHeight: 1 }}>
-                        {v.toFixed(2)}
+                        {fn(v)}
                       </span>
                     )}
                   </div>
@@ -554,8 +1071,6 @@ function CorrelationHeatmap({ data }: { data: { tickers: string[]; matrix: numbe
           ))}
         </div>
       </div>
-
-      {/* Inline tooltip */}
       <div style={{ minHeight: 28 }}>
         {hv && hv.i !== hv.j && (
           <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#0f172a] border border-[#1e293b] text-[11px]">
@@ -563,17 +1078,13 @@ function CorrelationHeatmap({ data }: { data: { tickers: string[]; matrix: numbe
             <span className="text-[#334155]">↔</span>
             <span className="font-mono font-bold text-[#94a3b8]">{data.tickers[hv.j]}</span>
             <span className="text-[#1e293b] mx-1">|</span>
-            <span className={`font-mono font-bold text-[13px] ${
-              data.matrix[hv.i][hv.j] > 0 ? 'text-[#f87171]' : 'text-[#60a5fa]'
-            }`}>
-              {data.matrix[hv.i][hv.j] > 0 ? '+' : ''}{data.matrix[hv.i][hv.j].toFixed(4)}
+            <span className={`font-mono font-bold text-[13px] ${data.matrix[hv.i][hv.j] > 0 ? 'text-[#f87171]' : 'text-[#60a5fa]'}`}>
+              {fp(data.matrix[hv.i][hv.j], 4)}
             </span>
             <span className="text-[#374151] text-[10px]">{corrLabel(data.matrix[hv.i][hv.j])}</span>
           </div>
         )}
       </div>
-
-      {/* Color legend */}
       <div className="flex items-center gap-2 px-1">
         <span className="text-[9px] text-[#3b82f6] font-bold">-1</span>
         <div style={{
@@ -591,7 +1102,7 @@ function CorrelationHeatmap({ data }: { data: { tickers: string[]; matrix: numbe
   )
 }
 
-// sessionStorage keys for Brief state persistence across navigation
+// sessionStorage keys
 const SK_CONTENT  = 'pfp_brief_content'
 const SK_FILE     = 'pfp_brief_file'
 const SK_LOGS     = 'pfp_brief_logs'
@@ -599,7 +1110,6 @@ const SK_PENDING  = 'pfp_brief_pending'
 
 // ── Daily Brief (right panel) ─────────────────────────────────────────────────
 function DailyBriefPanel() {
-  // Restore state from sessionStorage so navigation away doesn't wipe it
   const [file, setFile]         = useState<string | null>(() => sessionStorage.getItem(SK_FILE))
   const [content, setContent]   = useState<string | null>(() => sessionStorage.getItem(SK_CONTENT))
   const [logs, setLogs]         = useState<string[]>(() => {
@@ -647,32 +1157,19 @@ function DailyBriefPanel() {
     },
   })
 
-  // Fix 1: proper jsPDF named export + render element visibly (opacity:0) so
-  // html2canvas can measure layout, then remove after capture.
   const downloadPDF = async () => {
     if (!content) return
     setPdfBusy(true)
     try {
-      const [jspdfMod, h2cMod] = await Promise.all([
-        import('jspdf'),
-        import('html2canvas'),
-      ])
-      // jspdf v2 exports jsPDF as a named export; fall back to .default for CJS interop
-      const JsPDF      = (jspdfMod as any).jsPDF ?? (jspdfMod as any).default
+      const [jspdfMod, h2cMod] = await Promise.all([import('jspdf'), import('html2canvas')])
+      const JsPDF       = (jspdfMod as any).jsPDF ?? (jspdfMod as any).default
       const html2canvas = (h2cMod as any).default ?? h2cMod
 
       const dateStr  = new Date().toLocaleDateString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric' })
       const titleStr = file ? file.replace(/\.md$/, '') : `Daily Brief · ${dateStr}`
 
-      // Position off-screen with z-index:-9999 (NOT opacity:0 — opacity:0 makes
-      // html2canvas produce a blank transparent canvas).
       const wrap = document.createElement('div')
-      wrap.style.cssText = [
-        'position:fixed', 'top:0', 'left:0',
-        'width:800px', 'background:#fff',
-        'z-index:-9999', 'pointer-events:none',
-      ].join(';')
-
+      wrap.style.cssText = 'position:fixed;top:0;left:0;width:800px;background:#fff;z-index:-9999;pointer-events:none'
       wrap.innerHTML = `
         <div style="background:#0f2044;padding:24px 40px 20px;">
           <div style="font-size:9px;letter-spacing:4px;color:#93c5fd;font-weight:700;margin-bottom:6px">PERSONAL FINANCIAL PLATFORM</div>
@@ -682,8 +1179,6 @@ function DailyBriefPanel() {
         <div id="pfp-pdf-body" style="padding:32px 40px 48px;color:#111827;font-family:'Helvetica Neue',Arial,sans-serif;font-size:13.5px;line-height:1.75;"></div>
       `
       document.body.appendChild(wrap)
-
-      // Inject rendered markdown HTML + light-theme override styles
       const body = wrap.querySelector('#pfp-pdf-body')!
       body.innerHTML = contentRef.current?.innerHTML ?? content.replace(/\n/g, '<br/>')
 
@@ -691,13 +1186,11 @@ function DailyBriefPanel() {
       overrideStyle.id = 'pfp-pdf-override'
       overrideStyle.textContent = `
         #pfp-pdf-body *          { color:#111827!important; background:transparent!important; border-color:#d1d5db!important; }
-        #pfp-pdf-body h1         { font-size:20px!important; font-weight:900!important; color:#0f2044!important;
-                                   border-bottom:2px solid #0f2044!important; padding-bottom:8px!important; margin:0 0 16px!important; }
+        #pfp-pdf-body h1         { font-size:20px!important; font-weight:900!important; color:#0f2044!important; border-bottom:2px solid #0f2044!important; padding-bottom:8px!important; margin:0 0 16px!important; }
         #pfp-pdf-body h2         { font-size:16px!important; font-weight:700!important; color:#1e3a5f!important; margin:20px 0 8px!important; }
         #pfp-pdf-body h3         { font-size:14px!important; font-weight:700!important; color:#374151!important; margin:14px 0 6px!important; }
         #pfp-pdf-body p          { margin:0 0 10px!important; }
-        #pfp-pdf-body ul,
-        #pfp-pdf-body ol         { padding-left:20px!important; margin:0 0 10px!important; }
+        #pfp-pdf-body ul,#pfp-pdf-body ol { padding-left:20px!important; margin:0 0 10px!important; }
         #pfp-pdf-body li         { margin-bottom:3px!important; }
         #pfp-pdf-body strong     { color:#111827!important; font-weight:700!important; }
         #pfp-pdf-body code       { background:#f3f4f6!important; color:#1d4ed8!important; padding:1px 5px!important; border-radius:3px!important; font-size:12px!important; }
@@ -708,52 +1201,35 @@ function DailyBriefPanel() {
         #pfp-pdf-body td         { color:#4b5563!important; border:1px solid #e5e7eb!important; padding:6px 8px!important; }
       `
       document.head.appendChild(overrideStyle)
-
-      // Wait one frame so the browser fully computes layout
       await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))
 
-      const canvas = await html2canvas(wrap, {
-        scale: 2,
-        backgroundColor: '#ffffff',
-        useCORS: true,
-        logging: false,
-        windowWidth: 800,
-      })
-
+      const canvas = await html2canvas(wrap, { scale: 2, backgroundColor: '#ffffff', useCORS: true, logging: false, windowWidth: 800 })
       document.body.removeChild(wrap)
       document.head.removeChild(overrideStyle)
 
-      // Paginate into A4 (210 × 297 mm)
       const pdf     = new JsPDF('p', 'mm', 'a4')
       const pageW   = pdf.internal.pageSize.getWidth()
       const pageH   = pdf.internal.pageSize.getHeight()
       const pxPerMm = canvas.width / pageW
       const slicePx = pageH * pxPerMm
 
-      let srcY = 0
-      let page = 0
+      let srcY = 0, page = 0
       while (srcY < canvas.height) {
         const rowH  = Math.min(slicePx, canvas.height - srcY)
         const slice = document.createElement('canvas')
-        slice.width  = canvas.width
-        slice.height = rowH
+        slice.width = canvas.width; slice.height = rowH
         const ctx = slice.getContext('2d')!
-        ctx.fillStyle = '#ffffff'
-        ctx.fillRect(0, 0, slice.width, slice.height)
+        ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, slice.width, slice.height)
         ctx.drawImage(canvas, 0, -srcY, canvas.width, canvas.height)
-
         if (page > 0) pdf.addPage()
         pdf.addImage(slice.toDataURL('image/jpeg', 0.92), 'JPEG', 0, 0, pageW, rowH / pxPerMm)
-
-        srcY += slicePx
-        page++
+        srcY += slicePx; page++
       }
-
       const fname = (file || `brief_${new Date().toISOString().slice(0, 10)}`).replace(/\.md$/, '')
       pdf.save(`${fname}.pdf`)
     } catch (err) {
       console.error('[PDF]', err)
-      alert('PDF 생성 중 오류가 발생했습니다. 콘솔을 확인해주세요.')
+      alert('PDF 생성 중 오류가 발생했습니다.')
     } finally {
       setPdfBusy(false)
     }
@@ -763,19 +1239,14 @@ function DailyBriefPanel() {
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
-      {/* Action buttons */}
       <div className="flex-shrink-0 flex gap-2 p-3 border-b border-[#1e2d40]">
         <button onClick={() => genMut.mutate()} disabled={isGenerating}
           className="flex-1 flex items-center justify-center gap-2 py-2 bg-[#10b981]/12 border border-[#10b981]/30 text-[#10b981] text-[11px] font-bold rounded hover:bg-[#10b981]/20 disabled:opacity-50 transition-colors">
           <Play className="w-3.5 h-3.5" />
           {isGenerating ? 'GENERATING…' : 'GENERATE BRIEF'}
         </button>
-        <button
-          onClick={downloadPDF}
-          disabled={!content || pdfBusy}
-          title="PDF로 다운로드"
-          className={cn(
-            'px-3 py-2 rounded border text-[11px] font-bold transition-colors flex items-center gap-1.5',
+        <button onClick={downloadPDF} disabled={!content || pdfBusy} title="PDF로 다운로드"
+          className={cn('px-3 py-2 rounded border text-[11px] font-bold transition-colors flex items-center gap-1.5',
             content && !pdfBusy
               ? 'border-[#3b82f6]/50 bg-[#3b82f6]/10 text-[#3b82f6] hover:bg-[#3b82f6]/20'
               : 'border-[#1e2d40] text-[#374151] cursor-not-allowed opacity-40'
@@ -793,7 +1264,6 @@ function DailyBriefPanel() {
         </button>
       </div>
 
-      {/* Resumed-from-navigation banner */}
       {wasPending && !isGenerating && !content && (
         <div className="flex-shrink-0 border-b border-[#f59e0b]/30 px-3 py-2 bg-[#f59e0b]/8 flex items-center gap-2">
           <span className="w-2 h-2 rounded-full bg-[#f59e0b] flex-shrink-0" />
@@ -803,18 +1273,14 @@ function DailyBriefPanel() {
         </div>
       )}
 
-      {/* History dropdown */}
       {showHist && (
         <div className="flex-shrink-0 max-h-40 overflow-y-auto border-b border-[#1e2d40] bg-[#060b14]">
           {(histQ.data || []).map(f => (
             <button key={f.name}
               onClick={() => {
-                setFile(f.name)
-                sessionStorage.setItem(SK_FILE, f.name)
-                fileMut.mutate(f.name)
-                setShowHist(false)
-                setWasPending(false)
-                sessionStorage.removeItem(SK_PENDING)
+                setFile(f.name); sessionStorage.setItem(SK_FILE, f.name)
+                fileMut.mutate(f.name); setShowHist(false)
+                setWasPending(false); sessionStorage.removeItem(SK_PENDING)
               }}
               className={cn('w-full text-left px-3 py-2 text-[12px] border-b border-[#0f172a] font-mono truncate transition-colors',
                 file === f.name ? 'text-[#10b981] bg-[#0f172a]' : 'text-[#64748b] hover:text-[#94a3b8] hover:bg-[#0a1020]'
@@ -825,7 +1291,6 @@ function DailyBriefPanel() {
         </div>
       )}
 
-      {/* Pipeline logs while generating */}
       {isGenerating && (
         <div className="flex-shrink-0 border-b border-[#1e2d40] px-3 py-2.5 space-y-1.5 bg-[#060b14]">
           {logs.map((l, i) => (
@@ -840,7 +1305,6 @@ function DailyBriefPanel() {
         </div>
       )}
 
-      {/* Content area */}
       <div className="flex-1 overflow-y-auto">
         {!content && !isGenerating && !wasPending && (
           <div className="flex flex-col items-center justify-center h-full gap-3 p-5 text-center">
@@ -905,14 +1369,14 @@ export default function AlphaTerminal() {
       <div className="flex-shrink-0 bg-[#060b14] border-b border-[#1e2d40]">
         {m && (
           <div className="flex items-stretch overflow-x-auto">
-            <Pill label="PORTFOLIO"  value={`$${(m.total_equity / 1000).toFixed(1)}K`} />
-            <Pill label="TODAY"      value={`${m.today_change_pct >= 0 ? '+' : ''}${m.today_change_pct.toFixed(2)}%`}    color={m.today_change_pct >= 0 ? '#10b981' : '#ef4444'} />
-            <Pill label="1W"         value={`${m.perf_1w >= 0 ? '+' : ''}${m.perf_1w.toFixed(2)}%`}                      color={m.perf_1w >= 0 ? '#10b981' : '#ef4444'} />
-            <Pill label="1M"         value={`${m.perf_1m >= 0 ? '+' : ''}${m.perf_1m.toFixed(2)}%`}                      color={m.perf_1m >= 0 ? '#10b981' : '#ef4444'} />
-            <Pill label="TOTAL RTN"  value={`${m.total_return_pct >= 0 ? '+' : ''}${m.total_return_pct.toFixed(2)}%`}    color={m.total_return_pct >= 0 ? '#10b981' : '#ef4444'} />
-            <Pill label="BETA"       value={m.portfolio_beta.toFixed(2)} />
-            <Pill label="VIX"        value={m.vix.toFixed(2)}                                                             color={m.vix > 25 ? '#ef4444' : m.vix > 18 ? '#f59e0b' : '#10b981'} />
-            <Pill label="α vs S&P"   value={`${m.alpha_vs_sp500 >= 0 ? '+' : ''}${m.alpha_vs_sp500.toFixed(1)}%`}        color={m.alpha_vs_sp500 >= 0 ? '#10b981' : '#ef4444'} />
+            <Pill label="PORTFOLIO"  value={`$${fn(fv(m.total_equity) / 1000, 1)}K`} />
+            <Pill label="TODAY"      value={fp(m.today_change_pct)}  color={fv(m.today_change_pct) >= 0 ? '#10b981' : '#ef4444'} />
+            <Pill label="1W"         value={fp(m.perf_1w)}           color={fv(m.perf_1w) >= 0 ? '#10b981' : '#ef4444'} />
+            <Pill label="1M"         value={fp(m.perf_1m)}           color={fv(m.perf_1m) >= 0 ? '#10b981' : '#ef4444'} />
+            <Pill label="TOTAL RTN"  value={fp(m.total_return_pct)}  color={fv(m.total_return_pct) >= 0 ? '#10b981' : '#ef4444'} />
+            <Pill label="BETA"       value={fn(m.portfolio_beta)} />
+            <Pill label="VIX"        value={fn(m.vix)}               color={fv(m.vix) > 25 ? '#ef4444' : fv(m.vix) > 18 ? '#f59e0b' : '#10b981'} />
+            <Pill label="α vs S&P"   value={fp(m.alpha_vs_sp500, 1)} color={fv(m.alpha_vs_sp500) >= 0 ? '#10b981' : '#ef4444'} />
           </div>
         )}
       </div>
@@ -926,14 +1390,14 @@ export default function AlphaTerminal() {
           <Shield className="w-4 h-4" />
           <span className="font-bold tracking-wider">DOOM  SEV {doom.severity}/5</span>
           <span className="opacity-80">{doom.comment}</span>
-          <span className="ml-auto font-mono text-[12px]">Rate {doom.rate_spread > 0 ? '+' : ''}{doom.rate_spread.toFixed(2)}%p  ·  HY {doom.hy_spread.toFixed(0)} bps</span>
+          <span className="ml-auto font-mono text-[12px]">Rate {fp(doom.rate_spread)}p  ·  HY {fn(doom.hy_spread, 0)} bps</span>
         </div>
       )}
 
       {/* ── Main layout ── */}
       <div className="flex flex-1 min-h-0">
 
-        {/* ═══ LEFT PANEL — flex-1 expands into freed space when right panel closes ═══ */}
+        {/* ═══ LEFT PANEL ═══ */}
         <div className="overflow-y-auto border-r border-[#1e2d40] flex-1 min-w-0">
 
           {/* A: Equity Curve */}
@@ -945,7 +1409,10 @@ export default function AlphaTerminal() {
               <HoldingsPanel holdQ={holdQ} />
             </div>
             <div className="overflow-hidden" style={{ width: '45%' }}>
-              <SectorsPanel sectorData={sectorQ.data || {}} />
+              <SectorsPanel
+                sectorData={sectorQ.data || {}}
+                rawHoldings={rawHoldQ.data || {}}
+              />
             </div>
           </div>
 
@@ -955,9 +1422,7 @@ export default function AlphaTerminal() {
               {BOT_TABS.map((t, i) => (
                 <button key={t} onClick={() => setBotTab(i)}
                   className={cn('px-5 py-2.5 text-[11px] font-bold tracking-widest transition-colors uppercase',
-                    botTab === i
-                      ? 'text-[#3b82f6] border-b-2 border-[#3b82f6]'
-                      : 'text-[#64748b] hover:text-[#94a3b8]'
+                    botTab === i ? 'text-[#3b82f6] border-b-2 border-[#3b82f6]' : 'text-[#64748b] hover:text-[#94a3b8]'
                   )}>
                   {t}
                 </button>
@@ -996,8 +1461,8 @@ export default function AlphaTerminal() {
                     { label: 'Unemployment',  value: `${macroQ.data.unemployment}%` },
                     { label: 'CPI (YoY)',     value: `${macroQ.data.cpi}%` },
                     { label: 'GDP Growth',    value: `${macroQ.data.gdp}%` },
-                    { label: '10Y-2Y Spread', value: `${macroQ.data.t10y2y >= 0 ? '+' : ''}${macroQ.data.t10y2y.toFixed(2)}%p`, color: macroQ.data.t10y2y < 0 ? '#ef4444' : '#10b981' },
-                    { label: 'HY Spread',     value: `${macroQ.data.bamlh0a0hym2.toFixed(0)} bps`, color: macroQ.data.bamlh0a0hym2 > 500 ? '#ef4444' : '#f59e0b' },
+                    { label: '10Y-2Y Spread', value: `${fp(macroQ.data.t10y2y)}p`, color: fv(macroQ.data.t10y2y) < 0 ? '#ef4444' : '#10b981' },
+                    { label: 'HY Spread',     value: `${fn(macroQ.data.bamlh0a0hym2, 0)} bps`, color: fv(macroQ.data.bamlh0a0hym2) > 500 ? '#ef4444' : '#f59e0b' },
                   ].map(item => (
                     <div key={item.label} className="bg-[#060b14] border border-[#1e2d40] rounded p-3">
                       <div className="text-[11px] text-[#64748b] font-bold tracking-wider uppercase mb-1">{item.label}</div>
@@ -1013,45 +1478,55 @@ export default function AlphaTerminal() {
         {/* ═══ RIGHT PANEL — collapsible ═══ */}
         {rightOpen ? (
           <div className="flex flex-col min-h-0 flex-shrink-0" style={{ width: '30%', minWidth: '260px' }}>
-            {/* Tab bar + collapse button */}
             <div className="flex-shrink-0 bg-[#060b14] border-b border-[#1e2d40] flex items-center">
               <div className="flex flex-1">
                 {RIGHT_TABS.map((t, i) => (
                   <button key={t} onClick={() => setRightTab(i)}
                     className={cn('flex-1 py-2.5 text-[10px] font-bold tracking-widest uppercase transition-colors',
-                      rightTab === i
-                        ? 'text-[#3b82f6] border-b-2 border-[#3b82f6] bg-[#3b82f6]/5'
-                        : 'text-[#64748b] hover:text-[#94a3b8]'
+                      rightTab === i ? 'text-[#3b82f6] border-b-2 border-[#3b82f6] bg-[#3b82f6]/5' : 'text-[#64748b] hover:text-[#94a3b8]'
                     )}>
                     {t}
                   </button>
                 ))}
               </div>
-              <button
-                onClick={() => setRightOpen(false)}
-                title="패널 닫기"
-                className="flex-shrink-0 px-2.5 py-2.5 text-[#374151] hover:text-[#64748b] hover:bg-[#0f172a] transition-colors border-l border-[#1e2d40]"
-              >
+              <button onClick={() => setRightOpen(false)} title="패널 닫기"
+                className="flex-shrink-0 px-2.5 py-2.5 text-[#374151] hover:text-[#64748b] hover:bg-[#0f172a] transition-colors border-l border-[#1e2d40]">
                 <PanelRightClose className="w-4 h-4" />
               </button>
             </div>
 
-            {/* Content */}
             <div className="flex-1 min-h-0 overflow-hidden">
               {rightTab === 0 && <DailyBriefPanel />}
 
               {rightTab === 1 && (
-                <div className="h-full overflow-y-auto p-4">
-                  {feedbackQ.isLoading && <div className="text-sm text-[#64748b] py-4 text-center">로드 중…</div>}
-                  {feedbackQ.data && (
-                    <div>
-                      <div className="flex items-center gap-2 mb-3">
-                        <MessageSquare className="w-4 h-4 text-[#3b82f6]" />
-                        <span className="text-[11px] text-[#64748b] font-bold tracking-widest">AI ANALYST</span>
-                      </div>
-                      <p className="text-sm text-[#94a3b8] leading-relaxed whitespace-pre-wrap">{feedbackQ.data.feedback}</p>
+                <div className="h-full flex flex-col overflow-hidden">
+                  <div className="flex-shrink-0 flex items-center justify-between px-4 py-2.5 border-b border-[#1e2d40] bg-[#060b14]">
+                    <div className="flex items-center gap-2">
+                      <MessageSquare className="w-4 h-4 text-[#3b82f6]" />
+                      <span className="text-[11px] text-[#64748b] font-bold tracking-widest">AI ANALYST</span>
                     </div>
-                  )}
+                    <button
+                      onClick={() => {
+                        qc.invalidateQueries({ queryKey: ['analyst-feedback'] })
+                        feedbackQ.refetch()
+                      }}
+                      disabled={feedbackQ.isFetching}
+                      className="flex items-center gap-1.5 text-[11px] text-[#3b82f6] hover:text-[#60a5fa] disabled:opacity-40 transition-colors">
+                      <RefreshCw className={cn('w-3 h-3', feedbackQ.isFetching && 'animate-spin')} />
+                      재분석
+                    </button>
+                  </div>
+                  <div className="flex-1 overflow-y-auto p-4">
+                    {feedbackQ.isFetching && (
+                      <div className="flex items-center gap-2 py-4 justify-center">
+                        <span className="w-2 h-2 rounded-full bg-[#3b82f6] animate-pulse" />
+                        <span className="text-sm text-[#64748b]">AI 분석 중…</span>
+                      </div>
+                    )}
+                    {feedbackQ.data && !feedbackQ.isFetching && (
+                      <p className="text-sm text-[#94a3b8] leading-relaxed whitespace-pre-wrap">{feedbackQ.data.feedback}</p>
+                    )}
+                  </div>
                 </div>
               )}
 
@@ -1069,12 +1544,10 @@ export default function AlphaTerminal() {
                         <div key={p.ticker} className="bg-[#060b14] border border-[#1e2d40] rounded p-3">
                           <div className="flex justify-between items-center">
                             <span className="font-mono font-bold text-base text-[#e2e8f0]">{p.ticker}</span>
-                            <span className="text-sm text-[#10b981] font-mono font-bold">+{p.upside?.toFixed(1)}%</span>
+                            <span className="text-sm text-[#10b981] font-mono font-bold">+{fn(p.upside, 1)}%</span>
                           </div>
                           <div className="text-[12px] text-[#64748b] mt-0.5">{p.method}</div>
-                          <div className="text-[12px] text-[#4a5568] mt-0.5 truncate">
-                            ${p.entry} → ${p.target} | stop ${p.stop}
-                          </div>
+                          <div className="text-[12px] text-[#4a5568] mt-0.5 truncate">${p.entry} → ${p.target} | stop ${p.stop}</div>
                         </div>
                       ))}
                       <div className="text-[11px] text-[#ef4444] font-bold tracking-widest mt-1">SHORT TOP PICKS</div>
@@ -1082,7 +1555,7 @@ export default function AlphaTerminal() {
                         <div key={p.ticker} className="bg-[#060b14] border border-[#1e2d40] rounded p-3">
                           <div className="flex justify-between items-center">
                             <span className="font-mono font-bold text-base text-[#e2e8f0]">{p.ticker}</span>
-                            <span className="text-sm text-[#ef4444] font-mono font-bold">{p.downside?.toFixed(1)}%</span>
+                            <span className="text-sm text-[#ef4444] font-mono font-bold">{fn(p.downside, 1)}%</span>
                           </div>
                           <div className="text-[12px] text-[#64748b] mt-0.5">{p.method}</div>
                         </div>
@@ -1114,26 +1587,18 @@ export default function AlphaTerminal() {
             </div>
           </div>
         ) : (
-          /* ── Collapsed rail ── */
           <div className="flex flex-col items-center bg-[#060b14] border-l border-[#1e2d40] flex-shrink-0 py-3 gap-3"
             style={{ width: '32px' }}>
-            <button
-              onClick={() => setRightOpen(true)}
-              title="패널 열기"
-              className="text-[#64748b] hover:text-[#3b82f6] transition-colors"
-            >
+            <button onClick={() => setRightOpen(true)} title="패널 열기"
+              className="text-[#64748b] hover:text-[#3b82f6] transition-colors">
               <PanelRightOpen className="w-4 h-4" />
             </button>
             {RIGHT_TABS.map((t, i) => (
-              <button key={t}
-                onClick={() => { setRightTab(i); setRightOpen(true) }}
-                title={t}
-                className={cn(
-                  'text-[9px] font-bold tracking-widest uppercase transition-colors px-0.5',
+              <button key={t} onClick={() => { setRightTab(i); setRightOpen(true) }} title={t}
+                className={cn('text-[9px] font-bold tracking-widest uppercase transition-colors px-0.5',
                   rightTab === i ? 'text-[#3b82f6]' : 'text-[#374151] hover:text-[#64748b]'
                 )}
-                style={{ writingMode: 'vertical-rl', textOrientation: 'mixed', transform: 'rotate(180deg)' }}
-              >
+                style={{ writingMode: 'vertical-rl', textOrientation: 'mixed', transform: 'rotate(180deg)' }}>
                 {t}
               </button>
             ))}
@@ -1149,7 +1614,7 @@ export default function AlphaTerminal() {
 
       <style>{`
         @keyframes marquee { 0%{transform:translateX(0)} 100%{transform:translateX(-50%)} }
-        .animate-marquee { animation: marquee 50s linear infinite; }
+        .animate-marquee { animation: marquee 60s linear infinite; }
 
         .brief-md h1,.brief-md h2,.brief-md h3 { font-size:13px; color:#cbd5e1; font-weight:700; margin-top:12px; margin-bottom:4px; }
         .brief-md h1 { font-size:14px; color:#e2e8f0; border-bottom:1px solid #1e2d40; padding-bottom:5px; }

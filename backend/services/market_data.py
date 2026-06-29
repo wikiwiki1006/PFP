@@ -63,16 +63,59 @@ SECTOR_ETF_TICKERS = [etf for _, etf in GICS_SECTOR_ETFS]
 
 
 def get_close_df(tickers: list[str], period: str = "2y", ttl: int = 300) -> pd.DataFrame:
-    all_tickers = list(set(tickers + ALWAYS_FETCH))
-    key = f"close_{','.join(sorted(all_tickers))}_{period}"
+    """
+    1) 메모리 캐시 (TTL 5분) 히트 → 즉시 반환
+    2) DB market_prices 조회 → stale 티커만 yfinance 보충 후 DB 저장
+    3) DB 미연결 → 기존처럼 yfinance 전량 수집
+    """
+    from backend.db.market_cache import get_prices_from_db, save_prices_to_db, get_stale_tickers
 
+    all_tickers = list(set(tickers + ALWAYS_FETCH))
+    mem_key = f"close_{','.join(sorted(all_tickers))}_{period}"
+
+    # ① 메모리 캐시 확인
+    now = time.time()
+    if mem_key in _cache:
+        ts, val = _cache[mem_key]
+        if now - ts < ttl:
+            return val
+
+    # ② DB 우선 경로
+    from backend.db import is_available
+    if is_available():
+        stale = get_stale_tickers(all_tickers)
+        # stale 티커만 yfinance 수집 후 DB 저장
+        if stale:
+            try:
+                fresh_data = yf.download(stale, period=period, progress=False, auto_adjust=True)
+                if not fresh_data.empty:
+                    fresh_df = (
+                        fresh_data["Close"].ffill()
+                        if isinstance(fresh_data.columns, pd.MultiIndex)
+                        else fresh_data.ffill()
+                    )
+                    save_prices_to_db(fresh_df)
+            except Exception as e:
+                import logging; logging.getLogger(__name__).warning(f"yfinance 수집 실패: {e}")
+
+        db_df = get_prices_from_db(all_tickers, period)
+        if db_df is not None and not db_df.empty:
+            _cache[mem_key] = (now, db_df)
+            return db_df
+
+    # ③ DB 없음 → yfinance 전량 수집 (기존 폴백)
     def _fetch():
         data = yf.download(all_tickers, period=period, progress=False, auto_adjust=True)
         if isinstance(data.columns, pd.MultiIndex):
             return data["Close"].ffill()
         return data.ffill()
 
-    return _cached(key, ttl, _fetch)
+    result = _fetch()
+    # DB가 살아있으면 저장도 해둠
+    if is_available():
+        save_prices_to_db(result)
+    _cache[mem_key] = (now, result)
+    return result
 
 
 def _get_sector_etf_df_1mo(ttl: int = 300) -> pd.DataFrame:
@@ -239,7 +282,7 @@ def get_portfolio_news(tickers: list[str], max_per: int = 2, max_macro: int = 4,
     key = f"news_{','.join(sorted(tickers))}"
 
     def _fetch():
-        items = []
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         def _extract(news_list, tag, max_n):
             out = []
@@ -268,19 +311,22 @@ def get_portfolio_news(tickers: list[str], max_per: int = 2, max_macro: int = 4,
                 out.append({"ticker": tag, "headline": headline.strip(), "url": url, "datetime": pub_unix})
             return out
 
-        for t in tickers:
+        def _fetch_one(symbol, tag, max_n):
             try:
-                news = yf.Ticker(t).news or []
-                items.extend(_extract(news, t, max_per))
+                news = yf.Ticker(symbol).news or []
+                return _extract(news, tag, max_n)
             except Exception:
-                continue
+                return []
 
-        for src in ["^GSPC", "^IXIC", "^TNX"]:
-            try:
-                news = yf.Ticker(src).news or []
-                items.extend(_extract(news, "MACRO", max_macro))
-            except Exception:
-                continue
+        # 종목 뉴스 + 매크로 뉴스를 한 번에 병렬 조회
+        macro_sources = [("^GSPC", "MACRO", max_macro), ("^IXIC", "MACRO", max_macro), ("^TNX", "MACRO", max_macro)]
+        tasks = [(t, t, max_per) for t in tickers] + macro_sources
+
+        items = []
+        with ThreadPoolExecutor(max_workers=min(len(tasks), 12)) as pool:
+            futures = {pool.submit(_fetch_one, sym, tag, mx): (sym, tag) for sym, tag, mx in tasks}
+            for fut in as_completed(futures):
+                items.extend(fut.result())
 
         items.sort(key=lambda x: x["datetime"], reverse=True)
         return items[:18]
