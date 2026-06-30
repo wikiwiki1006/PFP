@@ -8,6 +8,7 @@ import type {
   MonteCarloPortfolioResult, MonteCarloStockResult, MonteCarloMacroResult,
   MacroModes, MacroAnalysisResult, AnalystFeedback,
   DailyBriefResult, ReportFile, Industry, EquityReportResult, IndustryReportResult,
+  MarketSituation, BBScanFullResult, TechnicalChartResult, PairsAutoResult,
 } from '@/types'
 
 export const api = axios.create({
@@ -116,6 +117,19 @@ export const getMomentumSignal = async (ticker: string): Promise<MomentumSignal>
 
 export const getMarketRegime = async (ticker = '^GSPC', period = '2y'): Promise<MarketRegime> =>
   (await api.get('/api/signals/regime', { params: { ticker, period } })).data
+
+// ── Timing Engine ──────────────────────────────────────────────────────────────
+export const getMarketSituation = async (): Promise<MarketSituation> =>
+  (await api.get('/api/signals/market-situation')).data
+
+export const getBBScanFull = async (topN = 10): Promise<BBScanFullResult> =>
+  (await api.get('/api/signals/bb-scan-full', { params: { top_n: topN } })).data
+
+export const getTechnicalChart = async (ticker: string, period = '3y'): Promise<TechnicalChartResult> =>
+  (await api.get('/api/signals/technical-chart', { params: { ticker, period } })).data
+
+export const getPairsAuto = async (ticker: string, thresholdPct = 5, topN = 5): Promise<PairsAutoResult> =>
+  (await api.get('/api/signals/pairs-auto', { params: { ticker, threshold_pct: thresholdPct, top_n: topN } })).data
 
 // ── Optimizer ──────────────────────────────────────────────────────────────────
 export const runMaxSharpe = async (body?: object): Promise<OptimizationResult> =>

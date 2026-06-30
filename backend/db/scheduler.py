@@ -21,10 +21,12 @@ _stop_event = threading.Event()
 _thread: threading.Thread | None = None
 
 # 주기 (초)
-_SNAPSHOT_INTERVAL   = 60        # 1분
-_SECTOR_INTERVAL     = 300       # 5분
-_MACRO_INTERVAL      = 3600      # 1시간
-_HISTORY_INTERVAL    = 43200     # 12시간
+_SNAPSHOT_INTERVAL      = 60        # 1분
+_SECTOR_INTERVAL        = 300       # 5분
+_MACRO_INTERVAL         = 3600      # 1시간
+_HISTORY_INTERVAL       = 43200     # 12시간
+_BB_SCAN_INTERVAL       = 21600     # 6시간 (Timing Engine: S&P500 볼린저 스캔)
+_MACRO_SPREAD_INTERVAL  = 86400     # 24시간 (Timing Engine: 금리차/HY스프레드 백분위)
 
 
 def start():
@@ -32,7 +34,7 @@ def start():
     _stop_event.clear()
     _thread = threading.Thread(target=_loop, name="pfp-scheduler", daemon=True)
     _thread.start()
-    logger.info("백그라운드 스케줄러 시작 (snapshot 60s / sector 5m / macro 1h / history 12h)")
+    logger.info("백그라운드 스케줄러 시작 (snapshot 60s / sector 5m / macro 1h / history 12h / bb_scan 6h / macro_spread 24h)")
 
 
 def stop():
@@ -41,9 +43,11 @@ def stop():
 
 
 def _loop():
-    last_sector  = 0.0
-    last_macro   = 0.0
-    last_history = 0.0
+    last_sector       = 0.0
+    last_macro        = 0.0
+    last_history      = 0.0
+    last_bb_scan      = 0.0
+    last_macro_spread = 0.0
 
     while not _stop_event.is_set():
         now = time.time()
@@ -65,6 +69,16 @@ def _loop():
         if now - last_history >= _HISTORY_INTERVAL:
             _run_safe("history", _update_history)
             last_history = now
+
+        # ⑤ Timing Engine: S&P500 볼린저 스캔, 6시간마다
+        if now - last_bb_scan >= _BB_SCAN_INTERVAL:
+            _run_safe("bb_scan", _update_bb_scan)
+            last_bb_scan = now
+
+        # ⑥ Timing Engine: 금리차/HY스프레드 백분위, 24시간마다
+        if now - last_macro_spread >= _MACRO_SPREAD_INTERVAL:
+            _run_safe("macro_spread", _update_macro_spread_history)
+            last_macro_spread = now
 
         _stop_event.wait(_SNAPSHOT_INTERVAL)
 
@@ -166,6 +180,33 @@ def _update_history():
     logger.info(f"가격 이력 갱신 시작: {len(tickers)}개 티커")
     prefetch_tickers(tickers, period="2y")
     logger.info("가격 이력 갱신 완료")
+
+
+def _update_bb_scan():
+    """Timing Engine: S&P500 전체 3년 볼린저 밴드 스캔 → common_cache 저장."""
+    import pandas as pd
+    from backend.services.market_data import get_close_df
+    from backend.services.trading_signals import get_sp500_universe, bollinger_scan_full_universe
+    from backend.db.market_cache import save_common
+
+    universe = get_sp500_universe()
+    close_df = get_close_df(universe, period="5y", ttl=0)
+    cutoff   = close_df.index.max() - pd.Timedelta(days=365 * 3)
+    trimmed  = close_df[close_df.index >= cutoff]
+    valid_cols = [c for c in universe if c in trimmed.columns]
+    result = bollinger_scan_full_universe(trimmed[valid_cols], top_n=10)
+    save_common("bb_scan_sp500", result, ttl_seconds=_BB_SCAN_INTERVAL * 2)
+    logger.info(f"bb_scan 갱신 완료: {result.get('scanned', 0)}개 종목 스캔")
+
+
+def _update_macro_spread_history():
+    """Timing Engine: 금리차/HY스프레드 과거 백분위 기반 Low/Normal/High 분류 → common_cache 저장."""
+    from backend.services.trading_signals import compute_macro_spread_levels
+    from backend.db.market_cache import save_common
+
+    result = compute_macro_spread_levels()
+    save_common("market_situation", result, ttl_seconds=_MACRO_SPREAD_INTERVAL * 2)
+    logger.info("macro_spread 갱신 완료")
 
 
 # ── 사용자 개인 데이터 즉시 갱신 (API 요청 시 호출) ───────────────────────────

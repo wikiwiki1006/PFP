@@ -188,6 +188,91 @@ export interface MarketRegime {
   chart_data: RegimeChartPoint[]
 }
 
+// Timing Engine Types
+export type MarketSituationLevel = 'Low' | 'Normal' | 'High'
+
+export interface MarketSituationMetric {
+  value: number
+  percentile: number
+  level: MarketSituationLevel
+  color: string
+}
+
+export interface MarketSituation {
+  rate_spread: MarketSituationMetric
+  hy_spread: MarketSituationMetric
+  source: string
+}
+
+export interface BBScanPick {
+  ticker: string
+  z: number
+  entry: number
+  target: number
+  upper_band: number
+  lower_band: number
+  pct_b: number
+  move_pct: number
+  reason: string
+}
+
+export interface BBScanFullResult {
+  long_picks: BBScanPick[]
+  short_picks: BBScanPick[]
+  scanned: number
+}
+
+export interface TechnicalChartPoint {
+  date: string
+  price: number
+  mid: number | null
+  upper: number | null
+  lower: number | null
+  resistance: number | null
+  zscore: number | null
+}
+
+export interface TechnicalChartKeyPoint {
+  date: string
+  price: number
+  type: 'BAND_BREAK_UP' | 'BAND_BREAK_DOWN' | 'RESISTANCE_BREAK'
+}
+
+export interface TechnicalChartResult {
+  ticker: string
+  series: TechnicalChartPoint[]
+  key_points: TechnicalChartKeyPoint[]
+  current_z: number
+  current_signal: string | null
+  bias: 'LONG' | 'SHORT' | 'NEUTRAL'
+}
+
+export interface PairsAutoMatch {
+  ticker: string
+  correlation: number
+}
+
+export interface PairsAutoChartPoint {
+  date: string
+  a: number
+  b: number
+  spread: number
+}
+
+export interface PairsAutoBreach {
+  date: string
+  spread: number
+}
+
+export interface PairsAutoResult {
+  ticker: string
+  matches: PairsAutoMatch[]
+  best: { ticker: string; correlation: number } | null
+  chart: PairsAutoChartPoint[]
+  breaches: PairsAutoBreach[]
+  threshold_pct: number
+}
+
 // Optimizer Types
 export interface FrontierPoint {
   return: number

@@ -12,7 +12,8 @@ import pandas as pd
 from fastapi import APIRouter, Header, HTTPException, Query
 
 from backend.db.portfolio_repo import get_holdings as db_get_holdings
-from backend.services.market_data import get_close_df
+from backend.db.market_cache import get_common, save_common
+from backend.services.market_data import get_close_df, _cached
 from backend.services.trading_signals import (
     SP500_NASDAQ_UNIVERSE,
     fetch_macro_doom_indicators,
@@ -22,6 +23,11 @@ from backend.services.trading_signals import (
     mean_reversion_signal,
     momentum_breakout_signal,
     detect_market_regime,
+    get_sp500_universe,
+    bollinger_scan_full_universe,
+    compute_macro_spread_levels,
+    technical_chart_detail,
+    pairs_auto_detail,
 )
 
 router = APIRouter(prefix="/api/signals", tags=["signals"])
@@ -302,23 +308,27 @@ def market_regime(
     result = detect_market_regime(price)
 
     regime_counts = {}
-    if "regime_series" in result:
+    rl = result.get("regime_labels")
+    if rl is not None and hasattr(rl, "__len__") and len(rl) > 0:
         import pandas as pd
-        rs = pd.Series(result["regime_series"])
+        rs     = pd.Series(rl)
         counts = rs.value_counts()
         total  = len(rs)
         for r_name in ["Bull", "Sideways", "Bear"]:
             regime_counts[r_name] = round(counts.get(r_name, 0) / total * 100, 1) if total > 0 else 0.0
 
     chart_data = []
-    if "regime_series" in result and close_df is not None:
+    if rl is not None and hasattr(rl, "__len__") and len(rl) > 0:
         price_series = close_df[ticker].dropna()
-        for i, (date, regime) in enumerate(zip(price_series.index, result.get("regime_series", []))):
-            chart_data.append({
-                "date":   date.strftime("%Y-%m-%d"),
-                "price":  round(float(price_series.iloc[i]), 2),
-                "regime": regime,
-            })
+        import pandas as pd
+        rl_series = pd.Series(rl)
+        for date, regime in rl_series.items():
+            if date in price_series.index:
+                chart_data.append({
+                    "date":   date.strftime("%Y-%m-%d"),
+                    "price":  round(float(price_series.loc[date]), 2),
+                    "regime": regime,
+                })
 
     return {
         "ticker":          ticker,
@@ -327,3 +337,99 @@ def market_regime(
         "n_regimes":       result.get("n_regimes", 3),
         "chart_data":      chart_data[-252:],
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Timing Engine 신규 엔드포인트
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _trim_years(df: pd.DataFrame, years: int = 3) -> pd.DataFrame:
+    """get_close_df(period='5y') 결과를 최근 N년으로 트림 (yfinance는 '3y'를 지원하지 않음)."""
+    if df.empty:
+        return df
+    cutoff = df.index.max() - pd.Timedelta(days=365 * years)
+    return df[df.index >= cutoff]
+
+
+@router.get("/market-situation")
+def market_situation():
+    """금리차(10Y-2Y) / 하이일드 스프레드의 과거 백분위 기반 Low/Normal/High 분류."""
+    cached = get_common("market_situation")
+    if cached:
+        return cached
+
+    result = compute_macro_spread_levels()
+    save_common("market_situation", result, ttl_seconds=86400)
+    return result
+
+
+@router.get("/bb-scan-full")
+def bb_scan_full(top_n: int = Query(default=10, ge=1, le=30)):
+    """
+    S&P500 전체 종목 대상 3년 볼린저 밴드 스캔 — 매수/매도 신호 상위 N개.
+    common_cache에 6시간 TTL로 캐시(스케줄러가 주기적으로 갱신).
+    """
+    cached = get_common("bb_scan_sp500")
+    if cached:
+        long_picks  = cached.get("long_picks", [])[:top_n]
+        short_picks = cached.get("short_picks", [])[:top_n]
+        return {**cached, "long_picks": long_picks, "short_picks": short_picks}
+
+    universe = get_sp500_universe()
+    close_df = get_close_df(universe, period="5y", ttl=300)
+    close_df = _trim_years(close_df, years=3)
+    valid_cols = [c for c in universe if c in close_df.columns]
+    result = bollinger_scan_full_universe(close_df[valid_cols], top_n=max(top_n, 10))
+    save_common("bb_scan_sp500", result, ttl_seconds=21600)
+    return {
+        **result,
+        "long_picks":  result["long_picks"][:top_n],
+        "short_picks": result["short_picks"][:top_n],
+    }
+
+
+@router.get("/technical-chart")
+def technical_chart(
+    ticker: str = Query(..., description="티커. 예: AAPL"),
+    period: str = Query(default="3y", description="조회 기간 (최대 3y)"),
+):
+    """가격 + 볼린저밴드 + 저항선 + 키포인트(주요 변곡점) 시계열. 매매신호/평균회귀 패널 공용."""
+    ticker = ticker.upper()
+
+    def _compute():
+        close_df = get_close_df([ticker], period="5y", ttl=300)
+        if ticker not in close_df.columns:
+            return None
+        trimmed = _trim_years(close_df, years=3)
+        price = trimmed[ticker].dropna()
+        if price.empty:
+            return None
+        return technical_chart_detail(price)
+
+    result = _cached(f"technical_chart::{ticker}", 600, _compute)
+    if result is None:
+        raise HTTPException(status_code=400, detail=f"{ticker} 데이터 없음")
+
+    return {"ticker": ticker, **result}
+
+
+@router.get("/pairs-auto")
+def pairs_auto(
+    ticker:        str   = Query(..., description="기준 티커. 예: KO"),
+    threshold_pct: float = Query(default=5.0, ge=0.1, le=100.0),
+    top_n:         int   = Query(default=5, ge=1, le=20),
+):
+    """기준 종목과 가장 유사한 페어를 S&P500 유니버스에서 자동 탐색."""
+    ticker = ticker.upper()
+
+    def _compute():
+        universe = get_sp500_universe()
+        candidates = [t for t in universe if t != ticker][:200]
+        close_df = get_close_df([ticker] + candidates, period="5y", ttl=300)
+        return pairs_auto_detail(ticker, close_df, candidates, threshold_pct=threshold_pct, top_n=top_n)
+
+    result = _cached(f"pairs_auto::{ticker}::{threshold_pct}::{top_n}", 600, _compute)
+    if not result.get("best"):
+        raise HTTPException(status_code=400, detail=f"{ticker}에 대한 유사 종목을 찾을 수 없습니다.")
+
+    return {"ticker": ticker, **result}
