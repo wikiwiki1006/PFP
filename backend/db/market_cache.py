@@ -14,9 +14,13 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
+import threading
+
 import pandas as pd
 
 from backend.db import get_conn, is_available
+
+_yf_lock = threading.Lock()  # yfinance SQLite 캐시 동시접근 방지
 
 logger = logging.getLogger(__name__)
 
@@ -279,7 +283,8 @@ def prefetch_tickers(tickers: list[str], period: str = "2y"):
         _prev_level = _yf_log.level
         _yf_log.setLevel(_logging.CRITICAL)
         try:
-            data = yf.download(stale, period=period, progress=False, auto_adjust=True)
+            with _yf_lock:
+                data = yf.download(stale, period=period, progress=False, auto_adjust=True)
         finally:
             _yf_log.setLevel(_prev_level)
 

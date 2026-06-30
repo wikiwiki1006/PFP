@@ -122,6 +122,7 @@ export interface EarningsEvent {
 
 export interface CorrelationMatrix {
   tickers: string[]
+  labels?: string[]
   matrix: number[][]
 }
 

@@ -87,14 +87,17 @@ def get_close_df(tickers: list[str], period: str = "2y", ttl: int = 300) -> pd.D
         # stale 티커만 yfinance 수집 후 DB 저장
         if stale:
             try:
-                fresh_data = yf.download(stale, period=period, progress=False, auto_adjust=True)
+                from backend.db.market_cache import _yf_lock
+                with _yf_lock:
+                    fresh_data = yf.download(stale, period=period, progress=False, auto_adjust=True)
                 if not fresh_data.empty:
+                    # ffill 없이 저장: 장 미종료/휴장일 NaN을 전일가로 오염시키지 않음
                     fresh_df = (
-                        fresh_data["Close"].ffill()
+                        fresh_data["Close"]
                         if isinstance(fresh_data.columns, pd.MultiIndex)
-                        else fresh_data.ffill()
+                        else fresh_data
                     )
-                    save_prices_to_db(fresh_df)
+                    save_prices_to_db(fresh_df.dropna(how="all"))
             except Exception as e:
                 import logging; logging.getLogger(__name__).warning(f"yfinance 수집 실패: {e}")
 
@@ -105,7 +108,9 @@ def get_close_df(tickers: list[str], period: str = "2y", ttl: int = 300) -> pd.D
 
     # ③ DB 없음 → yfinance 전량 수집 (기존 폴백)
     def _fetch():
-        data = yf.download(all_tickers, period=period, progress=False, auto_adjust=True)
+        from backend.db.market_cache import _yf_lock
+        with _yf_lock:
+            data = yf.download(all_tickers, period=period, progress=False, auto_adjust=True)
         if isinstance(data.columns, pd.MultiIndex):
             return data["Close"].ffill()
         return data.ffill()

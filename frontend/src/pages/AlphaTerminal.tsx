@@ -978,10 +978,13 @@ function SectorsPanel({
 }
 
 // ── Correlation Heatmap ───────────────────────────────────────────────────────
-function CorrelationHeatmap({ data }: { data: { tickers: string[]; matrix: number[][] } }) {
+function CorrelationHeatmap({ data }: { data: { tickers: string[]; labels?: string[]; matrix: number[][] } }) {
   const [hovered, setHovered] = useState<{ i: number; j: number } | null>(null)
 
-  const short = (t: string) => t.replace('^', '').replace('-USD', '').slice(0, 6)
+  const label = (t: string, i: number) => {
+    if (data.labels?.[i]) return data.labels[i]
+    return t.replace('^', '').replace('-USD', '').slice(0, 6)
+  }
 
   const cellColors = (v: number, isDiag: boolean) => {
     if (isDiag) return { bg: 'rgba(255,255,255,0.04)', text: 'rgba(255,255,255,0.25)', border: 'rgba(255,255,255,0.06)' }
@@ -1023,7 +1026,7 @@ function CorrelationHeatmap({ data }: { data: { tickers: string[]; matrix: numbe
                   color: hv && (hv.i === j || hv.j === j) ? '#cbd5e1' : '#475569',
                   transition: 'color 0.15s',
                 }}>
-                  {short(t)}
+                  {label(t, j)}
                 </span>
               </div>
             ))}
@@ -1036,7 +1039,7 @@ function CorrelationHeatmap({ data }: { data: { tickers: string[]; matrix: numbe
                   color: hv && (hv.i === i || hv.j === i) ? '#cbd5e1' : '#475569',
                   transition: 'color 0.15s',
                 }}>
-                  {short(data.tickers[i])}
+                  {label(data.tickers[i], i)}
                 </span>
               </div>
               {row.map((v, j) => {
@@ -1074,9 +1077,9 @@ function CorrelationHeatmap({ data }: { data: { tickers: string[]; matrix: numbe
       <div style={{ minHeight: 28 }}>
         {hv && hv.i !== hv.j && (
           <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#0f172a] border border-[#1e293b] text-[11px]">
-            <span className="font-mono font-bold text-[#94a3b8]">{data.tickers[hv.i]}</span>
+            <span className="font-mono font-bold text-[#94a3b8]">{label(data.tickers[hv.i], hv.i)}</span>
             <span className="text-[#334155]">↔</span>
-            <span className="font-mono font-bold text-[#94a3b8]">{data.tickers[hv.j]}</span>
+            <span className="font-mono font-bold text-[#94a3b8]">{label(data.tickers[hv.j], hv.j)}</span>
             <span className="text-[#1e293b] mx-1">|</span>
             <span className={`font-mono font-bold text-[13px] ${data.matrix[hv.i][hv.j] > 0 ? 'text-[#f87171]' : 'text-[#60a5fa]'}`}>
               {fp(data.matrix[hv.i][hv.j], 4)}

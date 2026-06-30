@@ -27,6 +27,17 @@ router = APIRouter(prefix="/api/market", tags=["market"])
 @router.get("/snapshot")
 def market_snapshot():
     """S&P500, NASDAQ, KOSPI, VIX, BTC, Gold 등 주요 지수 현재가 + 등락률."""
+    from datetime import datetime
+    from backend.db.market_cache import get_snapshot as _db_snap
+    from backend.services.market_data import SNAPSHOT_TICKERS
+
+    snap = _db_snap()  # 스케줄러가 60초마다 올바르게 계산한 값
+    if snap:
+        prices = {t: v for t, v in snap.items() if t in SNAPSHOT_TICKERS}
+        if prices:
+            return {"prices": prices, "timestamp": datetime.now().isoformat()}
+
+    # DB 스냅샷 없으면 폴백 계산
     close_df = get_close_df([], period="5d", ttl=60)
     return get_market_snapshot(close_df)
 
@@ -117,6 +128,34 @@ def earnings_dividends(
     return get_earnings_dividends(ticker_list)
 
 
+_TICKER_LABELS: dict[str, str] = {
+    "^GSPC":    "S&P 500",
+    "^IXIC":    "NASDAQ",
+    "^KS11":    "KOSPI",
+    "^KQ11":    "KOSDAQ",
+    "XLK":      "Technology",
+    "XLF":      "Financials",
+    "XLC":      "Communication",
+    "XLY":      "Cons. Disc",
+    "XLV":      "Healthcare",
+    "XLI":      "Industrials",
+    "XLP":      "Cons. Staples",
+    "XLE":      "Energy",
+    "XLU":      "Utilities",
+    "XLB":      "Materials",
+    "XLRE":     "Real Estate",
+    "^VIX":     "VIX",
+    "^TNX":     "10Y Bond",
+    "^IRX":     "3M Bond",
+    "GC=F":     "Gold",
+    "BTC-USD":  "Bitcoin",
+    "CL=F":     "Crude Oil",
+    "USDKRW=X": "USD/KRW",
+    "SPY":      "S&P ETF",
+    "QQQ":      "NASDAQ ETF",
+}
+
+
 @router.get("/correlation")
 def correlation_matrix(
     tickers: Optional[str] = Query(default=None, description="콤마 구분 티커 (없으면 시장 지수 기본값)"),
@@ -137,5 +176,6 @@ def correlation_matrix(
     corr = close_df[avail].pct_change().corr()
     return {
         "tickers": avail,
+        "labels":  [_TICKER_LABELS.get(t, t) for t in avail],
         "matrix":  [[round(corr.iloc[i, j], 4) for j in range(len(avail))] for i in range(len(avail))],
     }

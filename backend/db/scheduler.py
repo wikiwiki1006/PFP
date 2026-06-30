@@ -80,46 +80,48 @@ def _run_safe(name: str, fn):
 
 def _update_snapshot():
     """ALWAYS_FETCH 티커의 최근 2일치 데이터 수집 → snapshot + prices 동시 갱신."""
+    import math
     import yfinance as yf
     from backend.services.market_data import ALWAYS_FETCH, SECTOR_ETF_TICKERS
-    from backend.db.market_cache import save_snapshot, save_prices_to_db
+    from backend.db.market_cache import save_snapshot, save_prices_to_db, _yf_lock
 
     tickers = list(set(ALWAYS_FETCH + SECTOR_ETF_TICKERS))
     try:
-        data = yf.download(tickers, period="2d", progress=False, auto_adjust=True)
+        with _yf_lock:
+            data = yf.download(tickers, period="2d", progress=False, auto_adjust=True)
         if data.empty:
             return
-        close_df = (
-            data["Close"].ffill()
+        # ffill 없이 raw 데이터 사용: 오늘이 NaN인 종목(장 미종료)도 올바르게 처리
+        close_raw = (
+            data["Close"]
             if hasattr(data.columns, "levels")
-            else data.ffill()
+            else data
         )
-        if close_df.empty or len(close_df) < 2:
-            return
 
-        # market_prices 오늘치 갱신
-        save_prices_to_db(close_df)
+        # DB 저장: 전부 NaN인 행 제외
+        close_for_db = close_raw.dropna(how="all")
+        if not close_for_db.empty:
+            save_prices_to_db(close_for_db)
 
-        # market_snapshot 갱신
-        cur_row  = close_df.iloc[-1]
-        prev_row = close_df.iloc[-2]
+        # 스냅샷: 티커별 마지막 2개 유효값으로 변동률 계산
         snap = {}
-        for t in close_df.columns:
-            c = cur_row.get(t)
-            p = prev_row.get(t)
-            if c is None or (hasattr(c, '__float__') and c != c):  # NaN check
+        for t in close_raw.columns:
+            series = close_raw[t].dropna()
+            if series.empty:
                 continue
-            import math
-            if math.isnan(float(c)):
+            c_f = float(series.iloc[-1])
+            if not math.isfinite(c_f):
                 continue
-            c_f = float(c)
-            p_f = float(p) if p is not None and not math.isnan(float(p)) else c_f
+            p_f = float(series.iloc[-2]) if len(series) >= 2 else c_f
+            if not math.isfinite(p_f):
+                p_f = c_f
             snap[str(t)] = {
-                "price":        round(c_f, 4),
-                "change_1d":    round(c_f - p_f, 4),
+                "price":         round(c_f, 4),
+                "change_1d":     round(c_f - p_f, 4),
                 "change_1d_pct": round((c_f / p_f - 1) * 100, 4) if p_f else 0.0,
             }
-        save_snapshot(snap)
+        if snap:
+            save_snapshot(snap)
         logger.debug(f"snapshot 갱신 완료: {len(snap)}개 티커")
     except Exception as e:
         logger.warning(f"_update_snapshot yfinance 실패: {e}")
@@ -173,41 +175,44 @@ def refresh_user_prices(tickers: list[str]):
     사용자가 새로고침 버튼을 눌렀을 때 개인 포트폴리오 티커의 최신 가격 강제 수집.
     """
     import yfinance as yf
-    from backend.db.market_cache import save_prices_to_db, save_snapshot
+    from backend.db.market_cache import save_prices_to_db, save_snapshot, _yf_lock
     from backend.services.market_data import _cache   # in-memory 캐시 무효화용
 
     if not tickers:
         return
     try:
-        data = yf.download(tickers, period="5d", progress=False, auto_adjust=True)
+        import math
+        with _yf_lock:
+            data = yf.download(tickers, period="5d", progress=False, auto_adjust=True)
         if data.empty:
             return
-        close_df = (
-            data["Close"].ffill()
+        close_raw = (
+            data["Close"]
             if hasattr(data.columns, "levels")
-            else data.ffill()
+            else data
         )
-        if close_df.empty:
-            return
-        save_prices_to_db(close_df)
+        close_for_db = close_raw.dropna(how="all")
+        if not close_for_db.empty:
+            save_prices_to_db(close_for_db)
 
-        # 스냅샷도 갱신
-        if len(close_df) >= 2:
-            import math
-            cur_row, prev_row = close_df.iloc[-1], close_df.iloc[-2]
-            snap = {}
-            for t in close_df.columns:
-                c = cur_row.get(t)
-                p = prev_row.get(t)
-                if c is None or math.isnan(float(c)):
-                    continue
-                c_f = float(c)
-                p_f = float(p) if p is not None and not math.isnan(float(p)) else c_f
-                snap[str(t)] = {
-                    "price": round(c_f, 4),
-                    "change_1d": round(c_f - p_f, 4),
-                    "change_1d_pct": round((c_f / p_f - 1) * 100, 4) if p_f else 0.0,
-                }
+        # 스냅샷: 티커별 마지막 2개 유효값으로 변동률 계산
+        snap = {}
+        for t in close_raw.columns:
+            series = close_raw[t].dropna()
+            if series.empty:
+                continue
+            c_f = float(series.iloc[-1])
+            if not math.isfinite(c_f):
+                continue
+            p_f = float(series.iloc[-2]) if len(series) >= 2 else c_f
+            if not math.isfinite(p_f):
+                p_f = c_f
+            snap[str(t)] = {
+                "price":         round(c_f, 4),
+                "change_1d":     round(c_f - p_f, 4),
+                "change_1d_pct": round((c_f / p_f - 1) * 100, 4) if p_f else 0.0,
+            }
+        if snap:
             save_snapshot(snap)
 
         # in-memory 캐시 무효화 (해당 티커 포함 키 제거)
