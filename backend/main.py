@@ -54,6 +54,8 @@ try:
     if _target > _soft:
         _resource.setrlimit(_resource.RLIMIT_NOFILE, (_target, _hard))
         logger.info(f"fd 한도 상향: {_soft} → {_target}")
+except ImportError:
+    pass  # Windows — resource 모듈 없음, 정상
 except Exception as _e:
     logger.warning(f"fd 한도 상향 실패: {_e}")
 
