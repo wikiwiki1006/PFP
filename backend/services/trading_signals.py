@@ -562,12 +562,22 @@ def technical_chart_detail(
     window: int = 20,
     n_std: float = 2.0,
     resistance_lookback: int = 55,
+    ohlc_df: "pd.DataFrame | None" = None,
 ) -> dict:
     """
-    가격 + 볼린저밴드 + 이동평균(5/30/60/120) + z-score 시계열과 키포인트 반환.
-    저항선은 돌파 순간에만 표시(키포인트로만).
+    가격(Close) + OHLC + 볼린저밴드 + 이동평균(5/30/60/120) + z-score 시계열 + 키포인트 반환.
+    ohlc_df: Open/High/Low/Close 컬럼 포함 DataFrame (있을 때만 캔들용 open/high/low 반환)
     """
     price = price.dropna()
+
+    # ohlc_df 인덱스 timezone 정규화
+    if ohlc_df is not None:
+        ohlc_df = ohlc_df.copy()
+        if hasattr(ohlc_df.index, "tz") and ohlc_df.index.tz is not None:
+            ohlc_df.index = ohlc_df.index.tz_localize(None)
+        if hasattr(price.index, "tz") and price.index.tz is not None:
+            price.index = price.index.tz_localize(None)
+
     mr = mean_reversion_signal(price, window=window, n_std=n_std)
     resistance = price.rolling(resistance_lookback).max().shift(1)
 
@@ -597,14 +607,27 @@ def technical_chart_detail(
             points.append({"date": date.strftime("%Y-%m-%d"), "price": round(p, 2), "type": "RESISTANCE_BREAK"})
         prev_state = state
 
-    def _r(v) -> float | None:
+    def _r(v) -> "float | None":
         return round(float(v), 2) if not pd.isna(v) else None
+
+    def _ohlc(date, col: str) -> "float | None":
+        if ohlc_df is None:
+            return None
+        try:
+            v = ohlc_df.loc[date, col]
+            return round(float(v), 2) if not pd.isna(v) else None
+        except (KeyError, TypeError):
+            return None
 
     series = []
     for i, date in enumerate(price.index):
+        close = round(float(price.iloc[i]), 2)
         series.append({
             "date":       date.strftime("%Y-%m-%d"),
-            "price":      round(float(price.iloc[i]), 2),
+            "open":       _ohlc(date, "Open")  or close,
+            "high":       _ohlc(date, "High")  or close,
+            "low":        _ohlc(date, "Low")   or close,
+            "price":      close,
             "mid":        _r(mid.iloc[i]),
             "upper":      _r(upper.iloc[i]),
             "lower":      _r(lower.iloc[i]),

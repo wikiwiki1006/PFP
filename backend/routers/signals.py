@@ -378,25 +378,68 @@ def bb_scan_full(top_n: int = Query(default=10, ge=1, le=30)):
     }
 
 
+def _fetch_ohlc(ticker: str) -> "pd.DataFrame | None":
+    """yfinance로 5년치 OHLC 1시간 인메모리 캐시."""
+    def _do():
+        try:
+            import yfinance as yf
+            from backend.db.market_cache import _yf_lock
+            with _yf_lock:
+                raw = yf.download(ticker, period="5y", progress=False, auto_adjust=True, threads=False)
+            if raw.empty:
+                return None
+            if isinstance(raw.columns, pd.MultiIndex):
+                lvl = raw.columns.get_level_values(1)
+                raw = raw.xs(ticker, level=1, axis=1) if ticker in lvl else raw.droplevel(1, axis=1)
+            cols = [c for c in ["Open", "High", "Low", "Close"] if c in raw.columns]
+            return raw[cols].dropna() if len(cols) == 4 else None
+        except Exception as e:
+            logger.warning(f"OHLC fetch 실패 ({ticker}): {e}")
+            return None
+    return _cached(f"ohlc::{ticker}", 3600, _do)
+
+
 @router.get("/technical-chart")
 def technical_chart(
-    ticker: str = Query(..., description="티커. 예: AAPL"),
-    period: str = Query(default="3y", description="조회 기간 (최대 3y)"),
+    ticker: str   = Query(...,            description="티커. 예: AAPL"),
+    period: str   = Query(default="3y",   description="조회 기간"),
+    bb_period: int   = Query(default=20,  ge=5,  le=100, description="볼린저밴드 기간"),
+    bb_std:    float = Query(default=2.0, ge=0.5, le=5.0, description="볼린저밴드 표준편차 배수"),
+    resistance_lookback: int = Query(default=55, ge=10, le=200, description="저항선 롤링 기간"),
 ):
-    """가격 + 볼린저밴드 + 저항선 + 키포인트(주요 변곡점) 시계열. 매매신호/평균회귀 패널 공용."""
+    """가격(OHLC) + 볼린저밴드 + 저항선 + 키포인트. 매매신호/평균회귀 패널 공용."""
     ticker = ticker.upper()
+    cache_key = f"technical_chart::{ticker}::{bb_period}::{bb_std}::{resistance_lookback}"
 
     def _compute():
-        close_df = get_close_df([ticker], period="5y", ttl=300)
-        if ticker not in close_df.columns:
-            return None
-        trimmed = _trim_years(close_df, years=3)
-        price = trimmed[ticker].dropna()
+        ohlc = _fetch_ohlc(ticker)
+
+        if ohlc is not None and "Close" in ohlc.columns:
+            close_raw = ohlc["Close"].dropna()
+            if hasattr(close_raw, "squeeze"):
+                close_raw = close_raw.squeeze()
+        else:
+            close_df = get_close_df([ticker], period="5y", ttl=300)
+            if ticker not in close_df.columns:
+                return None
+            close_raw = close_df[ticker].dropna()
+
+        cutoff = close_raw.index.max() - pd.Timedelta(days=365 * 3)
+        price  = close_raw[close_raw.index >= cutoff]
         if price.empty:
             return None
-        return technical_chart_detail(price)
 
-    result = _cached(f"technical_chart::{ticker}", 600, _compute)
+        ohlc_trimmed = ohlc[ohlc.index >= cutoff] if ohlc is not None else None
+
+        return technical_chart_detail(
+            price,
+            window=bb_period,
+            n_std=bb_std,
+            resistance_lookback=resistance_lookback,
+            ohlc_df=ohlc_trimmed,
+        )
+
+    result = _cached(cache_key, 600, _compute)
     if result is None:
         raise HTTPException(status_code=400, detail=f"{ticker} 데이터 없음")
 

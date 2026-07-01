@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Search, ChevronLeft, ChevronRight } from 'lucide-react'
-import { getBBScanFull, getTechnicalChart } from '@/api'
+import { getBBScanFull } from '@/api'
 import BollingerChart from './BollingerChart'
 import { COLOR_UP, COLOR_DOWN } from './colors'
 import type { BBScanPick, HoldingsMap } from '@/types'
@@ -36,7 +36,9 @@ function HoldingRow({
   return (
     <button
       onClick={onClick}
-      className={`w-full text-left px-3 py-2 rounded border transition-colors font-mono font-bold text-sm ${selected ? 'border-[#f59e0b] bg-[#f59e0b]/10 text-[#f59e0b]' : 'border-[#1e2d40] text-[#e2e8f0] hover:bg-[#0a1525]'}`}
+      className={`w-full text-left px-3 py-2 rounded border transition-colors font-mono font-bold text-sm ${
+        selected ? 'border-[#f59e0b] bg-[#f59e0b]/10 text-[#f59e0b]' : 'border-[#1e2d40] text-[#e2e8f0] hover:bg-[#0a1525]'
+      }`}
     >
       {ticker}
     </button>
@@ -44,23 +46,16 @@ function HoldingRow({
 }
 
 export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelProps) {
-  const [selected, setSelected] = useState<string | null>(null)
-  const [search, setSearch]     = useState('')
-  const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [selected,     setSelected]     = useState<string | null>(null)
+  const [search,       setSearch]       = useState('')
+  const [sidebarOpen,  setSidebarOpen]  = useState(true)
 
   const holdTickers = Object.keys(holdings).filter(t => t !== 'CASH')
 
   const scanQ = useQuery({
     queryKey: ['timing-bb-scan-full'],
-    queryFn: () => getBBScanFull(10),
+    queryFn:  () => getBBScanFull(10),
     staleTime: 1800_000,
-  })
-
-  const chartQ = useQuery({
-    queryKey: ['timing-technical-chart', selected],
-    queryFn: () => getTechnicalChart(selected as string),
-    enabled: !!selected,
-    staleTime: 600_000,
   })
 
   function submitSearch() {
@@ -71,38 +66,36 @@ export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelPr
 
   return (
     <div className="h-full flex relative">
-      {/* 사이드바 토글 탭 */}
+      {/* sidebar toggle tab */}
       <button
         onClick={() => setSidebarOpen(v => !v)}
         title={sidebarOpen ? '패널 닫기' : '패널 열기'}
         className="absolute z-20 top-1/2 -translate-y-1/2 flex items-center justify-center w-5 h-12 bg-[#1a2035] border border-[#2d3f56] rounded-r text-[#64748b] hover:text-[#e2e8f0] transition-colors"
         style={{ left: sidebarOpen ? '300px' : '0px' }}
       >
-        {sidebarOpen
-          ? <ChevronLeft className="w-3 h-3" />
-          : <ChevronRight className="w-3 h-3" />}
+        {sidebarOpen ? <ChevronLeft className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
       </button>
 
-      {/* 왼쪽 리스트 패널 */}
+      {/* left list panel */}
       {sidebarOpen && (
         <div className="w-[300px] flex-shrink-0 border-r border-[#1e2d40] overflow-y-auto p-3 space-y-3">
-          {/* 검색 */}
+          {/* search */}
           <div className="relative">
             <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#374151]" />
             <input
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && submitSearch()}
+              onChange={e => setSearch(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && submitSearch()}
               placeholder="티커 검색…"
               className="w-full bg-[#060b14] border border-[#1e2d40] rounded pl-8 pr-3 py-2 text-sm text-[#e2e8f0] placeholder:text-[#374151] focus:outline-none focus:border-[#3b82f6]"
             />
           </div>
 
-          {/* 보유 종목 신호 */}
+          {/* holdings signals */}
           {holdTickers.length > 0 && (
             <div>
               <div className="text-[11px] font-bold tracking-widest text-[#f59e0b] mb-1.5">
-                보유종목 신호 <span className="text-[#374151]">{holdTickers.length}</span>
+                보유종목 <span className="text-[#374151]">{holdTickers.length}</span>
               </div>
               <div className="space-y-1.5">
                 {holdTickers.map(t => (
@@ -112,9 +105,9 @@ export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelPr
             </div>
           )}
 
-          {/* S&P500 스캔 결과 */}
+          {/* S&P500 scan results */}
           {scanQ.isLoading && <div className="text-sm text-[#64748b]">S&P500 스캔 중… (최초 1회)</div>}
-          {scanQ.isError  && <div className="text-sm text-[#ef4444]">스캔 데이터를 불러올 수 없습니다.</div>}
+          {scanQ.isError   && <div className="text-sm text-[#ef4444]">스캔 데이터를 불러올 수 없습니다.</div>}
 
           {scanQ.data && (
             <>
@@ -128,7 +121,6 @@ export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelPr
                   ))}
                 </div>
               </div>
-
               <div>
                 <div className="text-[11px] font-bold tracking-widest mb-1.5" style={{ color: COLOR_DOWN }}>
                   매도 신호 <span className="text-[#374151]">{scanQ.data.short_picks.length}</span>
@@ -139,33 +131,25 @@ export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelPr
                   ))}
                 </div>
               </div>
-
-              <div className="text-[10px] text-[#374151] pt-1">S&P500 {scanQ.data.scanned}개 종목 · 최대 3년 볼린저 밴드</div>
+              <div className="text-[10px] text-[#374151] pt-1">
+                S&P500 {scanQ.data.scanned}개 종목 · 볼린저 밴드 스캔
+              </div>
             </>
           )}
         </div>
       )}
 
-      {/* 오른쪽 차트 패널 */}
-      <div className="flex-1 overflow-y-auto p-4" style={{ paddingLeft: sidebarOpen ? '1rem' : '1.5rem' }}>
-        {!selected && (
+      {/* right chart panel */}
+      <div className="flex-1 overflow-y-auto p-4 min-w-0"
+        style={{ paddingLeft: sidebarOpen ? '1rem' : '1.5rem' }}>
+        {!selected ? (
           <div className="text-sm text-[#64748b] flex items-center justify-center h-full">
             왼쪽에서 티커를 선택하거나 검색하세요.
           </div>
-        )}
-        {selected && chartQ.isLoading && <div className="text-sm text-[#64748b]">{selected} 분석 중…</div>}
-        {selected && chartQ.isError   && <div className="text-sm text-[#ef4444]">{selected} 데이터를 찾을 수 없습니다.</div>}
-        {selected && chartQ.data && (
+        ) : (
           <>
-            <div className="text-lg font-mono font-bold text-[#e2e8f0] mb-2">{selected}</div>
-            <BollingerChart
-              key={selected}
-              series={chartQ.data.series}
-              keyPoints={chartQ.data.key_points}
-              bias={chartQ.data.bias}
-              currentZ={chartQ.data.current_z}
-              height={420}
-            />
+            <div className="text-lg font-mono font-bold text-[#e2e8f0] mb-3">{selected}</div>
+            <BollingerChart key={selected} ticker={selected} height={460} />
           </>
         )}
       </div>

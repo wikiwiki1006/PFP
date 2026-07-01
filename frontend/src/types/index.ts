@@ -215,7 +215,11 @@ export interface BBScanFullResult {
 
 export interface TechnicalChartPoint {
   date: string
-  price: number
+  // OHLC (open/high/low null이면 price를 close로만 사용)
+  open: number | null
+  high: number | null
+  low: number | null
+  price: number        // close
   mid: number | null
   upper: number | null
   lower: number | null

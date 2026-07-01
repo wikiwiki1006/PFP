@@ -125,8 +125,16 @@ export const getMarketSituation = async (): Promise<MarketSituation> =>
 export const getBBScanFull = async (topN = 10): Promise<BBScanFullResult> =>
   (await api.get('/api/signals/bb-scan-full', { params: { top_n: topN } })).data
 
-export const getTechnicalChart = async (ticker: string, period = '3y'): Promise<TechnicalChartResult> =>
-  (await api.get('/api/signals/technical-chart', { params: { ticker, period } })).data
+export const getTechnicalChart = async (
+  ticker: string,
+  period = '3y',
+  bbPeriod = 20,
+  bbStd = 2.0,
+  resistanceLookback = 55,
+): Promise<TechnicalChartResult> =>
+  (await api.get('/api/signals/technical-chart', {
+    params: { ticker, period, bb_period: bbPeriod, bb_std: bbStd, resistance_lookback: resistanceLookback },
+  })).data
 
 export const getPairsAuto = async (ticker: string, thresholdPct = 5, topN = 5): Promise<PairsAutoResult> =>
   (await api.get('/api/signals/pairs-auto', { params: { ticker, threshold_pct: thresholdPct, top_n: topN } })).data
