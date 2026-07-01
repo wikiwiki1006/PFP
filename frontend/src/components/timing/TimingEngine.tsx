@@ -1,8 +1,6 @@
 import { useState } from 'react'
-import MarketSituationPanel from './MarketSituationPanel'
 import RegimePanel from './RegimePanel'
 import TradeSignalsPanel from './TradeSignalsPanel'
-import MeanReversionPanel from './MeanReversionPanel'
 import PairsTradingPanel from './PairsTradingPanel'
 import type { HoldingsMap } from '@/types'
 
@@ -11,10 +9,8 @@ interface TimingEngineProps {
 }
 
 const TABS = [
-  { label: 'Doom Radar', sub: '시장 상황' },
   { label: 'Market Regime', sub: '종목별 시장 상황' },
-  { label: 'Signal Scan', sub: '매매신호' },
-  { label: 'Mean Reversion', sub: '평균 회귀/저항선' },
+  { label: 'Signal Scan', sub: '매매신호 · 볼린저 밴드' },
   { label: 'Pairs Trading', sub: '페어 트레이딩' },
 ]
 
@@ -40,11 +36,9 @@ export default function TimingEngine({ holdings }: TimingEngineProps) {
         ))}
       </div>
       <div className="flex-1 min-h-0 overflow-y-auto">
-        {tab === 0 && <MarketSituationPanel />}
-        {tab === 1 && <RegimePanel />}
-        {tab === 2 && <TradeSignalsPanel />}
-        {tab === 3 && <MeanReversionPanel holdings={holdings} />}
-        {tab === 4 && <PairsTradingPanel />}
+        {tab === 0 && <RegimePanel holdings={holdings} />}
+        {tab === 1 && <TradeSignalsPanel holdings={holdings} />}
+        {tab === 2 && <PairsTradingPanel />}
       </div>
     </div>
   )

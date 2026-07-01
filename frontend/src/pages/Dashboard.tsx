@@ -1,14 +1,12 @@
 import { useQuery } from '@tanstack/react-query'
-import { TrendingUp, DollarSign, Activity, Shield, BarChart2, MessageSquare } from 'lucide-react'
+import { TrendingUp, DollarSign, Activity, BarChart2, MessageSquare } from 'lucide-react'
 import MetricCard from '@/components/MetricCard'
-import DoomBanner from '@/components/DoomBanner'
 import EquityCurveChart from '@/components/charts/EquityCurveChart'
 import LoadingSpinner, { SkeletonCard, ErrorMessage } from '@/components/LoadingSpinner'
 import {
   getPortfolioMetrics,
   getEquityCurve,
   getHoldingsDetail,
-  getSignalsDoomRadar,
   getAnalystFeedback,
 } from '@/api'
 import { formatCurrency, formatLargeNumber, formatPct, colorForValue, bgColorForValue } from '@/lib/utils'
@@ -18,7 +16,6 @@ export default function Dashboard() {
   const metricsQ = useQuery({ queryKey: ['portfolio-metrics'], queryFn: getPortfolioMetrics })
   const curveQ = useQuery({ queryKey: ['equity-curve'], queryFn: getEquityCurve })
   const holdingsQ = useQuery({ queryKey: ['holdings-detail'], queryFn: getHoldingsDetail })
-  const doomQ = useQuery({ queryKey: ['signals-doom'], queryFn: getSignalsDoomRadar })
   const feedbackQ = useQuery({ queryKey: ['analyst-feedback'], queryFn: getAnalystFeedback })
 
   const m = metricsQ.data
@@ -88,9 +85,6 @@ export default function Dashboard() {
           </>
         ) : null}
       </div>
-
-      {/* Doom Banner */}
-      {doomQ.data && <DoomBanner data={doomQ.data} />}
 
       {/* AI Analyst Feedback */}
       {feedbackQ.data && (

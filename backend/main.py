@@ -46,6 +46,17 @@ from backend.routers import portfolio, market, macro, signals, optimizer, report
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+# ── OS fd 한도 상향 (yfinance 대량 다운로드시 Too many open files 방지) ─────────
+try:
+    import resource as _resource
+    _soft, _hard = _resource.getrlimit(_resource.RLIMIT_NOFILE)
+    _target = min(8192, _hard)
+    if _target > _soft:
+        _resource.setrlimit(_resource.RLIMIT_NOFILE, (_target, _hard))
+        logger.info(f"fd 한도 상향: {_soft} → {_target}")
+except Exception as _e:
+    logger.warning(f"fd 한도 상향 실패: {_e}")
+
 app = FastAPI(
     title="Personal Financial Platform API",
     description="포트폴리오 관리 · 시장 데이터 · AI 거시경제 분석 · 매매 신호",

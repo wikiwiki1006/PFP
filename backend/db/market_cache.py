@@ -22,6 +22,35 @@ from backend.db import get_conn, is_available
 
 _yf_lock = threading.Lock()  # yfinance SQLite 캐시 동시접근 방지
 
+
+def _yf_download_batched(tickers: list[str], period: str, batch_size: int = 50, **kwargs) -> pd.DataFrame:
+    """
+    대량 티커를 batch_size 단위로 나눠 순차 다운로드.
+    각 배치는 _yf_lock 획득 + threads=False로 실행해 fd 고갈을 방지한다.
+    반환값은 Close 가격만 포함하는 DataFrame.
+    """
+    import yfinance as yf
+    frames: list[pd.DataFrame] = []
+    for i in range(0, len(tickers), batch_size):
+        batch = tickers[i : i + batch_size]
+        try:
+            with _yf_lock:
+                data = yf.download(
+                    batch, period=period, progress=False,
+                    auto_adjust=True, threads=False, **kwargs
+                )
+            if data.empty:
+                continue
+            close = (
+                data["Close"]
+                if isinstance(data.columns, pd.MultiIndex)
+                else data
+            )
+            frames.append(close)
+        except Exception as e:
+            logger.warning(f"배치 다운로드 실패 (sample: {batch[:3]}): {e}")
+    return pd.concat(frames, axis=1) if frames else pd.DataFrame()
+
 logger = logging.getLogger(__name__)
 
 _PERIOD_DAYS: dict[str, int] = {
@@ -275,29 +304,21 @@ def prefetch_tickers(tickers: list[str], period: str = "2y"):
         logger.info(f"prefetch: 모든 {len(tickers)}개 티커 신선 — 스킵")
         return
 
-    logger.info(f"prefetch: {len(stale)}/{len(tickers)}개 티커 yfinance 수집")
+    logger.info(f"prefetch: {len(stale)}/{len(tickers)}개 티커 yfinance 수집 (배치 50)")
     try:
         import logging as _logging
-        # yfinance의 404/delisted 경고를 DEBUG로 낮춰 로그 노이즈 억제
         _yf_log = _logging.getLogger("yfinance")
         _prev_level = _yf_log.level
         _yf_log.setLevel(_logging.CRITICAL)
         try:
-            with _yf_lock:
-                data = yf.download(stale, period=period, progress=False, auto_adjust=True)
+            close_df = _yf_download_batched(stale, period=period)
         finally:
             _yf_log.setLevel(_prev_level)
 
-        if data.empty:
+        if close_df.empty:
             logger.warning("prefetch: yfinance 빈 응답")
             return
-        close_df = (
-            data["Close"].ffill()
-            if isinstance(data.columns, pd.MultiIndex)
-            else data.ffill()
-        )
-        # 데이터 없는 컬럼(전부 NaN) 제거 — 상장폐지 종목
-        close_df = close_df.dropna(axis=1, how="all")
+        close_df = close_df.ffill().dropna(axis=1, how="all")
         if not close_df.empty:
             save_prices_to_db(close_df)
             logger.info(f"prefetch 완료: {close_df.shape[1]}개 티커 저장")

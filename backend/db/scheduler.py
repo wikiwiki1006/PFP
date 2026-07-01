@@ -102,7 +102,7 @@ def _update_snapshot():
     tickers = list(set(ALWAYS_FETCH + SECTOR_ETF_TICKERS))
     try:
         with _yf_lock:
-            data = yf.download(tickers, period="2d", progress=False, auto_adjust=True)
+            data = yf.download(tickers, period="2d", progress=False, auto_adjust=True, threads=False)
         if data.empty:
             return
         # ffill 없이 raw 데이터 사용: 오늘이 NaN인 종목(장 미종료)도 올바르게 처리
@@ -157,16 +157,14 @@ def _update_sector():
 
 
 def _update_macro():
-    """FRED 매크로 + 도약 레이더 갱신 → common_cache 저장."""
-    from backend.services.market_data import get_fred_macro, get_doom_radar
+    """FRED 매크로 갱신 → common_cache 저장."""
+    from backend.services.market_data import get_fred_macro
     from backend.db.market_cache import save_common
 
     try:
-        macro = get_fred_macro(ttl=0)   # TTL=0 으로 강제 갱신
-        doom  = get_doom_radar(ttl=0)
-        save_common("macro_data",  macro, ttl_seconds=_MACRO_INTERVAL * 2)
-        save_common("doom_radar",  doom,  ttl_seconds=_MACRO_INTERVAL * 2)
-        logger.debug("macro/doom_radar 갱신 완료")
+        macro = get_fred_macro(ttl=0)
+        save_common("macro_data", macro, ttl_seconds=_MACRO_INTERVAL * 2)
+        logger.debug("macro 갱신 완료")
     except Exception as e:
         logger.warning(f"_update_macro 실패: {e}")
 
@@ -187,10 +185,14 @@ def _update_bb_scan():
     import pandas as pd
     from backend.services.market_data import get_close_df
     from backend.services.trading_signals import get_sp500_universe, bollinger_scan_full_universe
-    from backend.db.market_cache import save_common
+    from backend.db.market_cache import save_common, _yf_download_batched
 
     universe = get_sp500_universe()
-    close_df = get_close_df(universe, period="5y", ttl=0)
+    close_df = _yf_download_batched(universe, period="5y")
+    if close_df.empty:
+        logger.warning("bb_scan: 데이터 없음, 스킵")
+        return
+    close_df = close_df.ffill()
     cutoff   = close_df.index.max() - pd.Timedelta(days=365 * 3)
     trimmed  = close_df[close_df.index >= cutoff]
     valid_cols = [c for c in universe if c in trimmed.columns]
@@ -224,7 +226,7 @@ def refresh_user_prices(tickers: list[str]):
     try:
         import math
         with _yf_lock:
-            data = yf.download(tickers, period="5d", progress=False, auto_adjust=True)
+            data = yf.download(tickers, period="5d", progress=False, auto_adjust=True, threads=False)
         if data.empty:
             return
         close_raw = (

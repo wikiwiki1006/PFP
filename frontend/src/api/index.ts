@@ -2,7 +2,7 @@ import axios from 'axios'
 import type {
   PortfolioMetrics, EquityCurvePoint, HoldingsMap, HoldingDetail,
   SectorWeights, Trade, TradeForm, MarketSnapshot, SectorData,
-  MacroData, NewsItem, DoomRadar, EarningsEvent, CorrelationMatrix,
+  MacroData, NewsItem, EarningsEvent, CorrelationMatrix,
   ScanResult, PairsSignal, MeanReversionSignal, MomentumSignal,
   MarketRegime, OptimizationResult, FactorAnalysisResult,
   MonteCarloPortfolioResult, MonteCarloStockResult, MonteCarloMacroResult,
@@ -80,9 +80,6 @@ export const getMacroData = async (): Promise<MacroData> =>
 export const getMarketNews = async (tickers: string[]): Promise<NewsItem[]> =>
   (await api.get('/api/market/news', { params: { tickers: tickers.join(',') } })).data
 
-export const getMarketDoomRadar = async (): Promise<DoomRadar> =>
-  (await api.get('/api/market/doom-radar')).data
-
 export const getEarnings = async (tickers: string[]): Promise<EarningsEvent[]> =>
   (await api.get('/api/market/earnings', { params: { tickers: tickers.join(',') } })).data
 
@@ -97,9 +94,6 @@ export const getIndexPrices = async (ticker: string, period = '2y'): Promise<{ d
 }
 
 // ── Signals ────────────────────────────────────────────────────────────────────
-export const getSignalsDoomRadar = async (): Promise<DoomRadar> =>
-  (await api.get('/api/signals/doom-radar')).data
-
 export const runSignalScan = async (topN = 10): Promise<ScanResult> =>
   (await api.post(`/api/signals/scan?top_n=${topN}`)).data
 
@@ -115,8 +109,8 @@ export const getMeanReversionSignal = async (ticker: string, period = '6mo'): Pr
 export const getMomentumSignal = async (ticker: string): Promise<MomentumSignal> =>
   (await api.get('/api/signals/momentum', { params: { ticker } })).data
 
-export const getMarketRegime = async (ticker = '^GSPC', period = '2y'): Promise<MarketRegime> =>
-  (await api.get('/api/signals/regime', { params: { ticker, period } })).data
+export const getMarketRegime = async (ticker = '^GSPC', years = 1): Promise<MarketRegime> =>
+  (await api.get('/api/signals/regime', { params: { ticker, years } })).data
 
 // ── Timing Engine ──────────────────────────────────────────────────────────────
 export const getMarketSituation = async (): Promise<MarketSituation> =>

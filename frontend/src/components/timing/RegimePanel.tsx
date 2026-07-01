@@ -3,11 +3,16 @@ import { useQuery } from '@tanstack/react-query'
 import {
   ComposedChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
 } from 'recharts'
-import { Search } from 'lucide-react'
+import { Search, Star } from 'lucide-react'
 import { getMarketRegime } from '@/api'
 import { COLOR_UP, COLOR_DOWN, COLOR_NEUTRAL } from './colors'
+import type { HoldingsMap } from '@/types'
 
-const PRESETS = ['^GSPC', 'AAPL', 'TSLA', 'NVDA', 'QQQ']
+const YEAR_OPTIONS = [1, 2, 3, 5] as const
+
+interface RegimePanelProps {
+  holdings?: HoldingsMap
+}
 
 function ChartTooltip({ active, payload, label }: any) {
   if (!active || !payload?.length) return null
@@ -24,26 +29,42 @@ function ChartTooltip({ active, payload, label }: any) {
   )
 }
 
-export default function RegimePanel() {
+export default function RegimePanel({ holdings = {} }: RegimePanelProps) {
   const [ticker, setTicker] = useState('^GSPC')
   const [input, setInput]   = useState('')
+  const [years, setYears]   = useState<1 | 2 | 3 | 5>(1)
+
+  const holdingTickers = Object.keys(holdings).filter(t => t !== 'CASH')
 
   const q = useQuery({
-    queryKey: ['timing-regime', ticker],
-    queryFn: () => getMarketRegime(ticker, '2y'),
+    queryKey: ['timing-regime', ticker, years],
+    queryFn: () => getMarketRegime(ticker, years),
     staleTime: 300_000,
   })
 
+  // Bridge regime transitions so the line is continuous at color-change boundaries.
+  // Each point at a regime switch appears in BOTH the exiting and entering series.
   const chartData = useMemo(() => {
     if (!q.data) return []
-    return q.data.chart_data.map(p => ({
-      date: p.date,
-      price: p.price,
-      regime: p.regime,
-      bull:     p.regime === 'Bull'     ? p.price : null,
-      sideways: p.regime === 'Sideways' ? p.price : null,
-      bear:     p.regime === 'Bear'     ? p.price : null,
-    }))
+    const raw = q.data.chart_data
+    return raw.map((p, i) => {
+      const prev = i > 0 ? raw[i - 1] : null
+      const isBull = p.regime === 'Bull'
+      const isSide = p.regime === 'Sideways'
+      const isBear = p.regime === 'Bear'
+      const prevBull = prev?.regime === 'Bull'
+      const prevSide = prev?.regime === 'Sideways'
+      const prevBear = prev?.regime === 'Bear'
+      return {
+        date:     p.date,
+        price:    p.price,
+        regime:   p.regime,
+        // Include own regime + bridge from the previous regime so no gap forms
+        bull:     isBull || prevBull ? p.price : null,
+        sideways: isSide || prevSide ? p.price : null,
+        bear:     isBear || prevBear ? p.price : null,
+      }
+    })
   }, [q.data])
 
   function submit() {
@@ -59,6 +80,7 @@ export default function RegimePanel() {
     <div className="p-4 space-y-4">
       <div className="text-[11px] text-[#64748b] font-bold tracking-widest uppercase">종목별 시장 상황 — K-means 국면 분석</div>
 
+      {/* 검색 */}
       <div className="flex items-center gap-2">
         <div className="relative flex-1">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#374151]" />
@@ -75,11 +97,31 @@ export default function RegimePanel() {
         </button>
       </div>
 
-      <div className="flex flex-wrap gap-1.5">
-        {PRESETS.map(p => (
-          <button key={p} onClick={() => setTicker(p)}
-            className={`px-2.5 py-1 text-[11px] font-mono rounded border ${ticker === p ? 'border-[#3b82f6] text-[#3b82f6] bg-[#3b82f6]/10' : 'border-[#1e2d40] text-[#64748b] hover:text-[#94a3b8]'}`}>
-            {p}
+      {/* 보유 종목 즐겨찾기 */}
+      {holdingTickers.length > 0 && (
+        <div>
+          <div className="flex items-center gap-1.5 mb-1.5">
+            <Star className="w-3 h-3 text-[#f59e0b]" />
+            <span className="text-[10px] text-[#64748b] font-bold tracking-widest uppercase">보유 종목</span>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {holdingTickers.map(t => (
+              <button key={t} onClick={() => setTicker(t)}
+                className={`px-2.5 py-1 text-[11px] font-mono rounded border ${ticker === t ? 'border-[#f59e0b] text-[#f59e0b] bg-[#f59e0b]/10' : 'border-[#1e2d40] text-[#64748b] hover:text-[#94a3b8]'}`}>
+                {t}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* 기간 선택 */}
+      <div className="flex items-center gap-1.5">
+        <span className="text-[10px] text-[#64748b] font-bold tracking-widest">기간</span>
+        {YEAR_OPTIONS.map(y => (
+          <button key={y} onClick={() => setYears(y as 1 | 2 | 3 | 5)}
+            className={`px-2.5 py-1 text-[11px] font-mono rounded border transition-colors ${years === y ? 'border-[#3b82f6] text-[#3b82f6] bg-[#3b82f6]/10' : 'border-[#1e2d40] text-[#64748b] hover:text-[#94a3b8]'}`}>
+            {y}Y
           </button>
         ))}
       </div>
@@ -94,6 +136,7 @@ export default function RegimePanel() {
             <span className="text-[11px] font-bold px-2 py-1 rounded uppercase tracking-wider" style={{ color: currentColor, backgroundColor: `${currentColor}1a` }}>
               현재 국면: {current === 'Bull' ? '상승장' : current === 'Bear' ? '하락장' : '횡보장'}
             </span>
+            <span className="text-[10px] text-[#374151] ml-auto">{years}년 기간 내 비율</span>
           </div>
 
           <div className="grid grid-cols-3 gap-2">
@@ -118,9 +161,9 @@ export default function RegimePanel() {
               <YAxis tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} domain={['auto', 'auto']} width={55} />
               <Tooltip content={<ChartTooltip />} />
               <Legend wrapperStyle={{ fontSize: '11px', color: '#64748b' }} />
-              <Line type="monotone" dataKey="bull" stroke={COLOR_UP} strokeWidth={2.5} dot={false} connectNulls={false} name="상승장" isAnimationActive={false} />
+              <Line type="monotone" dataKey="bull"     stroke={COLOR_UP}      strokeWidth={2.5} dot={false} connectNulls={false} name="상승장" isAnimationActive={false} />
               <Line type="monotone" dataKey="sideways" stroke={COLOR_NEUTRAL} strokeWidth={2.5} dot={false} connectNulls={false} name="횡보장" isAnimationActive={false} />
-              <Line type="monotone" dataKey="bear" stroke={COLOR_DOWN} strokeWidth={2.5} dot={false} connectNulls={false} name="하락장" isAnimationActive={false} />
+              <Line type="monotone" dataKey="bear"     stroke={COLOR_DOWN}    strokeWidth={2.5} dot={false} connectNulls={false} name="하락장" isAnimationActive={false} />
             </ComposedChart>
           </ResponsiveContainer>
         </>

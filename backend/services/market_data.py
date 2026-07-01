@@ -87,36 +87,46 @@ def get_close_df(tickers: list[str], period: str = "2y", ttl: int = 300) -> pd.D
         # stale 티커만 yfinance 수집 후 DB 저장
         if stale:
             try:
-                from backend.db.market_cache import _yf_lock
-                with _yf_lock:
-                    fresh_data = yf.download(stale, period=period, progress=False, auto_adjust=True)
-                if not fresh_data.empty:
-                    # ffill 없이 저장: 장 미종료/휴장일 NaN을 전일가로 오염시키지 않음
-                    fresh_df = (
-                        fresh_data["Close"]
-                        if isinstance(fresh_data.columns, pd.MultiIndex)
-                        else fresh_data
-                    )
+                from backend.db.market_cache import _yf_download_batched
+                fresh_df = _yf_download_batched(stale, period=period)
+                if not fresh_df.empty:
                     save_prices_to_db(fresh_df.dropna(how="all"))
             except Exception as e:
                 import logging; logging.getLogger(__name__).warning(f"yfinance 수집 실패: {e}")
 
         db_df = get_prices_from_db(all_tickers, period)
         if db_df is not None and not db_df.empty:
+            # 장기 요청(>1y)일 때 DB 데이터가 충분히 과거까지 커버하는지 확인.
+            # 스타트업 프리패치는 2y 기준이지만 regime/pairs 등은 5y를 요청함.
+            _PDAYS = {"5y": 1825, "3y": 1095, "2y": 800, "1y": 400}
+            period_days = _PDAYS.get(period, 0)
+            if period_days > 400:
+                required_start = pd.Timestamp.now() - pd.Timedelta(days=int(period_days * 0.75))
+                short = [
+                    t for t in all_tickers
+                    if t in db_df.columns
+                    and not db_df[t].dropna().empty
+                    and db_df[t].dropna().index[0] > required_start
+                ]
+                if short:
+                    try:
+                        from backend.db.market_cache import _yf_download_batched
+                        extra = _yf_download_batched(short, period=period)
+                        if not extra.empty:
+                            save_prices_to_db(extra.dropna(how="all"))
+                        db_df = get_prices_from_db(all_tickers, period)
+                    except Exception as e:
+                        import logging; logging.getLogger(__name__).warning(f"기간 커버리지 보충 실패: {e}")
+        if db_df is not None and not db_df.empty:
             _cache[mem_key] = (now, db_df)
             return db_df
 
-    # ③ DB 없음 → yfinance 전량 수집 (기존 폴백)
+    # ③ DB 없음 → yfinance 배치 수집 (폴백)
     def _fetch():
-        from backend.db.market_cache import _yf_lock
-        with _yf_lock:
-            data = yf.download(all_tickers, period=period, progress=False, auto_adjust=True)
-        if isinstance(data.columns, pd.MultiIndex):
-            return data["Close"].ffill()
-        return data.ffill()
+        from backend.db.market_cache import _yf_download_batched
+        return _yf_download_batched(all_tickers, period=period)
 
     result = _fetch()
-    # DB가 살아있으면 저장도 해둠
     if is_available():
         save_prices_to_db(result)
     _cache[mem_key] = (now, result)
@@ -125,7 +135,12 @@ def get_close_df(tickers: list[str], period: str = "2y", ttl: int = 300) -> pd.D
 
 def _get_sector_etf_df_1mo(ttl: int = 300) -> pd.DataFrame:
     def _fetch():
-        data = yf.download(SECTOR_ETF_TICKERS, period="1mo", progress=False, auto_adjust=True)
+        from backend.db.market_cache import _yf_lock
+        with _yf_lock:
+            data = yf.download(
+                SECTOR_ETF_TICKERS, period="1mo", progress=False,
+                auto_adjust=True, threads=False
+            )
         if isinstance(data.columns, pd.MultiIndex):
             return data["Close"].ffill()
         return data.ffill()

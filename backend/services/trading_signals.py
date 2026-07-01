@@ -10,10 +10,6 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-# ── 매크로 저승사자 임계값 ──────────────────────────────────────────────────────
-DOOM_RATE_SPREAD_THRESHOLD = 0.0
-DOOM_HY_SPREAD_THRESHOLD   = 5.0
-
 # ── S&P500 + 나스닥 전수 스캔 유니버스 ──────────────────────────────────────────
 SP500_NASDAQ_UNIVERSE = [
     "AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","TSLA","AVGO","COST",
@@ -35,82 +31,7 @@ SP500_NASDAQ_UNIVERSE = [
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 1. 매크로 저승사자 레이더
-# ══════════════════════════════════════════════════════════════════════════════
-
-def fetch_macro_doom_indicators() -> dict:
-    """장단기 금리차(T10Y2Y) + 하이일드 OAS를 FRED에서 조회. 실패 시 yfinance 근사."""
-    from datetime import datetime, timedelta
-    try:
-        import pandas_datareader.data as web
-        start = datetime.now() - timedelta(days=400)
-        df = web.DataReader(["T10Y2Y", "BAMLH0A0HYM2"], "fred", start).dropna()
-        return {
-            "rate_spread": float(df["T10Y2Y"].iloc[-1]),
-            "hy_spread":   float(df["BAMLH0A0HYM2"].iloc[-1]),
-            "rate_spread_series": df["T10Y2Y"],
-            "hy_spread_series":   df["BAMLH0A0HYM2"],
-            "source": "FRED",
-        }
-    except Exception:
-        pass
-
-    try:
-        import yfinance as yf
-        data = yf.download(["HYG", "IEF", "^TNX", "^FVX"], period="1y",
-                           progress=False, auto_adjust=True)["Close"].dropna()
-        ratio = data["HYG"] / data["IEF"]
-        ratio_chg = (ratio / ratio.rolling(60).mean() - 1) * -20
-        hy_approx = (ratio_chg + 4.0).clip(lower=2.0)
-        rate_approx = (data["^TNX"] / 10) - (data["^FVX"] / 10) + 0.3
-        return {
-            "rate_spread": float(rate_approx.iloc[-1]),
-            "hy_spread":   float(hy_approx.iloc[-1]),
-            "rate_spread_series": rate_approx,
-            "hy_spread_series":   hy_approx,
-            "source": "yfinance(근사)",
-        }
-    except Exception:
-        pass
-
-    return {
-        "rate_spread": 0.5, "hy_spread": 3.5,
-        "rate_spread_series": None, "hy_spread_series": None,
-        "source": "기본값(접속실패)",
-    }
-
-
-def evaluate_doom_radar(rate_spread: float, hy_spread: float) -> dict:
-    rate_inverted = rate_spread < DOOM_RATE_SPREAD_THRESHOLD
-    hy_elevated   = hy_spread   > DOOM_HY_SPREAD_THRESHOLD
-    is_doom       = rate_inverted or hy_elevated
-
-    if rate_inverted and hy_elevated:
-        severity = "경보"
-        comment  = (f"경고: 장단기 금리차 {rate_spread:+.2f}%p 역전 + "
-                    f"HY 스프레드 {hy_spread:.1f}% 위험. 매수 신호 무효화.")
-    elif rate_inverted:
-        severity = "주의"
-        comment  = f"주의: 장단기 금리차 {rate_spread:+.2f}%p 역전. 신규 매수 보수적 접근."
-    elif hy_elevated:
-        severity = "주의"
-        comment  = f"주의: HY 스프레드 {hy_spread:.1f}% 위험 수준. 신용경색 초기 신호."
-    else:
-        severity = "평시"
-        comment  = (f"금리차 {rate_spread:+.2f}%p · HY {hy_spread:.1f}% — "
-                    f"정상 범위. 매매 신호 활용 가능.")
-
-    return {
-        "is_doom":       is_doom,
-        "rate_inverted": rate_inverted,
-        "hy_elevated":   hy_elevated,
-        "severity":      severity,
-        "comment":       comment,
-    }
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 2. 평균 회귀 (볼린저 밴드)
+# 1. 평균 회귀 (볼린저 밴드)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def mean_reversion_signal(
@@ -643,8 +564,8 @@ def technical_chart_detail(
     resistance_lookback: int = 55,
 ) -> dict:
     """
-    가격 + 볼린저밴드 + 저항선 + z-score 시계열과, 주요 지점(키포인트) 목록을 반환.
-    매매신호 서브패널 / 평균회귀·저항선 패널이 공유하는 공용 분석 함수.
+    가격 + 볼린저밴드 + 이동평균(5/30/60/120) + z-score 시계열과 키포인트 반환.
+    저항선은 돌파 순간에만 표시(키포인트로만).
     """
     price = price.dropna()
     mr = mean_reversion_signal(price, window=window, n_std=n_std)
@@ -652,8 +573,14 @@ def technical_chart_detail(
 
     mid, upper, lower, zscore = mr["mid_band"], mr["upper_band"], mr["lower_band"], mr["zscore"]
 
+    ma5   = price.rolling(5).mean()
+    ma30  = price.rolling(30).mean()
+    ma60  = price.rolling(60).mean()
+    ma120 = price.rolling(120).mean()
+
+    # 키포인트: 밴드 이탈 전환 순간 + 저항선 돌파 순간
     points: list[dict] = []
-    prev_state = None  # 'above' | 'below' | 'inside'
+    prev_state = None
     for i, date in enumerate(price.index):
         p = float(price.iloc[i])
         u, l = upper.iloc[i], lower.iloc[i]
@@ -670,25 +597,27 @@ def technical_chart_detail(
             points.append({"date": date.strftime("%Y-%m-%d"), "price": round(p, 2), "type": "RESISTANCE_BREAK"})
         prev_state = state
 
+    def _r(v) -> float | None:
+        return round(float(v), 2) if not pd.isna(v) else None
+
     series = []
     for i, date in enumerate(price.index):
         series.append({
             "date":       date.strftime("%Y-%m-%d"),
             "price":      round(float(price.iloc[i]), 2),
-            "mid":        round(float(mid.iloc[i]), 2) if not pd.isna(mid.iloc[i]) else None,
-            "upper":      round(float(upper.iloc[i]), 2) if not pd.isna(upper.iloc[i]) else None,
-            "lower":      round(float(lower.iloc[i]), 2) if not pd.isna(lower.iloc[i]) else None,
-            "resistance": round(float(resistance.iloc[i]), 2) if not pd.isna(resistance.iloc[i]) else None,
+            "mid":        _r(mid.iloc[i]),
+            "upper":      _r(upper.iloc[i]),
+            "lower":      _r(lower.iloc[i]),
             "zscore":     round(float(zscore.iloc[i]), 3) if not pd.isna(zscore.iloc[i]) else None,
+            "ma5":        _r(ma5.iloc[i]),
+            "ma30":       _r(ma30.iloc[i]),
+            "ma60":       _r(ma60.iloc[i]),
+            "ma120":      _r(ma120.iloc[i]),
+            "resistance": _r(resistance.iloc[i]),
         })
 
     current_z = mr["current_z"]
-    if current_z <= -1.0:
-        bias = "LONG"
-    elif current_z >= 1.0:
-        bias = "SHORT"
-    else:
-        bias = "NEUTRAL"
+    bias = "LONG" if current_z <= -1.0 else "SHORT" if current_z >= 1.0 else "NEUTRAL"
 
     return {
         "series":         series,
@@ -719,22 +648,22 @@ def pairs_auto_detail(
         return {"matches": [], "best": None}
 
     price_a = close_df[ticker_a].dropna()
-    ret_a   = price_a.pct_change().dropna()
+    vol_a = price_a.pct_change().rolling(20).std().dropna()
 
     scored = []
     for t in pool:
         price_b = close_df[t].dropna()
-        common  = price_a.index.intersection(price_b.index)
+        common = price_a.index.intersection(price_b.index)
         if len(common) < 60:
             continue
-        ret_b  = price_b.pct_change().dropna()
-        common_ret = ret_a.index.intersection(ret_b.index)
-        if len(common_ret) < 30:
+        vol_b = price_b.pct_change().rolling(20).std().dropna()
+        common_vol = vol_a.index.intersection(vol_b.index)
+        if len(common_vol) < 30:
             continue
-        corr = float(ret_a.loc[common_ret].corr(ret_b.loc[common_ret]))
-        if corr != corr:
+        sim = float(vol_a.loc[common_vol].corr(vol_b.loc[common_vol]))
+        if sim != sim:
             continue
-        scored.append((t, corr, common))
+        scored.append((t, sim, common))
 
     if not scored:
         return {"matches": [], "best": None}
@@ -742,32 +671,43 @@ def pairs_auto_detail(
     scored.sort(key=lambda x: abs(x[1]), reverse=True)
     matches = [{"ticker": t, "correlation": round(c, 4)} for t, c, _ in scored[:top_n]]
 
-    best_ticker, best_corr, common_idx = scored[0]
-    pa = price_a.loc[common_idx]
-    pb = close_df[best_ticker].loc[common_idx]
+    best_ticker = scored[0][0]
 
-    idx_a = (pa / float(pa.iloc[0]) * 100)
-    idx_b = (pb / float(pb.iloc[0]) * 100)
-    spread_pct = (idx_a - idx_b)
+    # 상위 top_n 페어 각각의 차트 데이터 계산 (실제 주가 반환, 스프레드는 인덱스화 기반)
+    all_charts: dict = {}
+    all_breaches: dict = {}
 
-    chart = []
-    breaches = []
-    for date in common_idx:
-        a_v = float(idx_a.loc[date])
-        b_v = float(idx_b.loc[date])
-        s_v = float(spread_pct.loc[date])
-        d_str = date.strftime("%Y-%m-%d")
-        chart.append({"date": d_str, "a": round(a_v, 2), "b": round(b_v, 2), "spread": round(s_v, 2)})
-        if abs(s_v) > threshold_pct:
-            breaches.append({"date": d_str, "spread": round(s_v, 2)})
+    for pair_ticker, _, pair_common in scored[:top_n]:
+        pa = price_a.loc[pair_common]
+        pb = close_df[pair_ticker].loc[pair_common]
+        idx_a = (pa / float(pa.iloc[0]) * 100)
+        idx_b = (pb / float(pb.iloc[0]) * 100)
+        spread_pct = idx_a - idx_b
+
+        pair_chart: list[dict] = []
+        pair_breaches: list[dict] = []
+        prev_outside = False
+        for date in pair_common:
+            a_v = float(pa.loc[date])          # 실제 주가
+            b_v = float(pb.loc[date])          # 실제 주가
+            s_v = float(spread_pct.loc[date])  # 인덱스화 기반 스프레드(%)
+            d_str = date.strftime("%Y-%m-%d")
+            pair_chart.append({"date": d_str, "a": round(a_v, 2), "b": round(b_v, 2), "spread": round(s_v, 2)})
+            curr_outside = abs(s_v) > threshold_pct
+            if curr_outside and not prev_outside:
+                pair_breaches.append({"date": d_str, "spread": round(s_v, 2)})
+            prev_outside = curr_outside
+
+        all_charts[pair_ticker] = pair_chart
+        all_breaches[pair_ticker] = pair_breaches
 
     return {
         "matches":       matches,
-        "best": {
-            "ticker":      best_ticker,
-            "correlation": round(best_corr, 4),
-        },
-        "chart":          chart,
-        "breaches":       breaches,
-        "threshold_pct":  threshold_pct,
+        "best":          {"ticker": best_ticker, "correlation": round(scored[0][1], 4)},
+        "charts":        all_charts,
+        "all_breaches":  all_breaches,
+        # backward-compat: best 페어 데이터를 최상위에도 노출
+        "chart":         all_charts.get(best_ticker, []),
+        "breaches":      all_breaches.get(best_ticker, []),
+        "threshold_pct": threshold_pct,
     }

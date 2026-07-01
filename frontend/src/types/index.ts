@@ -104,14 +104,6 @@ export interface NewsItem {
   datetime: number
 }
 
-export interface DoomRadar {
-  is_doom: boolean
-  severity: number
-  comment: string
-  rate_spread: number
-  hy_spread: number
-  source?: string
-}
 
 export interface EarningsEvent {
   ticker: string
@@ -143,7 +135,6 @@ export interface ScanResult {
   long_picks: SignalPick[]
   short_picks: SignalPick[]
   scanned: number
-  doom: DoomRadar
 }
 
 export interface PairsSignal {
@@ -228,8 +219,12 @@ export interface TechnicalChartPoint {
   mid: number | null
   upper: number | null
   lower: number | null
-  resistance: number | null
   zscore: number | null
+  ma5: number | null
+  ma30: number | null
+  ma60: number | null
+  ma120: number | null
+  resistance: number | null
 }
 
 export interface TechnicalChartKeyPoint {
@@ -270,6 +265,8 @@ export interface PairsAutoResult {
   best: { ticker: string; correlation: number } | null
   chart: PairsAutoChartPoint[]
   breaches: PairsAutoBreach[]
+  charts: Record<string, PairsAutoChartPoint[]>
+  all_breaches: Record<string, PairsAutoBreach[]>
   threshold_pct: number
 }
 

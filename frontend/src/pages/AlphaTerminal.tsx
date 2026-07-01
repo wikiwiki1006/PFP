@@ -6,14 +6,14 @@ import {
 } from 'recharts'
 import ReactMarkdown from 'react-markdown'
 import {
-  Shield, Zap, MessageSquare, RefreshCw,
+  Zap, MessageSquare, RefreshCw,
   Plus, Trash2, Edit3, Check, X, Play, FileText, ChevronRight,
   PanelRightClose, PanelRightOpen, Download, History,
 } from 'lucide-react'
 import {
   getPortfolioMetrics, getEquityCurve, getHoldingsDetail, getSectorWeights,
   getMarketSnapshot, getMarketNews, getMacroData, getEarnings, getCorrelation,
-  getSignalsDoomRadar, getAnalystFeedback, getCachedScan, runSignalScan,
+  getAnalystFeedback, getCachedScan, runSignalScan,
   postTrade, updateHolding, deleteHolding, getHoldings,
   generateDailyBrief, getDailyBriefHistory, getDailyBriefFile,
   getIndexPrices, getTrades, updateTrade, deleteTrade, getTickerPrice, searchTickers,
@@ -1342,7 +1342,6 @@ export default function AlphaTerminal() {
   const sectorQ   = useQuery({ queryKey: ['sector-weights'],    queryFn: getSectorWeights,       staleTime: 60_000 })
   const snapQ     = useQuery({ queryKey: ['market-snapshot'],   queryFn: getMarketSnapshot,      refetchInterval: 30_000 })
   const macroQ    = useQuery({ queryKey: ['macro-data'],        queryFn: getMacroData,           staleTime: 300_000 })
-  const doomQ     = useQuery({ queryKey: ['signals-doom'],      queryFn: getSignalsDoomRadar,    staleTime: 60_000 })
   const feedbackQ = useQuery({ queryKey: ['analyst-feedback'],  queryFn: getAnalystFeedback,     staleTime: 300_000 })
   const corrQ     = useQuery({ queryKey: ['correlation'],       queryFn: () => getCorrelation(), staleTime: 300_000 })
   const scanQ     = useQuery({ queryKey: ['scan'],              queryFn: getCachedScan,           retry: false })
@@ -1362,8 +1361,7 @@ export default function AlphaTerminal() {
     staleTime: 3600_000,
   })
 
-  const m    = metricsQ.data
-  const doom = doomQ.data
+  const m = metricsQ.data
 
   return (
     <div className="flex flex-col h-full bg-[#0b0f1a] overflow-hidden">
@@ -1386,16 +1384,6 @@ export default function AlphaTerminal() {
 
       {/* ── Marquee ── */}
       <Marquee snapshot={snapQ.data} />
-
-      {/* ── Doom banner ── */}
-      {doom?.is_doom && (
-        <div className="flex-shrink-0 bg-[#ef4444]/10 border-b border-[#ef4444]/30 px-4 py-2 text-sm text-[#ef4444] flex items-center gap-2">
-          <Shield className="w-4 h-4" />
-          <span className="font-bold tracking-wider">DOOM  SEV {doom.severity}/5</span>
-          <span className="opacity-80">{doom.comment}</span>
-          <span className="ml-auto font-mono text-[12px]">Rate {fp(doom.rate_spread)}p  ·  HY {fn(doom.hy_spread, 0)} bps</span>
-        </div>
-      )}
 
       {/* ── Main layout ── */}
       <div className="flex flex-1 min-h-0">

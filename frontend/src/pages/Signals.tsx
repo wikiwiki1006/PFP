@@ -1,9 +1,8 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Zap, AlertTriangle, ShieldCheck, RefreshCw, Search } from 'lucide-react'
+import { Zap, RefreshCw, Search } from 'lucide-react'
 import LoadingSpinner, { ErrorMessage } from '@/components/LoadingSpinner'
 import {
-  getSignalsDoomRadar,
   getCachedScan,
   runSignalScan,
   getMeanReversionSignal,
@@ -36,7 +35,6 @@ export default function Signals() {
   const [activePairTickers, setActivePairTickers] = useState({ a: '', b: '', period: '1y' })
   const [activeLookup, setActiveLookup] = useState('')
 
-  const doomQ = useQuery({ queryKey: ['signals-doom'], queryFn: getSignalsDoomRadar })
   const cachedScanQ = useQuery({ queryKey: ['cached-scan'], queryFn: getCachedScan })
 
   const scanMutation = useMutation({
@@ -70,81 +68,7 @@ export default function Signals() {
       {/* Header */}
       <div>
         <h1 className="text-xl font-bold text-[#e2e8f0]">Signals</h1>
-        <p className="text-sm text-[#64748b] mt-0.5">Doom radar, signal scanner &amp; strategy analysis</p>
-      </div>
-
-      {/* Doom Radar Panel */}
-      <div
-        className={cn(
-          'bg-[#111827] border rounded-lg p-5',
-          doomQ.data?.is_doom ? 'border-[#ef4444]/40' : 'border-[#1e2d40]'
-        )}
-      >
-        <div className="flex items-center gap-2 mb-4">
-          <Zap className="w-4 h-4 text-[#f59e0b]" />
-          <h2 className="text-sm font-semibold text-[#e2e8f0]">Doom Radar</h2>
-        </div>
-
-        {doomQ.isLoading && <LoadingSpinner size="sm" text="Analyzing macro conditions..." />}
-        {doomQ.isError && (
-          <ErrorMessage message="Failed to load doom radar" retry={doomQ.refetch} />
-        )}
-        {doomQ.data && (
-          <div className="flex flex-col md:flex-row items-start md:items-center gap-4">
-            <div className="flex items-center gap-3">
-              {doomQ.data.is_doom ? (
-                <div className="w-12 h-12 rounded-full bg-[#ef4444]/20 border border-[#ef4444]/40 flex items-center justify-center">
-                  <AlertTriangle className="w-6 h-6 text-[#ef4444]" />
-                </div>
-              ) : (
-                <div className="w-12 h-12 rounded-full bg-[#10b981]/20 border border-[#10b981]/40 flex items-center justify-center">
-                  <ShieldCheck className="w-6 h-6 text-[#10b981]" />
-                </div>
-              )}
-              <div>
-                <div
-                  className={cn(
-                    'text-base font-bold',
-                    doomQ.data.is_doom ? 'text-[#ef4444]' : 'text-[#10b981]'
-                  )}
-                >
-                  {doomQ.data.is_doom ? 'DOOM CONDITIONS ACTIVE' : 'CONDITIONS NORMAL'}
-                </div>
-                <div className="text-sm text-[#64748b] mt-0.5">{doomQ.data.comment}</div>
-              </div>
-            </div>
-
-            <div className="flex flex-wrap gap-4 ml-auto">
-              <div className="bg-[#0b0f1a] border border-[#1e2d40] rounded-lg px-4 py-2 text-center">
-                <div className="text-xs text-[#64748b] mb-1">Severity</div>
-                <div
-                  className={cn(
-                    'text-xl font-mono font-bold',
-                    doomQ.data.severity >= 4
-                      ? 'text-[#ef4444]'
-                      : doomQ.data.severity >= 3
-                      ? 'text-[#f59e0b]'
-                      : 'text-[#10b981]'
-                  )}
-                >
-                  {doomQ.data.severity ?? 0}/5
-                </div>
-              </div>
-              <div className="bg-[#0b0f1a] border border-[#1e2d40] rounded-lg px-4 py-2 text-center">
-                <div className="text-xs text-[#64748b] mb-1">Rate Spread</div>
-                <div className="text-xl font-mono font-bold text-[#e2e8f0]">
-                  {doomQ.data.rate_spread?.toFixed(2) ?? '—'}%
-                </div>
-              </div>
-              <div className="bg-[#0b0f1a] border border-[#1e2d40] rounded-lg px-4 py-2 text-center">
-                <div className="text-xs text-[#64748b] mb-1">HY Spread</div>
-                <div className="text-xl font-mono font-bold text-[#e2e8f0]">
-                  {doomQ.data.hy_spread?.toFixed(0) ?? '—'} bps
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
+        <p className="text-sm text-[#64748b] mt-0.5">Signal scanner &amp; strategy analysis</p>
       </div>
 
       {/* Signal Scanner */}

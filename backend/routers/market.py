@@ -14,7 +14,6 @@ from backend.services.market_data import (
     get_sector_table,
     get_sector_changes,
     get_fred_macro,
-    get_doom_radar,
     get_portfolio_news,
     get_earnings_dividends,
     get_market_snapshot,
@@ -99,14 +98,6 @@ def macro_data():
     """FRED 거시경제 지표 (Fed Rate, 실업률, 10Y/2Y 금리)."""
     return get_fred_macro()
 
-
-@router.get("/doom-radar")
-def doom_radar():
-    """
-    매크로 저승사자 레이더 — 장단기 금리차 + 하이일드 스프레드 위기 감지.
-    is_doom=true 이면 모든 매수 신호 주의.
-    """
-    return get_doom_radar()
 
 
 @router.get("/news")

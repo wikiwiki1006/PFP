@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { Monitor, Globe, Dice5, TrendingUp, Zap, BookOpen, Activity } from 'lucide-react'
-import { getPortfolioMetrics, getSignalsDoomRadar } from '@/api'
+import { getPortfolioMetrics } from '@/api'
 import { formatCurrency } from '@/lib/utils'
 
 const MODULES = [
@@ -73,10 +73,7 @@ function Clock() {
 export default function Home() {
   const navigate = useNavigate()
   const metricsQ = useQuery({ queryKey: ['portfolio-metrics'], queryFn: getPortfolioMetrics, staleTime: 60_000 })
-  const doomQ    = useQuery({ queryKey: ['signals-doom'], queryFn: getSignalsDoomRadar, staleTime: 60_000 })
-
-  const m    = metricsQ.data
-  const doom = doomQ.data
+  const m = metricsQ.data
 
   return (
     <div className="p-6 min-h-full space-y-6">
@@ -101,11 +98,11 @@ export default function Home() {
             ok={!!m}
           />
           <StatusCard
-            label="매크로 레이더"
-            value={doom ? (doom.is_doom ? '⚠ 경보' : '정상') : '로드 중'}
-            sub={doom ? `Rate ${doom.rate_spread > 0 ? '+' : ''}${doom.rate_spread.toFixed(2)}%p · HY ${doom.hy_spread.toFixed(1)}%` : ''}
-            ok={!!doom}
-            warn={doom?.is_doom}
+            label="VIX 추세"
+            value={m ? (m.vix > 25 ? '발작 구간' : m.vix > 18 ? '주의 구간' : '정상') : '로드 중'}
+            sub={m ? `VIX ${m.vix.toFixed(2)}` : ''}
+            ok={!!m}
+            warn={m ? m.vix > 25 : false}
           />
           <StatusCard
             label="VIX 공포지수"

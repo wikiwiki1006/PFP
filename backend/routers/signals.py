@@ -16,8 +16,6 @@ from backend.db.market_cache import get_common, save_common
 from backend.services.market_data import get_close_df, _cached
 from backend.services.trading_signals import (
     SP500_NASDAQ_UNIVERSE,
-    fetch_macro_doom_indicators,
-    evaluate_doom_radar,
     scan_universe_with_targets,
     pairs_trading_signal,
     mean_reversion_signal,
@@ -39,32 +37,9 @@ def _uid(x: Optional[str]) -> str:
     return (x or "default").strip() or "default"
 
 
-_SEVERITY_MAP = {"위기": 5, "경고": 3, "정상": 1}
-
-
-def _doom_radar_dict() -> dict:
-    macro = fetch_macro_doom_indicators()
-    doom  = evaluate_doom_radar(macro["rate_spread"], macro["hy_spread"])
-    sev_str = doom.get("severity", "정상")
-    sev_num = _SEVERITY_MAP.get(sev_str, 2 if doom["is_doom"] else 1)
-    return {
-        "is_doom":     doom["is_doom"],
-        "severity":    sev_num,
-        "comment":     doom.get("comment", ""),
-        "rate_spread": round(macro["rate_spread"], 3),
-        "hy_spread":   round(macro["hy_spread"], 3),
-        "source":      macro["source"],
-    }
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # 엔드포인트
 # ══════════════════════════════════════════════════════════════════════════════
-
-@router.get("/doom-radar")
-def doom_radar():
-    """매크로 저승사자 레이더 (장단기 금리역전 + HY 스프레드)."""
-    return _doom_radar_dict()
 
 
 @router.post("/scan")
@@ -77,6 +52,7 @@ def scan_universe(
     30~60초 소요. 결과는 인메모리 캐시.
     """
     import yfinance as yf
+    from backend.db.market_cache import _yf_lock
 
     extra    = []
     if include_portfolio:
@@ -87,29 +63,40 @@ def scan_universe(
     import logging as _logging
     _logger = _logging.getLogger(__name__)
 
+    BATCH = 50
     try:
         _yf_log = _logging.getLogger("yfinance")
         _prev = _yf_log.level
         _yf_log.setLevel(_logging.CRITICAL)
+        close_frames:  list[pd.DataFrame] = []
+        volume_frames: list[pd.DataFrame] = []
         try:
-            data = yf.download(universe, period="6mo", progress=False, auto_adjust=True)
+            for i in range(0, len(universe), BATCH):
+                batch = universe[i : i + BATCH]
+                with _yf_lock:
+                    data = yf.download(
+                        batch, period="6mo", progress=False,
+                        auto_adjust=True, threads=False
+                    )
+                if data is None or data.empty:
+                    continue
+                if isinstance(data.columns, pd.MultiIndex):
+                    lvl0 = data.columns.get_level_values(0)
+                    if "Close"  in lvl0: close_frames.append(data["Close"])
+                    if "Volume" in lvl0: volume_frames.append(data["Volume"])
+                else:
+                    if "Close"  in data.columns: close_frames.append(data[["Close"]])
+                    if "Volume" in data.columns: volume_frames.append(data[["Volume"]])
         finally:
             _yf_log.setLevel(_prev)
 
-        if data is None or data.empty:
+        if not close_frames:
             raise HTTPException(status_code=503, detail="시장 데이터를 가져올 수 없습니다. 잠시 후 다시 시도하세요.")
 
-        # yfinance는 단일 티커 반환 시 flat DataFrame, 복수 시 MultiIndex 반환
-        if isinstance(data.columns, pd.MultiIndex):
-            lvl0 = data.columns.get_level_values(0)
-            close_raw  = data["Close"]  if "Close"  in lvl0 else pd.DataFrame()
-            volume_raw = data["Volume"] if "Volume" in lvl0 else None
-        else:
-            # flat 구조 (단일 티커 또는 버전 차이)
-            close_raw  = data[["Close"]]  if "Close"  in data.columns else pd.DataFrame()
-            volume_raw = data[["Volume"]] if "Volume" in data.columns else None
+        close_raw  = pd.concat(close_frames,  axis=1)
+        volume_raw = pd.concat(volume_frames, axis=1) if volume_frames else None
 
-        if not isinstance(close_raw, pd.DataFrame) or close_raw.empty:
+        if close_raw.empty:
             raise HTTPException(status_code=503, detail="종가 데이터를 가져올 수 없습니다.")
 
         price_df  = close_raw.ffill().dropna(axis=1, how="all")
@@ -145,7 +132,6 @@ def scan_universe(
             "long_picks":  _clean(raw.get("long_picks", [])),
             "short_picks": _clean(raw.get("short_picks", [])),
             "scanned":     raw.get("scanned", len(universe)),
-            "doom":        _doom_radar_dict(),
         }
         _scan_cache["last"] = result
         return result
@@ -159,7 +145,7 @@ def scan_universe(
 @router.get("/scan/cached")
 def get_cached_scan():
     """마지막 스캔 결과 반환. 스캔 전이면 빈 결과 반환."""
-    return _scan_cache.get("last") or {"long_picks": [], "short_picks": [], "scanned": 0, "doom": None}
+    return _scan_cache.get("last") or {"long_picks": [], "short_picks": [], "scanned": 0}
 
 
 @router.get("/pairs")
@@ -295,47 +281,51 @@ def multi_signal(
 @router.get("/regime")
 def market_regime(
     ticker: str = Query(default="^GSPC", description="분석 티커 (기본: S&P500)"),
-    period: str = Query(default="2y", description="기간 (1y/2y/3y)"),
+    years:  int = Query(default=1, ge=1, le=5, description="표시 기간 (1-5년)"),
 ):
-    """K-means 기반 시장 국면 감지 (Bull/Sideways/Bear)."""
+    """K-means 기반 시장 국면 감지 (Bull/Sideways/Bear). years 범위 내 데이터만 반환."""
     ticker   = ticker.upper()
-    close_df = get_close_df([ticker], period=period, ttl=300)
+    close_df = get_close_df([ticker], period="5y", ttl=300)
 
     if ticker not in close_df.columns:
         raise HTTPException(status_code=400, detail=f"{ticker} 데이터 없음")
 
-    price  = close_df[ticker].dropna()
-    result = detect_market_regime(price)
+    price_all = close_df[ticker].dropna()
+    result    = detect_market_regime(price_all)
 
-    regime_counts = {}
     rl = result.get("regime_labels")
-    if rl is not None and hasattr(rl, "__len__") and len(rl) > 0:
-        import pandas as pd
-        rs     = pd.Series(rl)
-        counts = rs.value_counts()
-        total  = len(rs)
-        for r_name in ["Bull", "Sideways", "Bear"]:
-            regime_counts[r_name] = round(counts.get(r_name, 0) / total * 100, 1) if total > 0 else 0.0
+    if rl is None or len(rl) == 0:
+        return {"ticker": ticker, "current_regime": "Unknown",
+                "regime_pct": {}, "n_regimes": 3, "chart_data": []}
 
-    chart_data = []
-    if rl is not None and hasattr(rl, "__len__") and len(rl) > 0:
-        price_series = close_df[ticker].dropna()
-        import pandas as pd
-        rl_series = pd.Series(rl)
-        for date, regime in rl_series.items():
-            if date in price_series.index:
-                chart_data.append({
-                    "date":   date.strftime("%Y-%m-%d"),
-                    "price":  round(float(price_series.loc[date]), 2),
-                    "regime": regime,
-                })
+    rl_series    = pd.Series(rl)
+    cutoff       = rl_series.index.max() - pd.Timedelta(days=365 * years)
+    rl_window    = rl_series[rl_series.index >= cutoff]
+    price_window = price_all[price_all.index >= cutoff]
+
+    counts = rl_window.value_counts()
+    total  = len(rl_window)
+    regime_counts = {
+        r: round(counts.get(r, 0) / total * 100, 1) if total > 0 else 0.0
+        for r in ["Bull", "Sideways", "Bear"]
+    }
+
+    chart_data = [
+        {
+            "date":   date.strftime("%Y-%m-%d"),
+            "price":  round(float(price_window.loc[date]), 2),
+            "regime": regime,
+        }
+        for date, regime in rl_window.items()
+        if date in price_window.index
+    ]
 
     return {
-        "ticker":          ticker,
-        "current_regime":  result.get("current_regime", "Unknown"),
-        "regime_pct":      regime_counts,
-        "n_regimes":       result.get("n_regimes", 3),
-        "chart_data":      chart_data[-252:],
+        "ticker":         ticker,
+        "current_regime": result.get("current_regime", "Unknown"),
+        "regime_pct":     regime_counts,
+        "n_regimes":      result.get("n_regimes", 3),
+        "chart_data":     chart_data,
     }
 
 
