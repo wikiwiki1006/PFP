@@ -30,13 +30,18 @@ _pool: Optional[Any] = None
 
 
 def _dsn() -> str:
+    host = os.getenv("DB_HOST", "localhost")
+    # Supabase(원격) 연결 시 SSL 필수, 로컬 localhost 연결 시 불필요
+    is_remote = host != "localhost" and host != "127.0.0.1"
+    ssl_part  = "sslmode=require " if is_remote else ""
     return (
-        f"host={os.getenv('DB_HOST', 'localhost')} "
+        f"host={host} "
         f"port={os.getenv('DB_PORT', '5432')} "
         f"dbname={os.getenv('DB_NAME', 'postgres')} "
         f"user={os.getenv('DB_USER', 'postgres')} "
         f"password={os.getenv('DB_PASSWORD', '')} "
         f"connect_timeout=10 "
+        f"{ssl_part}"
         f"keepalives=1 keepalives_idle=60 keepalives_interval=10 keepalives_count=5"
     )
 
