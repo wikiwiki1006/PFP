@@ -36,7 +36,8 @@ def _dsn() -> str:
         f"dbname={os.getenv('DB_NAME', 'postgres')} "
         f"user={os.getenv('DB_USER', 'postgres')} "
         f"password={os.getenv('DB_PASSWORD', '')} "
-        f"connect_timeout=5"
+        f"connect_timeout=10 "
+        f"keepalives=1 keepalives_idle=60 keepalives_interval=10 keepalives_count=5"
     )
 
 
@@ -64,6 +65,23 @@ def is_available() -> bool:
     return _pool is not None
 
 
+def _try_reinit_pool() -> bool:
+    """풀이 죽었을 때 재초기화 시도. 성공 시 True."""
+    global _pool
+    logger.warning("DB 연결 풀 재초기화 시도 중...")
+    try:
+        if _pool is not None:
+            try:
+                _pool.closeall()
+            except Exception:
+                pass
+        _pool = None
+        return init_pool()
+    except Exception as e:
+        logger.error(f"DB 풀 재초기화 실패: {e}")
+        return False
+
+
 @contextmanager
 def get_conn():
     """풀에서 커넥션을 꺼내 컨텍스트 매니저로 제공. 완료 시 commit, 예외 시 rollback."""
@@ -74,11 +92,29 @@ def get_conn():
     for attempt in range(3):
         try:
             conn = _pool.getconn()
+            # 끊긴 커넥션 감지 후 교체
+            if conn.closed:
+                _pool.putconn(conn, close=True)
+                conn = None
+                time.sleep(0.2)
+                continue
+            # 간단한 ping으로 연결 유효성 검증
+            with conn.cursor() as _cur:
+                _cur.execute("SELECT 1")
             break
-        except Exception:
+        except Exception as e:
+            if conn is not None:
+                try:
+                    _pool.putconn(conn, close=True)
+                except Exception:
+                    pass
+                conn = None
             if attempt < 2:
                 time.sleep(0.3)
             else:
+                # 마지막 시도 실패 시 풀 전체 재초기화
+                if _try_reinit_pool():
+                    raise RuntimeError("풀 재초기화 완료, 다음 요청에서 재시도") from e
                 raise
     try:
         yield conn

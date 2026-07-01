@@ -59,7 +59,7 @@ except Exception as _e:
 
 app = FastAPI(
     title="Personal Financial Platform API",
-    description="포트폴리오 관리 · 시장 데이터 · AI 거시경제 분석 · 매매 신호",
+    description="포트폴리오 관리 · 시장 데이터 · AI 거시경제 분석 · 매매 신호\n실행: uvicorn backend.main:app --host 0.0.0.0 --port 8000",
     version="2.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
@@ -69,13 +69,8 @@ app = FastAPI(
 # ── CORS ──────────────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://localhost:8501",
-        "http://127.0.0.1:8501",
-    ],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

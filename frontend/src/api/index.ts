@@ -11,8 +11,14 @@ import type {
   MarketSituation, BBScanFullResult, TechnicalChartResult, PairsAutoResult,
 } from '@/types'
 
+const _apiBase =
+  import.meta.env.VITE_API_URL ||
+  (typeof window !== 'undefined'
+    ? `http://${window.location.hostname}:8000`
+    : 'http://localhost:8000')
+
 export const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000',
+  baseURL: _apiBase,
   timeout: 300000,
   headers: { 'Content-Type': 'application/json' },
 })
