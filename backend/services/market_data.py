@@ -62,15 +62,20 @@ GICS_SECTOR_ETFS = [
 SECTOR_ETF_TICKERS = [etf for _, etf in GICS_SECTOR_ETFS]
 
 
-def get_close_df(tickers: list[str], period: str = "2y", ttl: int = 300) -> pd.DataFrame:
+def get_close_df(tickers: list[str], period: str = "2y", ttl: int = 300, include_market: bool = True) -> pd.DataFrame:
     """
     1) 메모리 캐시 (TTL 5분) 히트 → 즉시 반환
     2) DB market_prices 조회 → stale 티커만 yfinance 보충 후 DB 저장
     3) DB 미연결 → 기존처럼 yfinance 전량 수집
+
+    include_market=True  → ALWAYS_FETCH(시장 지수) 를 tickers에 자동 추가 (시장/상관관계 엔드포인트용)
+    include_market=False → 전달된 tickers만 사용 (포트폴리오 엔드포인트용, 불필요한 지수 제외)
     """
     from backend.db.market_cache import get_prices_from_db, save_prices_to_db, get_stale_tickers
 
-    all_tickers = list(set(tickers + ALWAYS_FETCH))
+    all_tickers = list(set(tickers + ALWAYS_FETCH)) if include_market else list(set(tickers))
+    if not all_tickers:
+        return pd.DataFrame()
     mem_key = f"close_{','.join(sorted(all_tickers))}_{period}"
 
     # ① 메모리 캐시 확인
@@ -359,41 +364,46 @@ def get_portfolio_news(tickers: list[str], max_per: int = 2, max_macro: int = 4,
 def get_earnings_dividends(tickers: list[str], ttl: int = 3600) -> list[dict]:
     key = f"earn_div_{','.join(sorted(tickers))}"
 
-    def _fetch():
-        result = []
-        for t in tickers:
-            earn_date = "N/A"
-            div_date  = "-"
-            div_yield = "0%"
+    def _fetch_one(t: str) -> dict:
+        earn_date = "N/A"
+        div_date  = "-"
+        div_yield = "0%"
+        try:
+            tk = yf.Ticker(t)
             try:
-                tk = yf.Ticker(t)
-                try:
-                    cal = tk.calendar
-                    if isinstance(cal, dict) and "Earnings Date" in cal:
-                        ed = cal["Earnings Date"]
-                        if isinstance(ed, list) and ed:
-                            earn_date = ed[0].strftime("%b %d")
-                except Exception:
-                    pass
-                try:
-                    divs = tk.dividends
-                    if len(divs) > 0:
-                        div_date = divs.index[-1].strftime("%b %d")
-                    dy = (tk.info or {}).get("dividendYield")
-                    if dy and dy > 0:
-                        # yfinance may return decimal (0.0047) or percent (0.47) form.
-                        # Values < 0.10 are almost certainly raw decimals → multiply by 100.
-                        # Values >= 0.10 are already in percent form → use directly.
-                        pct = dy * 100 if dy < 0.10 else dy
-                        div_yield = f"{pct:.2f}%"
-                    else:
-                        div_yield = "0%"
-                except Exception:
-                    pass
+                cal = tk.calendar
+                if isinstance(cal, dict) and "Earnings Date" in cal:
+                    ed = cal["Earnings Date"]
+                    if isinstance(ed, list) and ed:
+                        earn_date = ed[0].strftime("%b %d")
             except Exception:
                 pass
-            result.append({"ticker": t, "earn_date": earn_date, "div_date": div_date, "div_yield": div_yield})
-        return result
+            try:
+                divs = tk.dividends
+                if len(divs) > 0:
+                    div_date = divs.index[-1].strftime("%b %d")
+                dy = (tk.info or {}).get("dividendYield")
+                if dy and dy > 0:
+                    pct = dy * 100 if dy < 0.10 else dy
+                    div_yield = f"{pct:.2f}%"
+                else:
+                    div_yield = "0%"
+            except Exception:
+                pass
+        except Exception:
+            pass
+        return {"ticker": t, "earn_date": earn_date, "div_date": div_date, "div_yield": div_yield}
+
+    def _fetch():
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        results: dict[str, dict] = {}
+        with ThreadPoolExecutor(max_workers=min(len(tickers), 8)) as pool:
+            futures = {pool.submit(_fetch_one, t): t for t in tickers}
+            for fut in as_completed(futures):
+                row = fut.result()
+                results[row["ticker"]] = row
+        # 원래 순서 유지
+        return [results[t] for t in tickers if t in results]
 
     return _cached(key, ttl, _fetch)
 

@@ -37,6 +37,18 @@ def _uid(x_user_id: Optional[str]) -> str:
     return (x_user_id or "default").strip() or "default"
 
 
+def _portfolio_close_df(holdings: dict, period: str = "2y", ttl: int = 300):
+    """
+    포트폴리오 전용 close_df.
+    ALWAYS_FETCH(22개 시장 지수) 제외, 사용자 종목 + 계산에 필요한 ^GSPC/^VIX만 포함.
+    metrics 와 equity-curve 가 동일 파라미터로 호출 → 두 번째 요청은 메모리 캐시 히트.
+    """
+    tickers = sorted(set(
+        [t for t in holdings if t != "CASH"] + ["^GSPC", "^VIX"]
+    ))
+    return get_close_df(tickers, period=period, ttl=ttl, include_market=False)
+
+
 # ── Holdings ───────────────────────────────────────────────────────────────────
 
 @router.get("/holdings")
@@ -512,8 +524,8 @@ def get_metrics(x_user_id: Optional[str] = Header(default=None)):
     trade_log = get_trade_log(uid)
     if not holdings:
         raise HTTPException(status_code=400, detail="보유 종목 없음")
-    tickers = [t for t in holdings if t != "CASH"]
-    close_df = get_close_df(tickers, period="1y", ttl=300)
+    # period="2y" → equity-curve 와 동일 캐시키 공유, 두 번째 요청은 메모리 히트
+    close_df = _portfolio_close_df(holdings, period="2y", ttl=300)
     equity_curve = build_equity_curve(holdings, trade_log, close_df)
     return calculate_metrics(holdings, close_df, equity_curve)
 
@@ -528,8 +540,7 @@ def get_equity_curve(
     trade_log = get_trade_log(uid)
     if not holdings:
         raise HTTPException(status_code=400, detail="보유 종목 없음")
-    tickers = [t for t in holdings if t != "CASH"]
-    close_df = get_close_df(tickers, period="2y", ttl=300)
+    close_df = _portfolio_close_df(holdings, period="2y", ttl=300)
     equity_curve = build_equity_curve(holdings, trade_log, close_df)
     return equity_curve_to_records(equity_curve, close_df)
 
@@ -541,7 +552,8 @@ def get_holdings_detail_endpoint(x_user_id: Optional[str] = Header(default=None)
     if not holdings:
         return []
     tickers = [t for t in holdings if t != "CASH"]
-    close_df = get_close_df(tickers, period="5d", ttl=60)
+    # include_market=False: 현재가만 필요, 시장 지수 불필요
+    close_df = get_close_df(tickers, period="5d", ttl=60, include_market=False)
     return get_holdings_detail(holdings, close_df)
 
 
@@ -552,7 +564,8 @@ def get_sector_weights(x_user_id: Optional[str] = Header(default=None)):
     if not holdings:
         return {}
     tickers = [t for t in holdings if t != "CASH"]
-    close_df = get_close_df(tickers, period="5d", ttl=60) if tickers else None
+    # holdings-detail 과 동일 캐시키 공유 (5d, include_market=False, 같은 tickers)
+    close_df = get_close_df(tickers, period="5d", ttl=60, include_market=False) if tickers else None
     rows: dict[str, float] = {}
     for t, info in holdings.items():
         price = 1.0 if t == "CASH" else (

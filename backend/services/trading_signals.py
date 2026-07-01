@@ -167,64 +167,91 @@ def pairs_trading_signal(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 5. 시장 국면 감지 (K-means)
+# 5. 시장 국면 감지 (200MA 기반 — 실제 시장 판단 기준)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def detect_market_regime(
     price: pd.Series,
-    return_window: int = 20,
-    vol_window: int = 20,
-    n_regimes: int = 3,
+    short_window: int = 50,
+    long_window: int = 200,
+    slope_window: int = 20,
 ) -> dict:
-    from sklearn.cluster import KMeans
+    """
+    200일 이동평균 기반 시장 국면 감지.
 
-    ret      = price.pct_change().rolling(return_window).mean() * 252
-    vol      = price.pct_change().rolling(vol_window).std() * np.sqrt(252)
-    features = pd.DataFrame({"return": ret, "volatility": vol}).dropna()
+    Bull  : 가격 > 200MA  AND  (50MA > 200MA  OR  200MA 기울기 양수)
+    Bear  : 가격 < 200MA  AND  (50MA < 200MA  OR  200MA 기울기 음수)
+    Sideways : 그 외 혼조·박스권
 
-    if len(features) < n_regimes * 3:
+    데이터가 200일 미만이면 20/60 MA 단순 비교로 폴백.
+    """
+    price = price.dropna()
+
+    if len(price) < long_window:
         return _regime_fallback(price)
 
-    X      = features.values
-    X_norm = (X - X.mean(axis=0)) / (X.std(axis=0) + 1e-9)
+    ma_short = price.rolling(short_window).mean()
+    ma_long  = price.rolling(long_window).mean()
+    # 200MA 기울기 (slope_window 일 변화율)
+    ma_slope = ma_long.diff(slope_window) / ma_long.shift(slope_window)
 
-    km         = KMeans(n_clusters=n_regimes, n_init=10, random_state=42)
-    raw_labels = km.fit_predict(X_norm)
+    labels_list: list[str] = []
+    for i in range(len(price)):
+        ml = ma_long.iloc[i]
+        if pd.isna(ml):
+            labels_list.append("Sideways")
+            continue
 
-    centers_orig = km.cluster_centers_ * X.std(axis=0) + X.mean(axis=0)
-    order        = np.argsort(-centers_orig[:, 0])
-    regime_names = ["Bull", "Sideways", "Bear"] if n_regimes == 3 else \
-                   [f"Regime{i+1}" for i in range(n_regimes)]
-    label_map    = {int(cid): regime_names[min(rank, len(regime_names)-1)]
-                    for rank, cid in enumerate(order)}
+        p  = float(price.iloc[i])
+        ms = float(ma_short.iloc[i]) if not pd.isna(ma_short.iloc[i]) else ml
+        sl = float(ma_slope.iloc[i]) if not pd.isna(ma_slope.iloc[i]) else 0.0
 
-    regime_labels  = pd.Series([label_map[int(c)] for c in raw_labels], index=features.index)
+        above_long  = p  > float(ml)
+        below_long  = p  < float(ml)
+        cross_up    = ms > float(ml)   # 50MA > 200MA (골든크로스 상태)
+        cross_down  = ms < float(ml)   # 50MA < 200MA (데드크로스 상태)
+        slope_up    = sl >  0.001      # 200MA 상향 추세
+        slope_down  = sl < -0.001      # 200MA 하향 추세
+
+        if above_long and (cross_up or slope_up):
+            labels_list.append("Bull")
+        elif below_long and (cross_down or slope_down):
+            labels_list.append("Bear")
+        else:
+            labels_list.append("Sideways")
+
+    regime_labels  = pd.Series(labels_list, index=price.index)
     current_regime = regime_labels.iloc[-1] if len(regime_labels) > 0 else "Unknown"
 
     return {
-        "regime_labels":  regime_labels,
-        "regime_raw":     pd.Series(raw_labels, index=features.index),
-        "features":       features,
-        "cluster_centers": centers_orig,
-        "label_map":       label_map,
+        "regime_labels":   regime_labels,
+        "regime_raw":      None,
+        "features":        None,
+        "cluster_centers": None,
+        "label_map":       None,
         "current_regime":  current_regime,
+        "n_regimes":       3,
     }
 
 
 def _regime_fallback(price: pd.Series) -> dict:
+    """200일 데이터 부족 시 20/60 MA 단순 비교로 대체."""
     ma_short = price.rolling(20).mean()
     ma_long  = price.rolling(60).mean()
     labels   = pd.Series(
-        np.where(ma_short > ma_long * 1.02, "Bull",
-                 np.where(ma_short < ma_long * 0.98, "Bear", "Sideways")),
+        np.where(ma_short > ma_long * 1.01, "Bull",
+                 np.where(ma_short < ma_long * 0.99, "Bear", "Sideways")),
         index=price.index,
     )
     valid = labels.dropna()
     return {
-        "regime_labels": valid,
-        "regime_raw": None, "features": None,
-        "cluster_centers": None, "label_map": None,
-        "current_regime": valid.iloc[-1] if len(valid) > 0 else "Unknown",
+        "regime_labels":   valid,
+        "regime_raw":      None,
+        "features":        None,
+        "cluster_centers": None,
+        "label_map":       None,
+        "current_regime":  valid.iloc[-1] if len(valid) > 0 else "Unknown",
+        "n_regimes":       3,
     }
 
 

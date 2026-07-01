@@ -2,19 +2,26 @@
 backend/main.py
 ────────────────
 FastAPI 앱 진입점.
-실행: uvicorn backend.main:app --reload --port 8000
+개발: uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+배포: APP_ENV=production ALLOWED_ORIGINS=https://yourdomain.com uvicorn backend.main:app --host 0.0.0.0 --port 8000
 """
 from __future__ import annotations
 
 import json
 import logging
 import math
+import os
 import threading
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+
+# ── 환경 설정 ─────────────────────────────────────────────────────────────────
+APP_ENV = os.getenv("APP_ENV", "development")  # "development" | "production"
+_is_prod = APP_ENV == "production"
 
 
 def _clean_floats(obj: Any) -> Any:
@@ -61,20 +68,31 @@ except Exception as _e:
 
 app = FastAPI(
     title="Personal Financial Platform API",
-    description="포트폴리오 관리 · 시장 데이터 · AI 거시경제 분석 · 매매 신호\n실행: uvicorn backend.main:app --host 0.0.0.0 --port 8000",
+    description="포트폴리오 관리 · 시장 데이터 · AI 거시경제 분석 · 매매 신호",
     version="2.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
+    # 프로덕션에서는 API 문서 비공개
+    docs_url=None if _is_prod else "/docs",
+    redoc_url=None if _is_prod else "/redoc",
+    openapi_url=None if _is_prod else "/openapi.json",
     default_response_class=SafeJSONResponse,
 )
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
+# 개발: 모든 Origin 허용 (로컬 + LAN 모두 접근 가능)
+# 프로덕션: ALLOWED_ORIGINS 환경변수로 허용 Origin 명시 (쉼표 구분)
+#   예) ALLOWED_ORIGINS=https://mypfp.com,https://www.mypfp.com
+_raw_origins = os.getenv("ALLOWED_ORIGINS", "")
+_cors_origins: list[str] = (
+    [o.strip() for o in _raw_origins.split(",") if o.strip()]
+    if _is_prod and _raw_origins
+    else ["*"]
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-User-ID"],
 )
 
 # ── 라우터 등록 ────────────────────────────────────────────────────────────────
@@ -130,7 +148,7 @@ def on_shutdown():
     logger.info("스케줄러 정지 및 DB 연결 풀 종료")
 
 
-# ── 헬스체크 ──────────────────────────────────────────────────────────────────
+# ── 헬스체크 (API 우선 — 정적 파일 마운트보다 먼저 등록됨) ──────────────────────
 @app.get("/")
 def root():
     from backend.db import is_available
@@ -151,3 +169,29 @@ def health():
         "db":              "ok" if is_available() else "unavailable",
         "snapshot_fresh":  is_snapshot_fresh(max_age_seconds=90),
     }
+
+
+# ── 프로덕션: 빌드된 프론트엔드 정적 파일 서빙 ────────────────────────────────────
+# `npm run build` → frontend/dist 가 존재할 때만 활성화.
+# 개발 시 Vite dev server(포트 3000)가 실행 중이면 이 블록은 무시해도 됨.
+# 주의: StaticFiles 는 aiofiles 패키지 필요 — pip install aiofiles
+_frontend_dist = Path(__file__).parent.parent / "frontend" / "dist"
+if _frontend_dist.exists():
+    try:
+        from fastapi.staticfiles import StaticFiles
+        app.mount("/", StaticFiles(directory=str(_frontend_dist), html=True), name="static")
+        logger.info(f"프론트엔드 정적 파일 서빙 활성화: {_frontend_dist}")
+    except ImportError:
+        logger.warning("aiofiles 미설치 — 정적 파일 서빙 비활성화 (pip install aiofiles 로 설치 가능)")
+
+
+# ── 직접 실행 시 uvicorn 내장 서버 ────────────────────────────────────────────
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "backend.main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=APP_ENV != "production",
+        log_level="info",
+    )

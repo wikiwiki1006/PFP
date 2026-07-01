@@ -11,11 +11,10 @@ import type {
   MarketSituation, BBScanFullResult, TechnicalChartResult, PairsAutoResult,
 } from '@/types'
 
-const _apiBase =
-  import.meta.env.VITE_API_URL ||
-  (typeof window !== 'undefined'
-    ? `http://${window.location.hostname}:8000`
-    : 'http://localhost:8000')
+// 개발(로컬+LAN): VITE_API_URL 미설정 → undefined → axios 상대경로 → Vite proxy가 /api/* 를 localhost:8000 으로 중계
+// 배포(단일서버): VITE_API_URL 미설정 → FastAPI 가 /api/* 직접 처리, 정적파일도 FastAPI 서빙
+// 배포(분리서버): VITE_API_URL=https://api.yourdomain.com 으로 빌드
+const _apiBase: string | undefined = import.meta.env.VITE_API_URL || undefined
 
 export const api = axios.create({
   baseURL: _apiBase,

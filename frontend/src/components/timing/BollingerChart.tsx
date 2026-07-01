@@ -18,39 +18,7 @@ function useDebounced<T>(value: T, ms = 700): T {
   return v
 }
 
-// ── candlestick bar shape ─────────────────────────────────────────────────────
-function CandleShape(props: any) {
-  const { x, width, payload, yAxis } = props
-  if (!payload || !yAxis?.scale) return <g />
-  const { open, high, low } = payload
-  const close = payload.price
-  if (close == null || open == null) return <g />
-
-  const ys      = yAxis.scale
-  const highPx  = ys(high  ?? close)
-  const lowPx   = ys(low   ?? close)
-  const openPx  = ys(open)
-  const closePx = ys(close)
-
-  const isUp    = close >= open
-  const color   = isUp ? COLOR_UP : COLOR_DOWN
-  const cx      = x + width / 2
-  const bodyTop = Math.min(openPx, closePx)
-  const bodyH   = Math.max(1, Math.abs(openPx - closePx))
-  const bodyW   = Math.max(2, width - 2)
-
-  return (
-    <g>
-      {/* upper wick */}
-      <line x1={cx} y1={highPx} x2={cx} y2={bodyTop} stroke={color} strokeWidth={1} />
-      {/* lower wick */}
-      <line x1={cx} y1={bodyTop + bodyH} x2={cx} y2={lowPx} stroke={color} strokeWidth={1} />
-      {/* body */}
-      <rect x={cx - bodyW / 2} y={bodyTop} width={bodyW} height={bodyH}
-        fill={color} stroke={color} strokeWidth={0.5} />
-    </g>
-  )
-}
+// ── candlestick renderer (used inside component to capture yDomain via closure) ─
 
 // ── weekly aggregation ────────────────────────────────────────────────────────
 function weekMonday(d: Date): string {
@@ -94,7 +62,7 @@ function aggregateWeekly(data: TechnicalChartPoint[]): TechnicalChartPoint[] {
     })
 }
 
-// ── right-padding (future dates with extended indicator lines) ─────────────────
+// ── right-padding (future dates — completely blank, no lines) ─────────────────
 function addPadding(data: TechnicalChartPoint[], n: number, weekly: boolean): TechnicalChartPoint[] {
   if (!data.length || n <= 0) return data
   const last   = data[data.length - 1]
@@ -110,15 +78,15 @@ function addPadding(data: TechnicalChartPoint[], n: number, weekly: boolean): Te
       high:       null,
       low:        null,
       price:      null as any,
-      mid:        last.mid,
-      upper:      last.upper,
-      lower:      last.lower,
+      mid:        null,
+      upper:      null,
+      lower:      null,
       zscore:     null,
-      ma5:        last.ma5,
-      ma30:       last.ma30,
-      ma60:       last.ma60,
-      ma120:      last.ma120,
-      resistance: last.resistance,
+      ma5:        null,
+      ma30:       null,
+      ma60:       null,
+      ma120:      null,
+      resistance: null,
     })
     added++
   }
@@ -229,10 +197,10 @@ export default function BollingerChart({ ticker, height = 420 }: BollingerChartP
   const resistD    = useDebounced(resistLookback)
 
   // ── display params ────────────────────────────────────────────────────────
-  const [rightPad, setRightPad] = useState(30)
+  const [rightPad,    setRightPad]    = useState(30)
+  const [weeklyMode,  setWeeklyMode]  = useState<'auto' | 'weekly' | 'daily'>('auto')
 
   // ── overlay toggles ───────────────────────────────────────────────────────
-  const [useCandle,   setUseCandle]   = useState(true)
   const [showBands,   setShowBands]   = useState(true)
   const [showMid,     setShowMid]     = useState(true)
   const [showResist,  setShowResist]  = useState(true)
@@ -288,13 +256,16 @@ export default function BollingerChart({ ticker, height = 420 }: BollingerChartP
     return series.filter(p => p.date >= a && p.date <= b)
   }, [series, domain])
 
-  // ── weekly / daily mode (based on visible date span) ─────────────────────
+  // ── weekly / daily mode ───────────────────────────────────────────────────
   const isWeekly = useMemo(() => {
+    if (weeklyMode === 'weekly') return true
+    if (weeklyMode === 'daily')  return false
+    // auto: 6개월(180일) 이상이면 주봉, 미만이면 일봉
     const real = visible.filter(p => p.price != null)
     if (real.length < 2) return false
     const span = (new Date(real[real.length - 1].date).getTime() - new Date(real[0].date).getTime()) / 86400000
-    return span > 30
-  }, [visible])
+    return span > 180
+  }, [visible, weeklyMode])
 
   // ── final display data (aggregate + right pad) ────────────────────────────
   const displayData = useMemo((): TechnicalChartPoint[] => {
@@ -332,19 +303,20 @@ export default function BollingerChart({ ticker, height = 420 }: BollingerChartP
     return keyPoints.filter(k => k.date >= a && k.date <= b)
   }, [keyPoints, visible])
 
-  // ── MA cross detection ────────────────────────────────────────────────────
+  // ── MA cross detection (displayData 기준 — 차트 날짜와 정확히 일치) ────────
   const maCrosses = useMemo(() => {
     const active = MA_ORDER.filter(k => activeMAs[k])
-    if (active.length < 2 || !visible.length) return []
-    const [va, vb] = [visible[0].date, visible[visible.length - 1].date]
+    if (active.length < 2) return []
+    // displayData에서 실제 캔들(price != null)만 사용해 날짜 불일치(off-by-one) 방지
+    const chartBars = displayData.filter(p => p.price != null)
+    if (chartBars.length < 2) return []
     const crosses: { date: string; price: number; type: 'golden' | 'dead' }[] = []
     for (let i = 0; i < active.length - 1; i++) {
       for (let j = i + 1; j < active.length; j++) {
         const [fast, slow] = [active[i], active[j]]
-        for (let k = 1; k < series.length; k++) {
-          const c = series[k]
-          if (c.date < va || c.date > vb) continue
-          const p = series[k - 1]
+        for (let k = 1; k < chartBars.length; k++) {
+          const c = chartBars[k]
+          const p = chartBars[k - 1]
           const pf = p[fast] as number | null
           const ps = p[slow] as number | null
           const cf = c[fast] as number | null
@@ -356,16 +328,59 @@ export default function BollingerChart({ ticker, height = 420 }: BollingerChartP
       }
     }
     return crosses
-  }, [series, visible, activeMAs])
+  }, [displayData, activeMAs])
+
+  // ── candlestick shape ────────────────────────────────────────────────────
+  // useCallback captures yDomain so we can build a fallback scale without yAxis.scale
+  const CandleShape = useCallback((props: any) => {
+    const { x, width, payload, background } = props
+    if (!payload?.price || payload.open == null) return <g />
+
+    const close = payload.price as number
+    const open  = payload.open  as number
+    const high  = (payload.high  ?? close) as number
+    const low   = (payload.low   ?? close) as number
+
+    // 1) Recharts may inject yAxis.scale (version-dependent)
+    let ys: ((v: number) => number) | null = props.yAxis?.scale ?? null
+
+    // 2) Fallback: reconstruct linear scale from background rect + captured yDomain
+    if (!ys && background && Array.isArray(yDomain) && typeof yDomain[0] === 'number') {
+      const [minP, maxP] = yDomain as [number, number]
+      const range = maxP - minP
+      if (range > 0) {
+        ys = (v: number) => background.y + background.height * (1 - (v - minP) / range)
+      }
+    }
+    if (!ys) return <g />
+
+    const highPx  = ys(high)
+    const lowPx   = ys(low)
+    const openPx  = ys(open)
+    const closePx = ys(close)
+
+    const isUp    = close >= open
+    const color   = isUp ? COLOR_UP : COLOR_DOWN
+    const cx      = x + width / 2
+    const bodyTop = Math.min(openPx, closePx)
+    const bodyH   = Math.max(1, Math.abs(openPx - closePx))
+    const bodyW   = Math.max(2, width - 2)
+
+    return (
+      <g>
+        <line x1={cx} y1={highPx}         x2={cx} y2={bodyTop}        stroke={color} strokeWidth={1} />
+        <line x1={cx} y1={bodyTop + bodyH} x2={cx} y2={lowPx}         stroke={color} strokeWidth={1} />
+        <rect x={cx - bodyW / 2} y={bodyTop} width={bodyW} height={bodyH}
+          fill={color} stroke={color} strokeWidth={0.5} />
+      </g>
+    )
+  }, [yDomain])
 
   // ── handlers ─────────────────────────────────────────────────────────────
   function toggleMA(k: string) { setActiveMAs(p => ({ ...p, [k]: !p[k as keyof typeof p] })) }
   function onDown(e: any) { if (!e?.activeLabel) return; setRefLeft(e.activeLabel); setRefRight(null); lastLbl.current = e.activeLabel }
   function onMove(e: any) { if (!refLeft || !e?.activeLabel) return; setRefRight(e.activeLabel); lastLbl.current = e.activeLabel }
   function onReset() { setDomain(null); setRefLeft(null); setRefRight(null); lastLbl.current = null }
-
-  const CandleOrEmpty = useCallback((props: any) =>
-    useCandle ? <CandleShape {...props} /> : <g />, [useCandle])
 
   const zColor = !q.data ? '#64748b' : q.data.current_z <= -1 ? COLOR_UP : q.data.current_z >= 1 ? COLOR_DOWN : '#94a3b8'
   const resistBreaks = visibleKPs.filter(k => k.type === 'RESISTANCE_BREAK').length
@@ -381,9 +396,21 @@ export default function BollingerChart({ ticker, height = 420 }: BollingerChartP
           <NumInput label="σ 배수"     value={bbStd}          min={0.5} max={5}  step={0.1} onChange={setBBStd} />
           <NumInput label="저항선 기간" value={resistLookback} min={10} max={200} step={5}   onChange={setResistLookback} />
           <NumInput label="우측 여백"  value={rightPad}       min={0}  max={90}  step={5}   onChange={setRightPad} />
-          <span className="text-[10px] px-1.5 py-0.5 rounded border border-[#1e2d40] text-[#64748b]">
-            {isWeekly ? '주봉' : '일봉'}
-          </span>
+          <div className="flex items-center gap-0">
+            {(['daily', 'auto', 'weekly'] as const).map(m => (
+              <button key={m} onClick={() => setWeeklyMode(m)}
+                className={`px-1.5 py-0.5 text-[10px] border transition-colors first:rounded-l last:rounded-r ${
+                  weeklyMode === m
+                    ? 'border-[#3b82f6] text-[#3b82f6] bg-[#3b82f6]/10'
+                    : 'border-[#1e2d40] text-[#374151] hover:text-[#64748b] hover:border-[#374151]'
+                }`}>
+                {m === 'daily' ? '일봉' : m === 'weekly' ? '주봉' : '자동'}
+              </button>
+            ))}
+          </div>
+          {weeklyMode === 'auto' && (
+            <span className="text-[10px] text-[#374151]">({isWeekly ? '주봉' : '일봉'})</span>
+          )}
           {q.isFetching && <span className="text-[10px] text-[#3b82f6]">계산 중…</span>}
           {domain && (
             <button onClick={onReset} className="text-[#3b82f6] hover:text-[#60a5fa] underline">
@@ -397,9 +424,6 @@ export default function BollingerChart({ ticker, height = 420 }: BollingerChartP
 
         {/* Row 2 — overlays */}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-          <CB label="캔들" checked={useCandle} onChange={() => setUseCandle(v => !v)}
-            color={useCandle ? '#e2e8f0' : undefined} />
-          <span className="text-[#1e2d40]">|</span>
           <CB label="볼린저밴드" checked={showBands}  onChange={() => setShowBands(v => !v)}  color={showBands  ? '#3b82f6' : undefined} />
           <CB label="중앙선"     checked={showMid}    onChange={() => setShowMid(v => !v)}    color={showMid    ? '#64748b' : undefined} />
           <CB label="저항선"     checked={showResist} onChange={() => setShowResist(v => !v)} color={showResist ? '#ef4444' : undefined} />
@@ -481,22 +505,15 @@ export default function BollingerChart({ ticker, height = 420 }: BollingerChartP
                 dot={false} isAnimationActive={false} connectNulls={false} />
             )}
 
-            {/* MA lines (extend into right padding via connectNulls) */}
+            {/* MA lines */}
             {MA_ORDER.map(k => activeMAs[k] ? (
               <Line key={k} type="monotone" dataKey={k}
                 stroke={MA_COLORS[k]} strokeWidth={1.5}
                 dot={false} isAnimationActive={false} connectNulls />
             ) : null)}
 
-            {/* candlestick bar — always rendered (invisible when useCandle=false) to keep band scale */}
-            <Bar dataKey="price" shape={CandleOrEmpty} isAnimationActive={false} maxBarSize={20} />
-
-            {/* price line when candle is off */}
-            {!useCandle && (
-              <Line type="monotone" dataKey="price"
-                stroke="#3b82f6" strokeWidth={2}
-                dot={false} isAnimationActive={false} connectNulls={false} />
-            )}
+            {/* candlestick — always visible, shape is a function ref */}
+            <Bar dataKey="price" shape={CandleShape} isAnimationActive={false} maxBarSize={20} />
 
             {/* MA cross markers */}
             {maCrosses.map((cp, i) => (

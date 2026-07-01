@@ -5,11 +5,14 @@ routers/signals.py
 """
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Header, HTTPException, Query
+
+logger = logging.getLogger(__name__)
 
 from backend.db.portfolio_repo import get_holdings as db_get_holdings
 from backend.db.market_cache import get_common, save_common
@@ -379,22 +382,56 @@ def bb_scan_full(top_n: int = Query(default=10, ge=1, le=30)):
 
 
 def _fetch_ohlc(ticker: str) -> "pd.DataFrame | None":
-    """yfinance로 5년치 OHLC 1시간 인메모리 캐시."""
+    """OHLC 데이터: DB common_cache(12h) → 인메모리(1h) → yfinance(3y) 순으로 조회."""
     def _do():
+        from backend.db.market_cache import get_common, save_common
+
+        # 1. DB 캐시 우선 확인
+        db_key = f"ohlc_df::{ticker}"
+        cached = get_common(db_key)
+        if cached and isinstance(cached, list) and len(cached) > 0:
+            try:
+                df = pd.DataFrame(cached)
+                df["date"] = pd.to_datetime(df["date"])
+                df = df.set_index("date")
+                df.index.name = None
+                cols = [c for c in ["Open", "High", "Low", "Close"] if c in df.columns]
+                if len(cols) == 4:
+                    return df[cols].apply(pd.to_numeric, errors="coerce").dropna()
+            except Exception as e:
+                logger.warning(f"OHLC DB 캐시 역직렬화 실패 ({ticker}): {e}")
+
+        # 2. yfinance 다운로드 (3y — technical-chart는 최근 3년만 표시)
         try:
             import yfinance as yf
             from backend.db.market_cache import _yf_lock
             with _yf_lock:
-                raw = yf.download(ticker, period="5y", progress=False, auto_adjust=True, threads=False)
+                raw = yf.download(ticker, period="3y", progress=False, auto_adjust=True, threads=False)
             if raw.empty:
                 return None
             if isinstance(raw.columns, pd.MultiIndex):
                 lvl = raw.columns.get_level_values(1)
                 raw = raw.xs(ticker, level=1, axis=1) if ticker in lvl else raw.droplevel(1, axis=1)
             cols = [c for c in ["Open", "High", "Low", "Close"] if c in raw.columns]
-            return raw[cols].dropna() if len(cols) == 4 else None
+            if len(cols) != 4:
+                return None
+            result = raw[cols].dropna()
+
+            # 3. DB에 저장 (12h TTL — 서버 재시작해도 재다운로드 불필요)
+            try:
+                rows = [
+                    {"date": str(dt.date() if hasattr(dt, "date") else dt),
+                     "Open": round(float(r["Open"]), 4), "High": round(float(r["High"]), 4),
+                     "Low":  round(float(r["Low"]),  4), "Close": round(float(r["Close"]), 4)}
+                    for dt, r in result.iterrows()
+                ]
+                save_common(db_key, rows, ttl_seconds=43200)
+            except Exception as e:
+                logger.warning(f"OHLC DB 저장 실패 ({ticker}): {e}")
+
+            return result
         except Exception as e:
-            logger.warning(f"OHLC fetch 실패 ({ticker}): {e}")
+            logger.warning(f"OHLC yfinance 실패 ({ticker}): {e}")
             return None
     return _cached(f"ohlc::{ticker}", 3600, _do)
 
@@ -419,11 +456,12 @@ def technical_chart(
             if hasattr(close_raw, "squeeze"):
                 close_raw = close_raw.squeeze()
         else:
-            close_df = get_close_df([ticker], period="5y", ttl=300)
+            close_df = get_close_df([ticker], period="3y", ttl=300)
             if ticker not in close_df.columns:
                 return None
             close_raw = close_df[ticker].dropna()
 
+        # _fetch_ohlc가 이미 3y 다운로드이므로 별도 트림 불필요하나 안전하게 유지
         cutoff = close_raw.index.max() - pd.Timedelta(days=365 * 3)
         price  = close_raw[close_raw.index >= cutoff]
         if price.empty:

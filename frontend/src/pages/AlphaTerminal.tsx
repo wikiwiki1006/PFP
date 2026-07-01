@@ -1335,29 +1335,37 @@ export default function AlphaTerminal() {
   const [rightTab,  setRightTab]  = useState(0)
   const [rightOpen, setRightOpen] = useState(true)
 
-  const metricsQ  = useQuery({ queryKey: ['portfolio-metrics'], queryFn: getPortfolioMetrics,   refetchInterval: 30_000 })
-  const curveQ    = useQuery({ queryKey: ['equity-curve'],      queryFn: getEquityCurve,         staleTime: 60_000 })
-  const holdQ     = useQuery({ queryKey: ['holdings-detail'],   queryFn: getHoldingsDetail,      refetchInterval: 30_000 })
-  const rawHoldQ  = useQuery({ queryKey: ['holdings-raw'],      queryFn: getHoldings })
-  const sectorQ   = useQuery({ queryKey: ['sector-weights'],    queryFn: getSectorWeights,       staleTime: 60_000 })
-  const snapQ     = useQuery({ queryKey: ['market-snapshot'],   queryFn: getMarketSnapshot,      refetchInterval: 30_000 })
-  const macroQ    = useQuery({ queryKey: ['macro-data'],        queryFn: getMacroData,           staleTime: 300_000 })
-  const feedbackQ = useQuery({ queryKey: ['analyst-feedback'],  queryFn: getAnalystFeedback,     staleTime: 300_000 })
-  const corrQ     = useQuery({ queryKey: ['correlation'],       queryFn: () => getCorrelation(), staleTime: 300_000 })
-  const scanQ     = useQuery({ queryKey: ['scan'],              queryFn: getCachedScan,           retry: false })
+  // 핵심 지표: 60초 주기 (30초는 너무 자주 백엔드 호출)
+  const metricsQ  = useQuery({ queryKey: ['portfolio-metrics'], queryFn: getPortfolioMetrics,   refetchInterval: 60_000,  staleTime: 55_000 })
+  // 에쿼티 커브/섹터: 5분 캐시 (자주 변하지 않음)
+  const curveQ    = useQuery({ queryKey: ['equity-curve'],      queryFn: getEquityCurve,         staleTime: 300_000 })
+  // 보유 종목 상세: 60초 (현재가 업데이트용)
+  const holdQ     = useQuery({ queryKey: ['holdings-detail'],   queryFn: getHoldingsDetail,      refetchInterval: 60_000,  staleTime: 55_000 })
+  const rawHoldQ  = useQuery({ queryKey: ['holdings-raw'],      queryFn: getHoldings,            staleTime: 300_000 })
+  const sectorQ   = useQuery({ queryKey: ['sector-weights'],    queryFn: getSectorWeights,       staleTime: 300_000 })
+  // 시장 스냅샷: 60초 주기 (마커 바 업데이트)
+  const snapQ     = useQuery({ queryKey: ['market-snapshot'],   queryFn: getMarketSnapshot,      refetchInterval: 60_000,  staleTime: 55_000 })
+  const macroQ    = useQuery({ queryKey: ['macro-data'],        queryFn: getMacroData,           staleTime: 600_000 })
+  // analyst-feedback(LLM): AI Feed 탭 활성 시에만 요청 (느린 LLM 호출 — 페이지 로드에서 제외)
+  const feedbackQ = useQuery({ queryKey: ['analyst-feedback'],  queryFn: getAnalystFeedback,     staleTime: 300_000, enabled: rightTab === 1 })
+  // 상관관계: Correlation 탭 활성 시에만 요청
+  const corrQ     = useQuery({ queryKey: ['correlation'],       queryFn: () => getCorrelation(), staleTime: 600_000, enabled: botTab === 0 })
+  const scanQ     = useQuery({ queryKey: ['scan'],              queryFn: getCachedScan,           retry: false, staleTime: 300_000 })
   const scanMut   = useMutation({ mutationFn: () => runSignalScan(10), onSuccess: () => qc.invalidateQueries({ queryKey: ['scan'] }) })
 
   const holdTickers = Object.keys(rawHoldQ.data || {}).filter(t => t !== 'CASH').join(',')
+  // 뉴스: News 탭 활성 시에만 요청
   const newsQ = useQuery({
     queryKey: ['market-news', holdTickers],
     queryFn:  () => getMarketNews(holdTickers.split(',').filter(Boolean)),
-    enabled: !!holdTickers,
-    staleTime: 120_000,
+    enabled: !!holdTickers && rightTab === 3,
+    staleTime: 300_000,
   })
+  // 실적/배당: Earnings 탭 활성 시에만 요청 (병렬화했지만 여전히 yfinance N개 호출)
   const earningsQ = useQuery({
     queryKey: ['earnings', holdTickers],
     queryFn:  () => getEarnings(holdTickers.split(',').filter(Boolean)),
-    enabled: !!holdTickers,
+    enabled: !!holdTickers && botTab === 1,
     staleTime: 3600_000,
   })
 
