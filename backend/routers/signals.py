@@ -490,13 +490,20 @@ def pairs_auto(
     threshold_pct: float = Query(default=5.0, ge=0.1, le=100.0),
     top_n:         int   = Query(default=5, ge=1, le=20),
 ):
-    """기준 종목과 가장 유사한 페어를 S&P500 유니버스에서 자동 탐색."""
+    """기준 종목과 가장 유사한 페어를 S&P500 유니버스에서 자동 탐색.
+    기본 파라미터(threshold=5%, top_n=5)는 사전 계산 캐시를 우선 반환해 응답이 빠름."""
     ticker = ticker.upper()
+
+    # 기본 파라미터이면 사전 계산 캐시 우선 조회 (scheduler._precompute_pairs 가 저장)
+    if threshold_pct == 5.0 and top_n == 5:
+        precomputed = get_common(f"pairs_precomputed::{ticker}::5.0::5")
+        if precomputed and precomputed.get("best"):
+            return {"ticker": ticker, **precomputed}
 
     def _compute():
         universe = get_sp500_universe()
         candidates = [t for t in universe if t != ticker][:200]
-        close_df = get_close_df([ticker] + candidates, period="5y", ttl=300)
+        close_df = get_close_df([ticker] + candidates, period="2y", ttl=300)
         return pairs_auto_detail(ticker, close_df, candidates, threshold_pct=threshold_pct, top_n=top_n)
 
     result = _cached(f"pairs_auto::{ticker}::{threshold_pct}::{top_n}", 600, _compute)

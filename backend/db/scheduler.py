@@ -4,21 +4,31 @@ backend/db/scheduler.py
 공통 시장 데이터 백그라운드 갱신 스케줄러.
 
 갱신 주기:
-  - market_snapshot (현재가)       : 60초마다
-  - market_prices (일별 종가)      : 12시간마다 (stale 티커만)
-  - macro_data / doom_radar       : 60분마다
-  - sector_data                   : 5분마다
+  - market_snapshot (현재가)        : 60초마다
+  - market_prices (일별 종가)       : 12시간마다 (stale 티커만)
+  - macro_data / doom_radar        : 60분마다
+  - sector_data                    : 5분마다
+  - S&P500 전 종목 가격 수집         : KST 03:00 (UTC 18:00) 하루 1회
+    - 서버가 꺼져 있었으면 기동 시 즉시 실행 (trigger_sp500_if_missed)
+    - 수집 중에도 사용자 요청은 DB 조회 또는 yfinance 직접 호출로 정상 서비스
+  - pairs trading 사전 계산         : SP500 수집 완료 직후 (인기 종목 20개)
 """
 from __future__ import annotations
 
 import logging
 import threading
 import time
+from datetime import datetime, timezone, timedelta
+
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
 _stop_event = threading.Event()
 _thread: threading.Thread | None = None
+
+# SP500 일일 수집 중복 실행 방지 플래그
+_sp500_updating = threading.Event()
 
 # 주기 (초)
 _SNAPSHOT_INTERVAL      = 60        # 1분
@@ -28,18 +38,73 @@ _HISTORY_INTERVAL       = 43200     # 12시간
 _BB_SCAN_INTERVAL       = 21600     # 6시간 (Timing Engine: S&P500 볼린저 스캔)
 _MACRO_SPREAD_INTERVAL  = 86400     # 24시간 (Timing Engine: 금리차/HY스프레드 백분위)
 
+# KST 03:00 = UTC 18:00 (전날)
+_KST_3AM_UTC_HOUR = 18
+
+# pairs 사전 계산 대상 인기 종목 (기본 파라미터 threshold=5%, top_n=5)
+_PAIRS_PRECOMPUTE_TICKERS = [
+    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "JPM", "JNJ", "V",
+    "XOM", "UNH", "PG", "MA", "HD", "CVX", "MRK", "ABBV", "LLY", "PEP",
+]
+
 
 def start():
     global _thread
     _stop_event.clear()
     _thread = threading.Thread(target=_loop, name="pfp-scheduler", daemon=True)
     _thread.start()
-    logger.info("백그라운드 스케줄러 시작 (snapshot 60s / sector 5m / macro 1h / history 12h / bb_scan 6h / macro_spread 24h)")
+    logger.info(
+        "백그라운드 스케줄러 시작 "
+        "(snapshot 60s / sector 5m / macro 1h / history 12h / "
+        "bb_scan 6h / macro_spread 24h / sp500_daily KST-03:00)"
+    )
 
 
 def stop():
     _stop_event.set()
     logger.info("백그라운드 스케줄러 정지 요청")
+
+
+def trigger_sp500_if_missed():
+    """서버 시작 시 호출 — KST 03:00 수집을 놓쳤으면 백그라운드에서 즉시 실행."""
+    if _sp500_updating.is_set():
+        logger.info("SP500 수집이 이미 진행 중 — 스킵")
+        return
+    if _sp500_update_due():
+        logger.info("SP500 업데이트 누락 감지 → 백그라운드 즉시 수집 시작")
+        threading.Thread(target=_run_sp500_with_guard, daemon=True).start()
+    else:
+        logger.info("SP500 업데이트 최신 상태 — 스킵")
+
+
+def _sp500_update_due() -> bool:
+    """오늘 KST 03:00 (= UTC 18:00) 이후 SP500 수집이 아직 안 됐으면 True."""
+    from backend.db.market_cache import get_common
+    utc_now = datetime.now(tz=timezone.utc)
+    # 가장 최근의 KST 03:00 시각(UTC)
+    target = utc_now.replace(hour=_KST_3AM_UTC_HOUR, minute=0, second=0, microsecond=0)
+    if utc_now.hour < _KST_3AM_UTC_HOUR:
+        target -= timedelta(days=1)
+
+    last_ts = get_common("sp500_price_update_last")
+    if not last_ts:
+        return True
+    try:
+        last_dt = datetime.fromisoformat(str(last_ts))
+        if last_dt.tzinfo is None:
+            last_dt = last_dt.replace(tzinfo=timezone.utc)
+        return last_dt < target
+    except Exception:
+        return True
+
+
+def _run_sp500_with_guard():
+    """SP500 수집을 _sp500_updating 플래그로 감싸 동시 실행 방지."""
+    _sp500_updating.set()
+    try:
+        _run_safe("sp500_daily", _update_sp500_prices)
+    finally:
+        _sp500_updating.clear()
 
 
 def _loop():
@@ -80,6 +145,10 @@ def _loop():
             _run_safe("macro_spread", _update_macro_spread_history)
             last_macro_spread = now
 
+        # ⑦ S&P500 전 종목 가격 수집: KST 03:00 이후 하루 1회 (별도 스레드)
+        if not _sp500_updating.is_set() and _sp500_update_due():
+            threading.Thread(target=_run_sp500_with_guard, daemon=True).start()
+
         _stop_event.wait(_SNAPSHOT_INTERVAL)
 
 
@@ -93,31 +162,33 @@ def _run_safe(name: str, fn):
 # ── 개별 갱신 함수 ─────────────────────────────────────────────────────────────
 
 def _update_snapshot():
-    """ALWAYS_FETCH 티커의 최근 2일치 데이터 수집 → snapshot + prices 동시 갱신."""
+    """
+    SNAPSHOT_TICKERS(7개)만 2일치 다운로드 → snapshot 갱신.
+    lock 점유 시간을 최소화해 사용자 요청과 경합하지 않도록 한다.
+    ALWAYS_FETCH + SECTOR_ETF 가격 이력은 _update_history(12h)가 담당.
+    """
     import math
     import yfinance as yf
-    from backend.services.market_data import ALWAYS_FETCH, SECTOR_ETF_TICKERS
+    from backend.services.market_data import SNAPSHOT_TICKERS
     from backend.db.market_cache import save_snapshot, save_prices_to_db, _yf_lock
 
-    tickers = list(set(ALWAYS_FETCH + SECTOR_ETF_TICKERS))
     try:
         with _yf_lock:
-            data = yf.download(tickers, period="2d", progress=False, auto_adjust=True, threads=False)
+            data = yf.download(
+                SNAPSHOT_TICKERS, period="2d",
+                progress=False, auto_adjust=True, threads=False,
+            )
         if data.empty:
             return
-        # ffill 없이 raw 데이터 사용: 오늘이 NaN인 종목(장 미종료)도 올바르게 처리
         close_raw = (
             data["Close"]
-            if hasattr(data.columns, "levels")
+            if isinstance(data.columns, pd.MultiIndex)
             else data
         )
-
-        # DB 저장: 전부 NaN인 행 제외
         close_for_db = close_raw.dropna(how="all")
         if not close_for_db.empty:
             save_prices_to_db(close_for_db)
 
-        # 스냅샷: 티커별 마지막 2개 유효값으로 변동률 계산
         snap = {}
         for t in close_raw.columns:
             series = close_raw[t].dropna()
@@ -178,6 +249,91 @@ def _update_history():
     logger.info(f"가격 이력 갱신 시작: {len(tickers)}개 티커")
     prefetch_tickers(tickers, period="2y")
     logger.info("가격 이력 갱신 완료")
+
+
+def _update_sp500_prices():
+    """
+    S&P 500 전 종목(~500개) 2년치 종가를 market_prices DB에 저장.
+
+    - 배치 50개, 배치 사이 2초 슬립 → _yf_lock 해제 구간에 사용자 요청 처리 가능
+    - stale 티커만 수집 (max_age_hours=20) → 이미 신선한 티커는 yfinance 미호출
+    - 완료 후 pairs 사전 계산(_precompute_pairs) 연속 실행
+    """
+    import logging as _logging
+    from backend.services.trading_signals import get_sp500_universe
+    from backend.db.market_cache import (
+        get_stale_tickers, _yf_download_batched, save_prices_to_db, save_common,
+    )
+
+    universe = get_sp500_universe()
+    stale = get_stale_tickers(universe, max_age_hours=20)
+    if not stale:
+        save_common(
+            "sp500_price_update_last",
+            datetime.now(tz=timezone.utc).isoformat(),
+            ttl_seconds=86400 * 2,
+        )
+        logger.info("SP500 전체 신선 — DB 스킵, 타임스탬프 갱신")
+        _run_safe("precompute_pairs", _precompute_pairs)
+        return
+
+    logger.info(f"SP500 가격 수집 시작: {len(stale)}/{len(universe)}개 stale 티커")
+    _yf_log = _logging.getLogger("yfinance")
+    _prev = _yf_log.level
+    _yf_log.setLevel(_logging.CRITICAL)
+    try:
+        close_df = _yf_download_batched(stale, period="2y", inter_batch_sleep=2.0)
+    finally:
+        _yf_log.setLevel(_prev)
+
+    if close_df.empty:
+        logger.warning("SP500 가격 수집: yfinance 빈 응답")
+        return
+
+    close_df = close_df.ffill().dropna(axis=1, how="all")
+    save_prices_to_db(close_df)
+    save_common(
+        "sp500_price_update_last",
+        datetime.now(tz=timezone.utc).isoformat(),
+        ttl_seconds=86400 * 2,
+    )
+    logger.info(f"SP500 가격 수집 완료: {close_df.shape[1]}개 저장")
+
+    # 데이터 수집 완료 직후 pairs 사전 계산
+    _run_safe("precompute_pairs", _precompute_pairs)
+
+
+def _precompute_pairs():
+    """
+    인기 종목 20개의 페어트레이딩 결과를 common_cache에 사전 저장 (TTL 25h).
+    이미 캐시가 있는 종목은 스킵. pairs-auto 엔드포인트가 이 캐시를 우선 반환.
+    """
+    from backend.services.trading_signals import get_sp500_universe, pairs_auto_detail
+    from backend.services.market_data import get_close_df
+    from backend.db.market_cache import get_common, save_common
+
+    universe = get_sp500_universe()
+    close_df = get_close_df(universe, period="2y", include_market=False)
+    if close_df is None or close_df.empty:
+        logger.warning("precompute_pairs: 가격 데이터 없음 — 스킵")
+        return
+
+    computed = 0
+    for ticker in _PAIRS_PRECOMPUTE_TICKERS:
+        if ticker not in close_df.columns:
+            continue
+        cache_key = f"pairs_precomputed::{ticker}::5.0::5"
+        if get_common(cache_key):
+            continue  # 신선한 캐시 있음
+        try:
+            candidates = [c for c in universe if c != ticker and c in close_df.columns]
+            result = pairs_auto_detail(ticker, close_df, candidates, threshold_pct=5.0, top_n=5)
+            save_common(cache_key, result, ttl_seconds=90000)  # 25h TTL
+            computed += 1
+        except Exception as e:
+            logger.warning(f"precompute_pairs {ticker} 실패: {e}")
+
+    logger.info(f"pairs 사전계산 완료: {computed}/{len(_PAIRS_PRECOMPUTE_TICKERS)}개")
 
 
 def _update_bb_scan():

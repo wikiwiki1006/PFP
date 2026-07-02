@@ -6,6 +6,8 @@ yfinance / FRED 데이터 수집. Streamlit 의존 없음.
 """
 from __future__ import annotations
 
+import logging
+import threading
 import time
 from datetime import datetime, timedelta
 from typing import Any
@@ -13,10 +15,15 @@ from typing import Any
 import pandas as pd
 import yfinance as yf
 
+_logger = logging.getLogger(__name__)
 
 # ── TTL 캐시 ──────────────────────────────────────────────────────────────────
 
 _cache: dict[str, tuple[float, Any]] = {}
+
+# 백그라운드 stale 갱신 중복 방지
+_bg_in_progress: set[str] = set()
+_bg_lock = threading.Lock()
 
 
 def _cached(key: str, ttl: int, fn):
@@ -62,16 +69,44 @@ GICS_SECTOR_ETFS = [
 SECTOR_ETF_TICKERS = [etf for _, etf in GICS_SECTOR_ETFS]
 
 
+def _bg_refresh_tickers(stale: list[str], period: str) -> None:
+    """stale 티커를 백그라운드 스레드에서 yfinance 수집 → DB 저장. 중복 실행 방지."""
+    from backend.db.market_cache import _yf_download_batched, save_prices_to_db
+
+    with _bg_lock:
+        new_stale = [t for t in stale if t not in _bg_in_progress]
+        if not new_stale:
+            return
+        _bg_in_progress.update(new_stale)
+
+    def _worker():
+        try:
+            close_df = _yf_download_batched(new_stale, period=period, inter_batch_sleep=1.0)
+            if not close_df.empty:
+                save_prices_to_db(close_df.ffill().dropna(axis=1, how="all"))
+                _logger.debug(f"백그라운드 갱신 완료: {len(new_stale)}개 티커")
+        except Exception as e:
+            _logger.warning(f"백그라운드 갱신 실패: {e}")
+        finally:
+            with _bg_lock:
+                _bg_in_progress.difference_update(new_stale)
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
 def get_close_df(tickers: list[str], period: str = "2y", ttl: int = 300, include_market: bool = True) -> pd.DataFrame:
     """
     1) 메모리 캐시 (TTL 5분) 히트 → 즉시 반환
-    2) DB market_prices 조회 → stale 티커만 yfinance 보충 후 DB 저장
-    3) DB 미연결 → 기존처럼 yfinance 전량 수집
+    2) DB 데이터 즉시 반환 + stale 티커는 백그라운드에서 비동기 갱신
+       (사용자 요청이 yfinance를 기다리지 않음)
+    3) DB에 데이터 없음 → yfinance 최초 수집 (blocking, 최초 1회만)
+    4) DB 미연결 → yfinance 직접 수집
 
-    include_market=True  → ALWAYS_FETCH(시장 지수) 를 tickers에 자동 추가 (시장/상관관계 엔드포인트용)
-    include_market=False → 전달된 tickers만 사용 (포트폴리오 엔드포인트용, 불필요한 지수 제외)
+    include_market=True  → ALWAYS_FETCH(시장 지수) 를 tickers에 자동 추가
+    include_market=False → 전달된 tickers만 사용
     """
     from backend.db.market_cache import get_prices_from_db, save_prices_to_db, get_stale_tickers
+    from backend.db import is_available
 
     all_tickers = list(set(tickers + ALWAYS_FETCH)) if include_market else list(set(tickers))
     if not all_tickers:
@@ -85,54 +120,40 @@ def get_close_df(tickers: list[str], period: str = "2y", ttl: int = 300, include
         if now - ts < ttl:
             return val
 
-    # ② DB 우선 경로
-    from backend.db import is_available
+    # ② DB 우선 경로 — 데이터 있으면 즉시 반환, stale은 백그라운드 갱신
     if is_available():
-        stale = get_stale_tickers(all_tickers)
-        # stale 티커만 yfinance 수집 후 DB 저장
-        if stale:
-            try:
-                from backend.db.market_cache import _yf_download_batched
-                fresh_df = _yf_download_batched(stale, period=period)
-                if not fresh_df.empty:
-                    save_prices_to_db(fresh_df.dropna(how="all"))
-            except Exception as e:
-                import logging; logging.getLogger(__name__).warning(f"yfinance 수집 실패: {e}")
-
         db_df = get_prices_from_db(all_tickers, period)
         if db_df is not None and not db_df.empty:
-            # 장기 요청(>1y)일 때 DB 데이터가 충분히 과거까지 커버하는지 확인.
-            # 스타트업 프리패치는 2y 기준이지만 regime/pairs 등은 5y를 요청함.
-            _PDAYS = {"5y": 1825, "3y": 1095, "2y": 800, "1y": 400}
-            period_days = _PDAYS.get(period, 0)
-            if period_days > 400:
-                required_start = pd.Timestamp.now() - pd.Timedelta(days=int(period_days * 0.75))
-                short = [
-                    t for t in all_tickers
-                    if t in db_df.columns
-                    and not db_df[t].dropna().empty
-                    and db_df[t].dropna().index[0] > required_start
-                ]
-                if short:
-                    try:
-                        from backend.db.market_cache import _yf_download_batched
-                        extra = _yf_download_batched(short, period=period)
-                        if not extra.empty:
-                            save_prices_to_db(extra.dropna(how="all"))
-                        db_df = get_prices_from_db(all_tickers, period)
-                    except Exception as e:
-                        import logging; logging.getLogger(__name__).warning(f"기간 커버리지 보충 실패: {e}")
+            _cache[mem_key] = (now, db_df)
+            # stale 티커를 백그라운드에서 비동기 갱신 (max_age 22h: daily 업데이트 주기 기준)
+            stale = get_stale_tickers(all_tickers, max_age_hours=22)
+            if stale:
+                _bg_refresh_tickers(stale, period)
+            return db_df
+
+        # DB에 데이터 없음 → 최초 수집 (blocking, 이후엔 DB에서 서빙)
+        all_stale = get_stale_tickers(all_tickers, max_age_hours=22)
+        if all_stale:
+            try:
+                from backend.db.market_cache import _yf_download_batched
+                fresh_df = _yf_download_batched(all_stale, period=period, inter_batch_sleep=0.5)
+                if not fresh_df.empty:
+                    save_prices_to_db(fresh_df.ffill().dropna(axis=1, how="all"))
+            except Exception as e:
+                _logger.warning(f"최초 yfinance 수집 실패: {e}")
+        db_df = get_prices_from_db(all_tickers, period)
         if db_df is not None and not db_df.empty:
             _cache[mem_key] = (now, db_df)
             return db_df
 
-    # ③ DB 없음 → yfinance 배치 수집 (폴백)
-    def _fetch():
+    # ③ DB 없음 → yfinance 직접 수집 (폴백)
+    try:
         from backend.db.market_cache import _yf_download_batched
-        return _yf_download_batched(all_tickers, period=period)
-
-    result = _fetch()
-    if is_available():
+        result = _yf_download_batched(all_tickers, period=period)
+    except Exception as e:
+        _logger.warning(f"yfinance 폴백 수집 실패: {e}")
+        return pd.DataFrame()
+    if not result.empty and is_available():
         save_prices_to_db(result)
     _cache[mem_key] = (now, result)
     return result

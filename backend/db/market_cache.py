@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -23,10 +24,17 @@ from backend.db import get_conn, is_available
 _yf_lock = threading.Lock()  # yfinance SQLite 캐시 동시접근 방지
 
 
-def _yf_download_batched(tickers: list[str], period: str, batch_size: int = 50, **kwargs) -> pd.DataFrame:
+def _yf_download_batched(
+    tickers: list[str],
+    period: str,
+    batch_size: int = 50,
+    inter_batch_sleep: float = 0.0,
+    **kwargs,
+) -> pd.DataFrame:
     """
     대량 티커를 batch_size 단위로 나눠 순차 다운로드.
     각 배치는 _yf_lock 획득 + threads=False로 실행해 fd 고갈을 방지한다.
+    inter_batch_sleep > 0 이면 배치 사이에 슬립 — 사용자 요청이 _yf_lock을 획득할 기회를 준다.
     반환값은 Close 가격만 포함하는 DataFrame.
     """
     import yfinance as yf
@@ -49,6 +57,8 @@ def _yf_download_batched(tickers: list[str], period: str, batch_size: int = 50, 
             frames.append(close)
         except Exception as e:
             logger.warning(f"배치 다운로드 실패 (sample: {batch[:3]}): {e}")
+        if inter_batch_sleep > 0 and i + batch_size < len(tickers):
+            time.sleep(inter_batch_sleep)
     return pd.concat(frames, axis=1) if frames else pd.DataFrame()
 
 logger = logging.getLogger(__name__)
@@ -283,8 +293,20 @@ def get_common(cache_type: str) -> Optional[Any]:
                     (cache_type,),
                 )
                 row = cur.fetchone()
-        if row:
-            return row[0] if isinstance(row[0], (dict, list)) else json.loads(row[0])
+        if row is None or row[0] is None:
+            return None
+        val = row[0]
+        # psycopg2가 JSONB를 이미 Python 객체로 파싱한 경우 그대로 반환
+        if isinstance(val, (dict, list, bool, int, float)):
+            return val
+        # str인 경우: 이미 파싱된 Python 문자열이거나 raw JSON 문자열일 수 있음
+        if isinstance(val, str):
+            try:
+                parsed = json.loads(val)
+                return parsed
+            except (json.JSONDecodeError, ValueError):
+                return val  # JSON 파싱 실패 → raw 문자열 그대로
+        return val
     except Exception as e:
         logger.warning(f"DB get_common({cache_type}) 실패: {e}")
     return None

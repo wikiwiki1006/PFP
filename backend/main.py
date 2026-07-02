@@ -117,6 +117,8 @@ def on_startup():
         init_schema()
         # 백그라운드 스레드로 공통 티커 프리패치 (앱 시작을 블로킹하지 않음)
         threading.Thread(target=_prefetch_common_tickers, daemon=True).start()
+        # KST 03:00 수집을 놓쳤으면 백그라운드에서 즉시 SP500 전 종목 수집 + pairs 사전계산
+        scheduler.trigger_sp500_if_missed()
         # 1분 주기 공통 데이터 스케줄러 시작
         scheduler.start()
     else:
