@@ -150,18 +150,7 @@ def on_shutdown():
     logger.info("스케줄러 정지 및 DB 연결 풀 종료")
 
 
-# ── 헬스체크 (API 우선 — 정적 파일 마운트보다 먼저 등록됨) ──────────────────────
-@app.get("/")
-def root():
-    from backend.db import is_available
-    return {
-        "service": "Personal Financial Platform API",
-        "version": "2.0.0",
-        "db":      "connected" if is_available() else "file-fallback",
-        "docs":    "/docs",
-    }
-
-
+# ── 헬스체크 ─────────────────────────────────────────────────────────────────
 @app.get("/health")
 def health():
     from backend.db import is_available
@@ -173,18 +162,36 @@ def health():
     }
 
 
-# ── 프로덕션: 빌드된 프론트엔드 정적 파일 서빙 ────────────────────────────────────
-# `npm run build` → frontend/dist 가 존재할 때만 활성화.
-# 개발 시 Vite dev server(포트 3000)가 실행 중이면 이 블록은 무시해도 됨.
-# 주의: StaticFiles 는 aiofiles 패키지 필요 — pip install aiofiles
+# ── 프론트엔드 정적 파일 서빙 (SPA 지원) ─────────────────────────────────────────
+# `npm run build` 후 frontend/dist 가 있으면 활성화.
+# API 라우터가 먼저 등록됐으므로 /api/* 는 이 블록에 도달하지 않음.
 _frontend_dist = Path(__file__).parent.parent / "frontend" / "dist"
 if _frontend_dist.exists():
     try:
         from fastapi.staticfiles import StaticFiles
-        app.mount("/", StaticFiles(directory=str(_frontend_dist), html=True), name="static")
+        from fastapi.responses import FileResponse as _FileResponse
+
+        # Vite 번들 에셋 (/assets/*)
+        _assets = _frontend_dist / "assets"
+        if _assets.exists():
+            app.mount("/assets", StaticFiles(directory=str(_assets)), name="vite-assets")
+
+        # 루트 정적 파일 (favicon.svg 등) — index.html 제외
+        for _sf in _frontend_dist.iterdir():
+            if _sf.is_file() and _sf.name != "index.html":
+                @app.get(f"/{_sf.name}", include_in_schema=False)
+                def _serve_root_file(p=_sf):
+                    return _FileResponse(str(p))
+
+        # SPA catch-all: React Router가 처리하는 모든 경로에 index.html 반환
+        # 반드시 마지막에 등록 — API 라우트가 먼저 매칭됨
+        @app.get("/{full_path:path}", include_in_schema=False)
+        def _serve_spa(full_path: str):
+            return _FileResponse(str(_frontend_dist / "index.html"))
+
         logger.info(f"프론트엔드 정적 파일 서빙 활성화: {_frontend_dist}")
     except ImportError:
-        logger.warning("aiofiles 미설치 — 정적 파일 서빙 비활성화 (pip install aiofiles 로 설치 가능)")
+        logger.warning("aiofiles 미설치 — pip install aiofiles")
 
 
 # ── 직접 실행 시 uvicorn 내장 서버 ────────────────────────────────────────────
