@@ -23,68 +23,203 @@ def _safe(v, default: float = 0.0) -> float:
 
 # ── 에쿼티 커브 ────────────────────────────────────────────────────────────────
 
+def _build_cash_series(
+    current_cash: float,
+    trade_log: list,
+    index: "pd.DatetimeIndex",
+) -> "pd.Series":
+    """
+    현재 현금에서 역산해 최초 현금을 구한 뒤 날짜별로 조정하는 시계열을 반환.
+    • 주식 BUY → 현금 감소, SELL → 현금 증가
+    • CASH DEPOSIT → 현금 직접 증가, WITHDRAW → 직접 감소
+    """
+    stock_trades = [
+        t for t in (trade_log or [])
+        if str(t.get("ticker", "")).upper() not in ("CASH", "")
+        and t.get("type", "") in ("ADD", "BUY", "SOLD", "SELL")
+        and float(t.get("price") or 0) > 0
+    ]
+    cash_deposits = [
+        t for t in (trade_log or [])
+        if str(t.get("ticker", "")).upper() == "CASH"
+        and t.get("type", "") in ("DEPOSIT", "WITHDRAW")
+        and float(t.get("q") or 0) > 0
+    ]
+    if not stock_trades and not cash_deposits:
+        return pd.Series(current_cash, index=index, dtype=float)
+
+    # 역산: 현재 현금 → 모든 이벤트 이전 초기 현금
+    initial_cash = current_cash
+    for tr in stock_trades:
+        q, price = float(tr.get("q", 0)), float(tr.get("price") or 0)
+        if tr["type"] in ("ADD", "BUY"):
+            initial_cash += q * price
+        elif tr["type"] in ("SOLD", "SELL"):
+            initial_cash -= q * price
+    for tr in cash_deposits:
+        q = float(tr.get("q", 0))
+        if tr["type"] == "DEPOSIT":
+            initial_cash -= q   # 입금 이전에는 현금이 적었음
+        elif tr["type"] == "WITHDRAW":
+            initial_cash += q   # 출금 이전에는 현금이 많았음
+    initial_cash = round(max(0.0, initial_cash), 2)
+
+    # 순방향: 날짜 순으로 모든 이벤트를 반영
+    cash_series = pd.Series(initial_cash, index=index, dtype=float)
+    all_events = sorted(stock_trades + cash_deposits,
+                        key=lambda t: (t.get("date", ""), t.get("id", 0)))
+    for tr in all_events:
+        try:
+            td = pd.Timestamp(tr["date"])
+        except Exception:
+            continue
+        q    = float(tr.get("q", 0))
+        mask = cash_series.index >= td
+        if str(tr.get("ticker", "")).upper() == "CASH":
+            if tr["type"] == "DEPOSIT":
+                cash_series[mask] += q
+            elif tr["type"] == "WITHDRAW":
+                cash_series[mask] -= q
+        else:
+            price = float(tr.get("price") or 0)
+            if tr["type"] in ("ADD", "BUY"):
+                cash_series[mask] -= q * price
+            elif tr["type"] in ("SOLD", "SELL"):
+                cash_series[mask] += q * price
+
+    return cash_series.clip(lower=0)
+
+
 def build_equity_curve(
     holdings: dict,
     trade_log: list,
     close_df: pd.DataFrame,
 ) -> pd.Series:
     """
-    실제 매매 이력(trade_log)을 재생해 날짜별 포트폴리오 가치를 산출.
-    trade_log가 없으면 현재 보유수량 고정 방식으로 폴백.
+    매매 이력(trade_log)을 처음부터 순방향으로 재생해 날짜별 포트폴리오 가치 산출.
+    현금 0 / 보유 0에서 시작 → DEPOSIT·WITHDRAW·BUY·SELL 이벤트만 반영, 역산 없음.
+    매도·입금 여부와 관계없이 과거 포인트가 변하지 않는다.
+    비거래일(주말·공휴일) 이벤트는 다음 거래일에 자동 적용.
     """
-    stock_tickers = [t for t in holdings if t != "CASH" and t in close_df.columns]
-    cash_val = holdings.get("CASH", {}).get("q", 0)
+    if close_df.empty:
+        return pd.Series(dtype=float)
+
+    # 오늘 날짜가 인덱스에 없으면(주말·공휴일) 마지막 가격을 ffill로 연장
+    today = pd.Timestamp.today().normalize()
+    if close_df.index[-1] < today:
+        extended_idx = pd.DatetimeIndex(list(close_df.index) + [today])
+        close_df = close_df.reindex(extended_idx).ffill()
+
+    prices = close_df.ffill()
+    idx    = close_df.index
+
+    def _fallback() -> pd.Series:
+        tickers = [t for t in holdings if t != "CASH" and t in prices.columns]
+        cash    = float(holdings.get("CASH", {}).get("q", 0))
+        sv = prices[tickers].multiply(
+            [holdings[t]["q"] for t in tickers]
+        ).sum(axis=1) if tickers else pd.Series(0.0, index=idx)
+        return sv + cash
 
     if not trade_log:
-        vals = close_df[stock_tickers].multiply([holdings[t]["q"] for t in stock_tickers])
-        return vals.sum(axis=1) + cash_val
+        return _fallback()
 
     try:
         log_df = pd.DataFrame(trade_log)
-        log_df["date"] = pd.to_datetime(log_df["date"])
-        log_df = log_df.sort_values("date")
-        logged_tickers = set(log_df["ticker"].unique())
+        log_df["date"] = pd.to_datetime(log_df["date"]).dt.normalize()
+        sort_keys = ["date", "id"] if "id" in log_df.columns else ["date"]
+        log_df = log_df.sort_values(sort_keys).reset_index(drop=True)
 
-        holdings_matrix = pd.DataFrame(0.0, index=close_df.index, columns=stock_tickers)
-        for t in stock_tickers:
-            t_log = log_df[log_df["ticker"] == t].sort_values("date")
-            if t_log.empty:
-                continue
-            qty_series = pd.Series(0.0, index=close_df.index)
-            running = 0.0
-            for _, row in t_log.iterrows():
-                q = float(row.get("q", 0))
-                trade_type = row["type"]
-                if trade_type in ("ADD", "BUY"):
-                    running += q
-                elif trade_type in ("SOLD", "SELL"):
-                    running = max(0.0, running - q)
-                elif trade_type == "UPDATE":
-                    running = q
-                qty_series.loc[qty_series.index >= row["date"]] = max(0.0, running)
-            holdings_matrix[t] = qty_series
+        # 현재 보유 + 과거 매매 이력에 등장한 모든 종목을 추적
+        traded_tickers = {
+            str(r["ticker"]).upper()
+            for _, r in log_df.iterrows()
+            if str(r.get("ticker", "")).upper() not in ("CASH", "")
+        }
+        current_tickers = {t for t in holdings if t != "CASH"}
+        all_tickers     = sorted((traded_tickers | current_tickers) & set(prices.columns))
 
-        for t in stock_tickers:
-            if t not in logged_tickers and holdings[t]["q"] > 0:
-                holdings_matrix[t] = holdings[t]["q"]
+        # 거래 이력 없는 보유 종목은 최초 시점부터 현재 수량으로 고정 (레거시 대응)
+        logged_tickers = {str(r["ticker"]).upper() for _, r in log_df.iterrows()}
+        static_qty: dict[str, float] = {
+            t: float(holdings[t]["q"])
+            for t in all_tickers
+            if t not in logged_tickers and holdings.get(t, {}).get("q", 0) > 0
+        }
 
-        equity = (close_df[stock_tickers] * holdings_matrix).sum(axis=1) + cash_val
+        # DEPOSIT 날짜 보정: 주식 BUY보다 늦게 기록된 DEPOSIT은 첫 BUY 날짜로 당겨서 처리
+        # (사용자가 현금을 오늘 입력했으나 과거에 매수한 경우 자산 왜곡 방지)
+        stock_rows_mask = ~log_df["ticker"].str.upper().isin(["CASH", ""])
+        if stock_rows_mask.any():
+            first_trade_date = log_df.loc[stock_rows_mask, "date"].min()
+            for i, row in log_df.iterrows():
+                if str(row.get("ticker", "")).upper() == "CASH" \
+                        and str(row.get("type", "")).upper() == "DEPOSIT" \
+                        and row["date"] > first_trade_date:
+                    log_df.at[i, "date"] = first_trade_date
 
+        # 날짜 보정 후 재정렬
+        log_df = log_df.sort_values(sort_keys).reset_index(drop=True)
+
+        # 비거래일 이벤트 → 다음 거래일 포지션에 매핑 (정수 인덱스 키)
+        events_by_pos: dict[int, list] = {}
+        for _, row in log_df.iterrows():
+            pos = int(idx.searchsorted(row["date"], side="left"))
+            if pos < len(idx):
+                events_by_pos.setdefault(pos, []).append(row)
+
+        # 순방향 워크: 현금 0, 보유 0에서 시작
+        running_cash: float = 0.0
+        running_qty: dict[str, float] = {t: static_qty.get(t, 0.0) for t in all_tickers}
+
+        equity_vals = np.zeros(len(idx), dtype=float)
+
+        for i in range(len(idx)):
+            for row in events_by_pos.get(i, []):
+                ticker     = str(row.get("ticker", "")).upper()
+                trade_type = str(row.get("type",   "")).upper()
+                q          = float(row.get("q",     0))
+                pr         = float(row.get("price") or 0)
+
+                if ticker == "CASH":
+                    if trade_type == "DEPOSIT":
+                        running_cash += q
+                    elif trade_type == "WITHDRAW":
+                        running_cash -= q
+                elif ticker in running_qty:
+                    if trade_type in ("ADD", "BUY"):
+                        running_cash -= q * pr
+                        running_qty[ticker] += q
+                    elif trade_type in ("SOLD", "SELL"):
+                        running_cash += q * pr
+                        running_qty[ticker] = max(0.0, running_qty[ticker] - q)
+                    elif trade_type == "UPDATE":
+                        running_qty[ticker] = max(0.0, q)
+
+            row_prices = prices.iloc[i]
+            stock_val  = sum(_safe(row_prices[t]) * running_qty[t] for t in all_tickers)
+            equity_vals[i] = max(0.0, running_cash) + stock_val
+
+        equity = pd.Series(equity_vals, index=idx, dtype=float)
         if equity.iloc[-1] <= 0 or equity.replace(0, np.nan).dropna().empty:
             raise ValueError("비정상 에쿼티 커브")
         return equity
 
     except Exception:
-        vals = close_df[stock_tickers].multiply([holdings[t]["q"] for t in stock_tickers])
-        return vals.sum(axis=1) + cash_val
+        return _fallback()
 
 
 def equity_curve_to_records(
     curve: pd.Series,
     benchmark_df: pd.DataFrame | None = None,
+    cash_event_amounts: dict | None = None,
+    trade_markers: list | None = None,
 ) -> list[dict]:
-    """에쿼티 커브를 API 응답용 레코드 리스트로 변환. value/benchmark_value 모두 달러 금액."""
-    # 매수 이전 0인 구간을 제거 — 차트는 항상 첫 투자일부터 시작
+    """
+    에쿼티 커브를 API 응답용 레코드 리스트로 변환.
+    cash_event_amounts: {date_str: amount}  DEPOSIT(양수) / WITHDRAW(음수)
+    trade_markers:      [{ticker,type,q,price,date}, ...]  주식 매매 이력
+    """
     peak = float(curve.max()) if not curve.empty else 0.0
     threshold = peak * 0.001
     meaningful = curve[curve > threshold]
@@ -102,18 +237,33 @@ def equity_curve_to_records(
         if sp500_indexed is None or date not in sp500_indexed.index:
             return None
         v = sp500_indexed.loc[date]
-        if pd.isna(v):
-            return None
-        return round(float(v), 2)
+        return None if pd.isna(v) else round(float(v), 2)
+
+    cash_evt: dict = cash_event_amounts or {}
+
+    # 날짜별 주식 거래 목록 (포인트 마커용)
+    trade_by_date: dict = {}
+    for tr in (trade_markers or []):
+        d = tr.get("date", "")
+        trade_by_date.setdefault(d, []).append({
+            "ticker": tr.get("ticker", ""),
+            "type":   tr.get("type", ""),
+            "q":      tr.get("q", 0),
+            "price":  tr.get("price", 0),
+        })
 
     records = []
     for date, val in curve.items():
         if pd.isna(val):
             continue
+        date_str = date.strftime("%Y-%m-%d")
         records.append({
-            "date":            date.strftime("%Y-%m-%d"),
-            "value":           round(float(val), 2),
-            "benchmark_value": _bv(date),
+            "date":               date_str,
+            "value":              round(float(val), 2),
+            "benchmark_value":    _bv(date),
+            "cash_event":         date_str in cash_evt,
+            "cash_event_amount":  cash_evt.get(date_str, 0),
+            "trades":             trade_by_date.get(date_str, []),
         })
     return records
 
@@ -172,24 +322,35 @@ def calculate_metrics(
     if close_df.empty or len(close_df) < 2:
         return {}
 
-    curr = close_df.iloc[-1]
-    prev = close_df.iloc[-2]
+    # 비거래일(주말·공휴일)에 NaN이 생기지 않도록 ffill 적용
+    price_df = close_df.ffill()
+    curr = price_df.iloc[-1]
+    prev = price_df.iloc[-2]
 
     def _price(t):
-        return float(curr.get(t, 0)) if t != "CASH" else 1.0
+        v = curr.get(t, 0)
+        return _safe(v) if t != "CASH" else 1.0
 
     def _prev_price(t):
-        return float(prev.get(t, _price(t))) if t != "CASH" and t in prev.index else _price(t)
+        v = prev.get(t, curr.get(t, 0))
+        return _safe(v) if t != "CASH" else 1.0
 
     stock_tickers = [t for t in holdings if t != "CASH" and t in close_df.columns]
     cash_val = holdings.get("CASH", {}).get("q", 0)
 
-    total_equity  = _safe(sum(_price(t)      * holdings[t]["q"] for t in stock_tickers) + cash_val)
-    prev_equity   = _safe(sum(_prev_price(t) * holdings[t]["q"] for t in stock_tickers) + cash_val)
+    total_equity  = _safe(sum(_price(t) * holdings[t]["q"] for t in stock_tickers) + cash_val)
     total_cost    = _safe(sum(_safe(holdings[t]["avg"]) * _safe(holdings[t]["q"]) for t in stock_tickers) + cash_val)
-    today_chg_val = _safe(total_equity - prev_equity)
-    today_chg_pct = _safe((today_chg_val / prev_equity * 100) if prev_equity else 0.0)
     total_rtn     = _safe((total_equity / total_cost - 1) * 100 if total_cost else 0.0)
+
+    # 1D 변화: 현재 수량 × 전일 가격 방식은 당일 거래 시 오류 → 에쿼티 커브를 직접 사용
+    if len(equity_curve) >= 2:
+        _cur_eq = float(equity_curve.iloc[-1])
+        _pre_eq = float(equity_curve.iloc[-2])
+        today_chg_val = _safe(_cur_eq - _pre_eq)
+        today_chg_pct = _safe((_cur_eq / _pre_eq - 1) * 100 if _pre_eq else 0.0)
+    else:
+        today_chg_val = 0.0
+        today_chg_pct = 0.0
 
     def _perf(days):
         if len(equity_curve) >= days + 1:

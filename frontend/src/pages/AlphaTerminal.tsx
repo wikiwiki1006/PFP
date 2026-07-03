@@ -1,8 +1,8 @@
-import React, { useState, useMemo, useRef, useEffect } from 'react'
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   AreaChart, Area, PieChart, Pie, Cell, Sector,
-  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine,
+  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, ReferenceArea,
 } from 'recharts'
 import ReactMarkdown from 'react-markdown'
 import {
@@ -14,7 +14,7 @@ import {
   getPortfolioMetrics, getEquityCurve, getHoldingsDetail, getSectorWeights,
   getMarketSnapshot, getMarketNews, getMacroData, getEarnings,
   getAnalystFeedback,
-  postTrade, updateHolding, deleteHolding, getHoldings,
+  postTrade, updateHolding, addHolding, deleteHolding, getHoldings,
   generateDailyBrief, getDailyBriefHistory, getDailyBriefFile,
   getIndexPrices, getTrades, updateTrade, deleteTrade, getTickerPrice, searchTickers,
   autoDetectSectors,
@@ -83,12 +83,39 @@ function Pill({ label, value, color }: { label: string; value: string; color?: s
   )
 }
 
+// ── Equity Curve helpers (module-level, no closure over state) ────────────────
+const fmtCurveDate = (v: string) => {
+  const p = v?.split('-')
+  return p?.length === 3 ? `${p[0].slice(2)}.${p[1]}.${p[2]}` : v
+}
+const fmtCurveUSD = (v: number) =>
+  v >= 1_000_000 ? `$${(v / 1_000_000).toFixed(2)}M`
+  : v >= 1_000   ? `$${(v / 1_000).toFixed(1)}K`
+  : `$${v.toFixed(0)}`
+const fmtCurveSigned = (v: number) =>
+  `${v >= 0 ? '+' : ''}${fmtCurveUSD(Math.abs(v))}`
+
 // ── Equity Curve ──────────────────────────────────────────────────────────────
 type BenchmarkMode = 'sp500' | 'nasdaq' | 'both'
+
+type CurvePoint = {
+  date: string
+  port: number
+  sp?: number
+  nasdaq?: number
+  cash_event: boolean
+  cash_event_amount: number
+  trades: { ticker: string; type: string; q: number; price: number }[]
+}
 
 function EquityCurve({ curveQ }: { curveQ: any }) {
   const [range, setRange] = useState<'1M' | '3M' | '1Y' | 'ALL'>('1Y')
   const [bm,    setBm]    = useState<BenchmarkMode>('sp500')
+
+  // ── 줌 상태 ─────────────────────────────────────────────────────────────
+  const [dragSel,    setDragSel]    = useState<{ left: string; right: string } | null>(null)
+  const [zoomDomain, setZoomDomain] = useState<{ left: string; right: string } | null>(null)
+  const dragging = useRef(false)
 
   const rangeToPeriod = { '1M': '3mo', '3M': '6mo', '1Y': '2y', 'ALL': '5y' } as const
 
@@ -99,7 +126,6 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
     staleTime: 300_000,
   })
 
-  // 날짜 기반 필터링 — 정확히 1M/3M/1Y 전부터 오늘까지
   const filterByRange = (all: any[]) => {
     if (range === 'ALL' || !all.length) return all
     const today  = new Date()
@@ -108,50 +134,65 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
     else if (range === '3M') cutoff.setMonth(today.getMonth() - 3)
     else if (range === '1Y') cutoff.setFullYear(today.getFullYear() - 1)
     const cutStr = cutoff.toISOString().split('T')[0]
-    return all.filter(d => d.date >= cutStr)
+    return all.filter((d: any) => d.date >= cutStr)
   }
 
-  const data = useMemo((): { date: string; port: number; sp: number; nasdaq?: number }[] => {
+  const data = useMemo((): CurvePoint[] => {
     const all: any[] = curveQ.data || []
     const sliced = filterByRange(all)
     if (!sliced.length) return []
     const ip = sliced[0]?.value
     if (!ip || ip <= 0) return []
-    const ib = sliced[0]?.benchmark_value  // null일 수 있음
 
-    const nasdaqMap  = new Map((nasdaqQ.data || []).map((d: any) => [d.date, d.close]))
-    const nasdaqBase = nasdaqMap.get(sliced[0].date) ?? [...nasdaqMap.values()][0] as number | undefined
+    const nasdaqMap = new Map((nasdaqQ.data || []).map((d: any) => [d.date, d.close]))
 
-    const safeCalc = (n: number, base: number): number => {
-      if (!base || !isFinite(base) || !isFinite(n)) return 0
-      const r = (n / base - 1) * 100
-      return isNaN(r) || !isFinite(r) ? 0 : +r.toFixed(2)
-    }
+    // 현금 입출금(DEPOSIT/WITHDRAW) 시점마다 벤치마크 기준선 리셋
+    let spBase: number | undefined  = sliced[0]?.benchmark_value
+    let nqBase: number | undefined  = nasdaqMap.get(sliced[0].date) ?? [...nasdaqMap.values()][0] as number | undefined
+    let portBase: number = ip
 
-    return sliced.map((d: any) => {
+    const result: CurvePoint[] = []
+    for (let i = 0; i < sliced.length; i++) {
+      const d  = sliced[i]
+      const pv = d.value != null && isFinite(d.value) ? +d.value.toFixed(2) : 0
       const nc = nasdaqMap.get(d.date) as number | undefined
-      return {
-        date:   d.date,
-        port:   safeCalc(d.value, ip),
-        sp:     ib != null && d.benchmark_value != null ? safeCalc(d.benchmark_value, ib) : 0,
-        nasdaq: nc != null && nasdaqBase != null ? safeCalc(nc, nasdaqBase) : undefined,
+
+      if (i > 0 && d.cash_event) {
+        spBase   = d.benchmark_value ?? spBase
+        nqBase   = nc ?? nqBase
+        portBase = pv
       }
-    })
+
+      const sv = spBase != null && d.benchmark_value != null && isFinite(d.benchmark_value)
+        ? +((d.benchmark_value / spBase) * portBase).toFixed(2) : undefined
+      const nv = nqBase != null && nc != null && isFinite(nc)
+        ? +((nc / nqBase) * portBase).toFixed(2) : undefined
+
+      result.push({
+        date:               d.date,
+        port:               pv,
+        sp:                 sv,
+        nasdaq:             nv,
+        cash_event:         !!d.cash_event,
+        cash_event_amount:  d.cash_event_amount ?? 0,
+        trades:             d.trades ?? [],
+      })
+    }
+    return result
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [curveQ.data, range, nasdaqQ.data])
 
-  const fmtDate = (v: string) => {
-    const p = v?.split('-')
-    return p?.length === 3 ? `${p[0].slice(2)}.${p[1]}.${p[2]}` : v
-  }
+  const displayData = useMemo(() => {
+    if (!zoomDomain) return data
+    return data.filter(d => d.date >= zoomDomain.left && d.date <= zoomDomain.right)
+  }, [data, zoomDomain])
 
-  const last    = data[data.length - 1]
-  const portPct = last?.port   ?? 0
-  const spPct   = last?.sp     ?? 0
-  const nqPct   = last?.nasdaq ?? 0
-  const alpha   = portPct - (bm === 'nasdaq' ? nqPct : spPct)
-
-  const TIP = { backgroundColor: '#0b1220', border: '1px solid #1e2d40', borderRadius: 4, fontSize: 12 }
+  const last     = displayData[displayData.length - 1]
+  const first    = displayData[0]
+  const portPct  = first?.port && last?.port ? (last.port / first.port - 1) * 100 : 0
+  const spPct    = first?.sp  && last?.sp   ? (last.sp  / first.sp  - 1) * 100 : 0
+  const nqPct    = first?.nasdaq && last?.nasdaq ? (last.nasdaq / first.nasdaq - 1) * 100 : 0
+  const alpha    = portPct - (bm === 'nasdaq' ? nqPct : spPct)
 
   const BM_BTNS: { key: BenchmarkMode; label: string; color: string }[] = [
     { key: 'sp500',  label: 'S&P',  color: '#64748b' },
@@ -159,16 +200,122 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
     { key: 'both',   label: 'BOTH', color: '#f59e0b' },
   ]
 
+  // ── 드래그 줌 핸들러 ─────────────────────────────────────────────────────
+  const handleMouseDown = (e: any) => {
+    if (!e?.activeLabel) return
+    dragging.current = true
+    setDragSel({ left: e.activeLabel, right: e.activeLabel })
+  }
+  const handleMouseMove = (e: any) => {
+    if (!dragging.current || !e?.activeLabel) return
+    setDragSel(prev => prev ? { ...prev, right: e.activeLabel } : null)
+  }
+  const handleMouseUp = () => {
+    dragging.current = false
+    if (dragSel && dragSel.left !== dragSel.right) {
+      const [l, r] = dragSel.left <= dragSel.right
+        ? [dragSel.left, dragSel.right]
+        : [dragSel.right, dragSel.left]
+      setZoomDomain({ left: l, right: r })
+    }
+    setDragSel(null)
+  }
+  const resetZoom   = () => { setZoomDomain(null); setDragSel(null) }
+  const changeRange = (r: typeof range) => { setRange(r); resetZoom() }
+  const selLeft  = dragSel && dragSel.left <= dragSel.right ? dragSel.left  : dragSel?.right
+  const selRight = dragSel && dragSel.left <= dragSel.right ? dragSel.right : dragSel?.left
+
+  // ── 커스텀 툴팁 (useCallback으로 메모이즈 — 컴포넌트 재생성 방지) ─────────
+  const renderTooltip = useCallback(({ active, payload, label }: any) => {
+    if (!active || !payload?.length) return null
+    const d: CurvePoint = payload[0]?.payload
+    if (!d) return null
+    return (
+      <div style={{ backgroundColor: '#0b1220', border: '1px solid #1e2d40', borderRadius: 4, padding: '8px 12px', fontSize: 12, minWidth: 160 }}>
+        <div className="text-[#94a3b8] text-[11px] mb-2">{fmtCurveDate(label)}</div>
+        <div className="flex items-center justify-between gap-3 mb-0.5">
+          <span className="flex items-center gap-1.5">
+            <span style={{ color: '#00e6ff' }}>●</span>
+            <span className="text-[#64748b] text-[10px]">Portfolio</span>
+          </span>
+          <span className="font-mono font-bold text-white">{fmtCurveUSD(d.port)}</span>
+        </div>
+        {d.sp != null && (bm === 'sp500' || bm === 'both') && (
+          <div className="flex items-center justify-between gap-3 mb-0.5">
+            <span className="flex items-center gap-1.5">
+              <span style={{ color: '#64748b' }}>●</span>
+              <span className="text-[#64748b] text-[10px]">S&P 500</span>
+            </span>
+            <span className="font-mono text-[#64748b]">{fmtCurveUSD(d.sp)}</span>
+          </div>
+        )}
+        {d.nasdaq != null && (bm === 'nasdaq' || bm === 'both') && (
+          <div className="flex items-center justify-between gap-3 mb-0.5">
+            <span className="flex items-center gap-1.5">
+              <span style={{ color: '#a78bfa' }}>●</span>
+              <span className="text-[#4a5568] text-[10px]">NASDAQ</span>
+            </span>
+            <span className="font-mono text-[#a78bfa]">{fmtCurveUSD(d.nasdaq)}</span>
+          </div>
+        )}
+        {d.trades?.length > 0 && (
+          <div className="mt-2 pt-2 border-t border-[#1e2d40]">
+            {d.trades.map((t, i) => {
+              const isBuy  = t.type === 'ADD'
+              const color  = isBuy ? '#10b981' : '#ef4444'
+              return (
+                <div key={i} className="flex items-center justify-between gap-3 mt-0.5">
+                  <span className="flex items-center gap-1" style={{ color }}>
+                    <span style={{ fontSize: 9 }}>{isBuy ? '▲' : '▼'}</span>
+                    <span className="font-bold text-[11px]">{t.ticker}</span>
+                    <span className="text-[10px] opacity-70">{isBuy ? 'BUY' : 'SELL'}</span>
+                  </span>
+                  <span className="text-[#94a3b8] text-[10px] font-mono">{t.q}주 @${t.price}</span>
+                </div>
+              )
+            })}
+          </div>
+        )}
+        {d.cash_event && d.cash_event_amount !== 0 && (
+          <div className="mt-2 pt-2 border-t border-[#1e2d40] flex items-center justify-between">
+            <span style={{ color: '#f59e0b', fontSize: 10 }}>
+              {d.cash_event_amount > 0 ? '↑ 현금 입금' : '↓ 현금 출금'}
+            </span>
+            <span className="font-mono font-bold text-[11px]" style={{ color: '#f59e0b' }}>
+              {fmtCurveSigned(d.cash_event_amount)}
+            </span>
+          </div>
+        )}
+      </div>
+    )
+  }, [bm])
+
+  // ── 매매 포인트 dot 렌더러 ────────────────────────────────────────────────
+  const tradeDot = (props: any) => {
+    const { cx, cy, payload } = props
+    if (!payload?.trades?.length) return <g />
+    const hasBuy  = payload.trades.some((t: any) => t.type === 'ADD')
+    const hasSell = payload.trades.some((t: any) => t.type === 'SOLD')
+    const color   = hasBuy && hasSell ? '#f59e0b' : hasBuy ? '#10b981' : '#ef4444'
+    return (
+      <g>
+        <circle cx={cx} cy={cy} r={6}  fill="#0b1220" stroke={color} strokeWidth={1.5} />
+        <circle cx={cx} cy={cy} r={3}  fill={color} />
+      </g>
+    )
+  }
+
   return (
     <div className="px-4 pt-3 pb-2 border-b border-[#1e2d40]">
       <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
         <div className="flex items-center gap-4 flex-wrap">
-          <span className="text-[11px] text-[#94a3b8] font-bold tracking-[3px] uppercase">Equity Curve</span>
+          <span className="text-[11px] text-[#94a3b8] font-bold tracking-[3px] uppercase">Total Assets</span>
           <div className="flex items-center gap-2">
             <svg width="20" height="5"><line x1="0" y1="2.5" x2="20" y2="2.5" stroke="#00e6ff" strokeWidth="2.5" /></svg>
             <span className="text-sm font-mono font-bold tabular-nums"
               style={{ color: portPct >= 0 ? '#10b981' : '#ef4444' }}>
-              Portfolio {fp(portPct)}
+              {last?.port != null ? fmtCurveUSD(last.port) : '—'}
+              <span className="text-[11px] ml-1 opacity-70">{fp(portPct, 1)}</span>
             </span>
           </div>
           {(bm === 'sp500' || bm === 'both') && (
@@ -179,7 +326,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
                 <line x1="14" y1="2.5" x2="20" y2="2.5" stroke="#64748b" strokeWidth="1.5" />
               </svg>
               <span className="text-sm font-mono text-[#64748b] tabular-nums">
-                S&P {fp(spPct)}
+                S&P {fp(spPct, 1)}
               </span>
             </div>
           )}
@@ -191,7 +338,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
                 <line x1="14" y1="2.5" x2="20" y2="2.5" stroke="#a78bfa" strokeWidth="1.5" />
               </svg>
               <span className="text-sm font-mono text-[#a78bfa] tabular-nums">
-                NASDAQ {fp(nqPct)}
+                NASDAQ {fp(nqPct, 1)}
               </span>
             </div>
           )}
@@ -200,8 +347,14 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
               color: alpha >= 0 ? '#10b981' : '#ef4444',
               backgroundColor: alpha >= 0 ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)',
             }}>
-            α {fp(alpha)}
+            α {fp(alpha, 1)}
           </span>
+          {zoomDomain && (
+            <button onClick={resetZoom}
+              className="text-[10px] font-bold px-2 py-0.5 rounded border border-[#f59e0b]/50 text-[#f59e0b] hover:bg-[#f59e0b]/10 transition-colors">
+              RESET ZOOM
+            </button>
+          )}
         </div>
 
         <div className="flex items-center gap-2">
@@ -218,7 +371,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
           </div>
           <div className="flex gap-0.5 bg-[#070d18] border border-[#1e2d40] rounded p-0.5">
             {(['1M', '3M', '1Y', 'ALL'] as const).map(r => (
-              <button key={r} onClick={() => setRange(r)}
+              <button key={r} onClick={() => changeRange(r)}
                 className={cn('text-[11px] px-2.5 py-1 rounded font-bold transition-colors duration-100',
                   range === r ? 'bg-[#00e6ff]/15 text-[#00e6ff]' : 'text-[#4a5568] hover:text-[#64748b]'
                 )}>
@@ -229,25 +382,27 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
         </div>
       </div>
 
-      {/* 로딩 상태 */}
       {curveQ.isLoading && (
         <div className="flex items-center justify-center" style={{ height: 300 }}>
           <span className="text-[13px] text-[#334155] font-mono">로드 중…</span>
         </div>
       )}
-
-      {/* 데이터 없음 */}
       {!curveQ.isLoading && !data.length && (
         <div className="flex items-center justify-center" style={{ height: 300 }}>
           <span className="text-[13px] text-[#334155] font-mono">데이터 없음</span>
         </div>
       )}
 
-      {/* 차트 — ResponsiveContainer를 고정 높이 div로 감쌈 (width 계산 타이밍 버그 방지) */}
       {!curveQ.isLoading && data.length > 0 && (
       <div style={{ width: '100%', height: 300 }}>
       <ResponsiveContainer width="100%" height="100%">
-        <AreaChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+        <AreaChart data={displayData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+          onDoubleClick={resetZoom}
+          style={{ cursor: 'crosshair' }}
+        >
           <defs>
             <linearGradient id="gPort" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%"   stopColor="#00e6ff" stopOpacity={0.25} />
@@ -267,24 +422,15 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
             tick={{ fill: '#64748b', fontSize: 11 }}
             tickLine={false} axisLine={false}
             interval="preserveStartEnd"
-            tickFormatter={fmtDate}
+            tickFormatter={fmtCurveDate}
           />
           <YAxis
             tick={{ fill: '#64748b', fontSize: 11 }}
             tickLine={false} axisLine={false}
-            tickFormatter={v => `${v >= 0 ? '+' : ''}${v.toFixed(0)}%`}
-            width={40}
+            tickFormatter={v => fmtCurveUSD(v)}
+            width={52}
           />
-          <ReferenceLine y={0} stroke="#1e2d40" strokeDasharray="3 4" strokeWidth={1} />
-          <Tooltip
-            contentStyle={TIP}
-            formatter={(v: number, key: string) => [
-              `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`,
-              key === 'port' ? 'Portfolio' : key === 'sp' ? 'S&P 500' : 'NASDAQ',
-            ]}
-            labelFormatter={fmtDate}
-            labelStyle={{ color: '#94a3b8', fontSize: 11 }}
-          />
+          <Tooltip content={renderTooltip} />
           {(bm === 'sp500' || bm === 'both') && (
             <Area type="monotone" dataKey="sp" stroke="#64748b" strokeWidth={1.5}
               strokeDasharray="4 3" fill="url(#gSP)" dot={false}
@@ -295,9 +441,32 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
               strokeDasharray="4 3" fill="url(#gNQ)" dot={false}
               isAnimationActive={false} />
           )}
+          {/* 포트폴리오 라인 — 매매일에 컬러 포인트 표시 */}
           <Area type="monotone" dataKey="port" stroke="#00e6ff" strokeWidth={2.5}
-            fill="url(#gPort)" dot={false}
+            fill="url(#gPort)"
+            dot={tradeDot}
+            activeDot={{ r: 5, fill: '#00e6ff', stroke: '#fff', strokeWidth: 2 }}
             isAnimationActive={false} />
+          {/* 현금 입출금 수직선 — 금액 레이블 포함 */}
+          {displayData.filter(d => d.cash_event).map(d => (
+            <ReferenceLine key={`ce-${d.date}`} x={d.date}
+              stroke="#f59e0b" strokeWidth={1.5} strokeDasharray="3 4" strokeOpacity={0.8}
+              label={{
+                value: fmtCurveSigned(d.cash_event_amount),
+                position: 'insideTopRight',
+                fill: '#f59e0b',
+                fontSize: 9,
+                fontWeight: 'bold',
+              }}
+            />
+          ))}
+          {/* 드래그 줌 선택 영역 */}
+          {dragSel && selLeft && selRight && selLeft !== selRight && (
+            <ReferenceArea x1={selLeft} x2={selRight}
+              fill="#3b82f6" fillOpacity={0.12}
+              stroke="#3b82f6" strokeOpacity={0.4} strokeWidth={1}
+            />
+          )}
         </AreaChart>
       </ResponsiveContainer>
       </div>
@@ -315,6 +484,11 @@ function HoldingsPanel({ holdQ }: { holdQ: any }) {
   const [editTicker, setEditTicker] = useState<string | null>(null)
   const [editVals,   setEditVals]   = useState({ q: 0, avg: 0, sector: 'Other' })
   const editValsRef = useRef({ q: 0, avg: 0, sector: 'Other' })
+
+  // ── Cash edit state ───────────────────────────────────────────────────
+  const [cashEditMode, setCashEditMode] = useState(false)
+  const [cashEditVal,  setCashEditVal]  = useState(0)
+  const [cashEditDate, setCashEditDate] = useState(() => new Date().toISOString().slice(0, 10))
 
   // editValsRef: stale closure 방지용 — 입력값 최신 상태 추적
   useEffect(() => { editValsRef.current = editVals }, [editVals])
@@ -419,6 +593,19 @@ function HoldingsPanel({ holdQ }: { holdQ: any }) {
     // 거래 삭제 → holdings도 재계산됨 (백엔드 _recalculate_holding_from_trades)
     onSuccess: _invalidateAll,
     onError: (e: any) => alert(`거래 삭제 실패: ${e?.response?.data?.detail || e.message}`),
+  })
+  const cashMut = useMutation({
+    mutationFn: async ({ amount, date }: { amount: number; date: string }) => {
+      try {
+        await updateHolding('CASH', { q: amount, avg: 1, sector: 'Cash', date })
+      } catch (e: any) {
+        if (e?.response?.status === 404) {
+          await addHolding('CASH', { q: amount, avg: 1, sector: 'Cash', date })
+        } else { throw e }
+      }
+    },
+    onSuccess: () => { setCashEditMode(false); _invalidateAll() },
+    onError: (e: any) => alert(`현금 수정 실패: ${e?.response?.data?.detail || e.message}`),
   })
 
   // SELL 인라인 폼 열기 — 현재 보유수량 + 현재가 자동 설정
@@ -537,7 +724,7 @@ function HoldingsPanel({ holdQ }: { holdQ: any }) {
                 </tr>
               </thead>
               <tbody>
-                {(holdQ.data || []).map((h: any) => (
+                {(holdQ.data || []).filter((h: any) => h.ticker !== 'CASH').map((h: any) => (
                   <React.Fragment key={h.ticker}>
                   <tr className="border-b border-[#0f172a] hover:bg-[#0a1525] group transition-colors">
                     {editTicker === h.ticker ? (
@@ -581,14 +768,14 @@ function HoldingsPanel({ holdQ }: { holdQ: any }) {
                     ) : (
                       <>
                         <td className="py-2 px-2.5 font-mono font-bold text-[15px] text-[#e2e8f0]">{h.ticker}</td>
-                        <td className="py-2 px-2.5 font-mono text-[12px] text-[#94a3b8]">${fn(h.avg_cost, 0)}</td>
+                        <td className="py-2 px-2.5 font-mono text-[12px] text-[#94a3b8]">${fn(h.avg_cost, 2)}</td>
                         <td className="py-2 px-2.5 font-mono text-[12px] text-[#94a3b8]">{fv(h.qty)}</td>
                         <td className="py-2 px-2.5 font-mono text-[12px] text-[#cbd5e1]">${fn(h.current_price, 1)}</td>
-                        <td className="py-2 px-2.5 font-mono text-[13px] font-bold" style={{ color: fv(h.pnl_pct) >= 0 ? '#10b981' : '#ef4444' }}>
-                          {fp(h.pnl_pct, 1)}
+                        <td className="py-2 px-2.5 font-mono text-[13px] font-bold" style={{ color: fv(h.chg_pct) >= 0 ? '#10b981' : '#ef4444' }}>
+                          {fp(h.chg_pct, 2)}
                         </td>
                         <td className="py-2 px-2.5 font-mono text-[13px] font-bold" style={{ color: fv(h.pnl) >= 0 ? '#10b981' : '#ef4444' }}>
-                          {fp(h.pnl, 0)}
+                          {fp(h.pnl, 2)}
                         </td>
                         <td className="py-2 px-2.5 font-mono text-[12px] text-[#94a3b8]">{fn(fv(h.weight) * 100, 0)}%</td>
                         {/* SELL 버튼 */}
@@ -666,6 +853,83 @@ function HoldingsPanel({ holdQ }: { holdQ: any }) {
             </table>
           </div>
 
+          {/* ── CASH 잔고 위젯 (고정 하단, 단일 금액 표시) ─────────── */}
+          {(() => {
+            const cashRow = (holdQ.data || []).find((h: any) => h.ticker === 'CASH')
+            return (
+              <div className="flex-shrink-0 border-t-2 border-[#1e3a5f] bg-[#07101c] px-3 py-2">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    <span className="font-mono font-bold text-[13px] text-[#64748b] tracking-wider">CASH</span>
+                    {cashRow && (
+                      <span className="text-[11px] text-[#334155] font-mono">
+                        {fn(fv(cashRow.weight) * 100, 1)}%
+                      </span>
+                    )}
+                  </div>
+                  {cashEditMode ? (
+                    <div className="flex flex-col gap-1.5 flex-1 items-end">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] text-[#64748b] font-mono">입금일</span>
+                        <input
+                          type="date"
+                          value={cashEditDate}
+                          onChange={e => setCashEditDate(e.target.value)}
+                          max={new Date().toISOString().slice(0, 10)}
+                          className="bg-[#0b1220] border border-[#334155] text-[12px] font-mono text-[#94a3b8] rounded px-2 py-1 focus:outline-none focus:border-[#3b82f6]"
+                        />
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[13px] text-[#64748b] font-mono">$</span>
+                        <input
+                          type="number"
+                          value={cashEditVal || ''}
+                          onChange={e => setCashEditVal(+e.target.value)}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') cashMut.mutate({ amount: cashEditVal, date: cashEditDate })
+                            if (e.key === 'Escape') setCashEditMode(false)
+                          }}
+                          autoFocus
+                          min={0}
+                          step={100}
+                          placeholder="0"
+                          className="w-36 bg-[#0b1220] border border-[#334155] text-[14px] font-mono font-bold text-[#e2e8f0] rounded px-2 py-1 text-right focus:outline-none focus:border-[#3b82f6]"
+                        />
+                        <button type="button"
+                          onPointerDown={e => { e.preventDefault(); cashMut.mutate({ amount: cashEditVal, date: cashEditDate }) }}
+                          disabled={cashMut.isPending}
+                          className="text-[#10b981] hover:text-[#34d399] disabled:opacity-40">
+                          <Check className="w-4 h-4" />
+                        </button>
+                        <button type="button"
+                          onPointerDown={e => { e.preventDefault(); setCashEditMode(false) }}
+                          className="text-[#ef4444] hover:text-[#f87171]">
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono font-bold text-[18px] text-[#e2e8f0] tabular-nums">
+                        ${cashRow ? Number(cashRow.qty).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—'}
+                      </span>
+                      <button type="button"
+                        onPointerDown={e => {
+                          e.preventDefault()
+                          setCashEditMode(true)
+                          setCashEditVal(cashRow?.qty ?? 0)
+                          setCashEditDate(new Date().toISOString().slice(0, 10))
+                        }}
+                        className="text-[#374151] hover:text-[#3b82f6] transition-colors">
+                        <Edit3 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )
+          })()}
+
           {/* 거래 입력 폼 */}
           <div className="flex-shrink-0 border-t border-[#1e2d40] px-3 py-2 bg-[#060b14] space-y-2">
             {tickerError && (
@@ -737,8 +1001,19 @@ function HoldingsPanel({ holdQ }: { holdQ: any }) {
               <button type="button"
                 onPointerDown={e => {
                   e.preventDefault()
-                  if (form.ticker && form.q && form.price && !priceLoading && !tradeMut.isPending)
-                    tradeMut.mutate(form)
+                  if (!form.ticker || !form.q || !form.price || priceLoading || tradeMut.isPending) return
+                  // BUY 시 현금 잔액 체크
+                  if (form.type === 'BUY') {
+                    const cashRow = (holdQ.data || []).find((h: any) => h.ticker === 'CASH')
+                    if (cashRow) {
+                      const cost = form.q * form.price
+                      if (cost > fv(cashRow.qty)) {
+                        setTickerError(`잔액 부족 — 필요: $${Number(fn(cost, 0)).toLocaleString()}, 보유 현금: $${Number(fn(cashRow.qty, 0)).toLocaleString()}`)
+                        return
+                      }
+                    }
+                  }
+                  tradeMut.mutate(form)
                 }}
                 disabled={!form.ticker || !form.q || !form.price || priceLoading || tradeMut.isPending}
                 className="bg-[#1d4ed8] hover:bg-[#2563eb] disabled:opacity-40 text-white rounded px-3 py-1.5 transition-colors text-sm font-bold">

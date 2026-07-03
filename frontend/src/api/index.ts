@@ -44,10 +44,10 @@ export const getTrades = async (): Promise<Trade[]> =>
 export const postTrade = async (trade: TradeForm): Promise<{ ok: boolean; record: Trade }> =>
   (await api.post('/api/portfolio/trades', trade)).data
 
-export const updateHolding = async (ticker: string, body: { q: number; avg: number; sector?: string }): Promise<void> =>
+export const updateHolding = async (ticker: string, body: { q: number; avg: number; sector?: string; date?: string }): Promise<void> =>
   { await api.put(`/api/portfolio/holdings/${ticker}`, body) }
 
-export const addHolding = async (ticker: string, body: { q: number; avg: number; sector: string }): Promise<void> =>
+export const addHolding = async (ticker: string, body: { q: number; avg: number; sector: string; date?: string }): Promise<void> =>
   { await api.post(`/api/portfolio/holdings/${ticker}`, body) }
 
 export const deleteHolding = async (ticker: string): Promise<void> =>

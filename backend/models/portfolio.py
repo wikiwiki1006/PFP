@@ -11,6 +11,7 @@ class HoldingItem(BaseModel):
     prev_eps: float = Field(default=0.0)
     cur_eps: float = Field(default=0.0)
     earn_date: str = Field(default="N/A", description="다음 실적 발표일")
+    date: Optional[str] = Field(default=None, description="CASH 최초 입금 날짜 (YYYY-MM-DD)")
 
 
 class Holdings(BaseModel):
@@ -53,6 +54,7 @@ class UpdateHoldingRequest(BaseModel):
     q: float
     avg: float
     sector: Optional[str] = None
+    date: Optional[str] = None   # CASH DEPOSIT/WITHDRAW 날짜 (YYYY-MM-DD)
 
 
 class PortfolioMetrics(BaseModel):

@@ -67,6 +67,23 @@ def update_holding(
     holdings = get_holdings(uid)
     if ticker not in holdings:
         raise HTTPException(status_code=404, detail=f"{ticker} 미보유")
+
+    # 현금 직접 수정 시 DEPOSIT/WITHDRAW 이벤트를 거래 이력에 기록
+    if ticker == "CASH":
+        old_q = float(holdings["CASH"].get("q", 0))
+        new_q = float(body.q)
+        delta = round(new_q - old_q, 2)
+        if abs(delta) >= 0.01:
+            event_date = (body.date or "").strip() or datetime.now().strftime("%Y-%m-%d")
+            add_trade({
+                "date":   event_date,
+                "ticker": "CASH",
+                "type":   "DEPOSIT" if delta > 0 else "WITHDRAW",
+                "q":      abs(delta),
+                "price":  1.0,
+                "memo":   None,
+            }, uid)
+
     sector = body.sector or holdings[ticker].get("sector", "Other")
     save_holding(ticker, body.q, body.avg, sector, uid)
     return {"ok": True, "ticker": ticker}
@@ -83,6 +100,19 @@ def add_holding(
     holdings = get_holdings(uid)
     if ticker in holdings:
         raise HTTPException(status_code=409, detail=f"{ticker} 이미 존재. PUT으로 수정하세요.")
+
+    # 현금 최초 등록 시 DEPOSIT 이벤트 기록
+    if ticker == "CASH" and float(item.q) > 0:
+        event_date = (item.date or "").strip() or datetime.now().strftime("%Y-%m-%d")
+        add_trade({
+            "date":   event_date,
+            "ticker": "CASH",
+            "type":   "DEPOSIT",
+            "q":      float(item.q),
+            "price":  1.0,
+            "memo":   None,
+        }, uid)
+
     save_holding(ticker, item.q, item.avg, item.sector or "Other", uid)
     return {"ok": True, "ticker": ticker}
 
@@ -196,6 +226,19 @@ def add_trade_endpoint(
                 save_holding(ticker, new_qty, cur["avg"], cur.get("sector", "Other"), uid)
         elif trade_type == "UPDATE":
             save_holding(ticker, q, cur["avg"], cur.get("sector", "Other"), uid)
+
+    # CASH 잔고 자동 조정 — BUY 시 차감, SELL 시 증가 (CASH 보유분이 있을 때만)
+    if ticker != "CASH":
+        _q_adj = float(body.q)
+        _p_adj = float(body.price or 0)
+        cash_h = holdings.get("CASH")
+        if cash_h is not None and _p_adj > 0:
+            cur_cash = float(cash_h.get("q", 0))
+            cash_delta = round(_q_adj * _p_adj, 2)
+            if trade_type == "ADD":
+                save_holding("CASH", round(max(0.0, cur_cash - cash_delta), 2), 1.0, "Cash", uid)
+            elif trade_type == "SOLD":
+                save_holding("CASH", round(cur_cash + cash_delta, 2), 1.0, "Cash", uid)
 
     return {"ok": True, "record": record}
 
@@ -521,9 +564,25 @@ def auto_sector(x_user_id: Optional[str] = Header(default=None)):
 def get_metrics(x_user_id: Optional[str] = Header(default=None)):
     uid = _uid(x_user_id)
     holdings  = get_holdings(uid)
-    trade_log = get_trade_log(uid)
     if not holdings:
         raise HTTPException(status_code=400, detail="보유 종목 없음")
+    # 현금만 있는 경우: 가격 데이터 없이 바로 반환
+    stock_tickers = [t for t in holdings if t != "CASH"]
+    if not stock_tickers:
+        cash_val = float(holdings.get("CASH", {}).get("q", 0))
+        return {
+            "total_equity": round(cash_val, 2),
+            "total_cost":   round(cash_val, 2),
+            "total_return_pct":  0.0,
+            "today_change_val":  0.0,
+            "today_change_pct":  0.0,
+            "portfolio_beta":    0.0,
+            "vix":               18.0,
+            "perf_1w":           0.0,
+            "perf_1m":           0.0,
+            "alpha_vs_sp500":    None,
+        }
+    trade_log = get_trade_log(uid)
     # period="2y" → equity-curve 와 동일 캐시키 공유, 두 번째 요청은 메모리 히트
     close_df = _portfolio_close_df(holdings, period="2y", ttl=300)
     equity_curve = build_equity_curve(holdings, trade_log, close_df)
@@ -542,7 +601,27 @@ def get_equity_curve(
         raise HTTPException(status_code=400, detail="보유 종목 없음")
     close_df = _portfolio_close_df(holdings, period="2y", ttl=300)
     equity_curve = build_equity_curve(holdings, trade_log, close_df)
-    return equity_curve_to_records(equity_curve, close_df)
+
+    # 현금 입출금 이벤트 (날짜 → 금액): 노란 수직선 + 벤치마크 리인덱싱에 사용
+    cash_event_amounts: dict = {}
+    for tr in (trade_log or []):
+        if str(tr.get("ticker", "")).upper() == "CASH" \
+                and tr.get("type", "") in ("DEPOSIT", "WITHDRAW"):
+            d   = tr.get("date", "")
+            amt = float(tr.get("q", 0))
+            if tr["type"] == "WITHDRAW":
+                amt = -amt
+            cash_event_amounts[d] = round(cash_event_amounts.get(d, 0.0) + amt, 2)
+
+    # 주식 매매 포인트 마커 (매수/매도 날짜에 점 표시용)
+    trade_markers = [
+        tr for tr in (trade_log or [])
+        if str(tr.get("ticker", "")).upper() not in ("CASH", "")
+        and tr.get("type", "") in ("ADD", "BUY", "SOLD", "SELL")
+        and float(tr.get("price") or 0) > 0
+    ]
+
+    return equity_curve_to_records(equity_curve, close_df, cash_event_amounts, trade_markers)
 
 
 @router.get("/holdings-detail")
@@ -552,6 +631,16 @@ def get_holdings_detail_endpoint(x_user_id: Optional[str] = Header(default=None)
     if not holdings:
         return []
     tickers = [t for t in holdings if t != "CASH"]
+    # 현금만 있는 경우: 가격 조회 없이 CASH 행 직접 반환
+    if not tickers:
+        cash_q = float(holdings.get("CASH", {}).get("q", 0))
+        return [{
+            "ticker": "CASH", "sector": "Cash",
+            "qty": round(cash_q, 2), "avg_cost": 1.0,
+            "current_price": 1.0, "chg_pct": 0.0,
+            "pnl_pct": 0.0, "pnl": 0.0,
+            "market_value": round(cash_q, 2), "weight": 1.0,
+        }]
     # include_market=False: 현재가만 필요, 시장 지수 불필요
     close_df = get_close_df(tickers, period="5d", ttl=60, include_market=False)
     return get_holdings_detail(holdings, close_df)
