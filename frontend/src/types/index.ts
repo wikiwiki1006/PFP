@@ -249,6 +249,7 @@ export interface TechnicalChartResult {
 export interface PairsAutoMatch {
   ticker: string
   correlation: number
+  sector?: string
 }
 
 export interface PairsAutoChartPoint {
@@ -265,6 +266,7 @@ export interface PairsAutoBreach {
 
 export interface PairsAutoResult {
   ticker: string
+  base_sector?: string
   matches: PairsAutoMatch[]
   best: { ticker: string; correlation: number } | null
   chart: PairsAutoChartPoint[]

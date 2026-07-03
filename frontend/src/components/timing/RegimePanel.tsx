@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useState, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   ComposedChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
@@ -30,11 +30,21 @@ function ChartTooltip({ active, payload, label }: any) {
 }
 
 export default function RegimePanel({ holdings = {} }: RegimePanelProps) {
-  const [ticker, setTicker] = useState('^GSPC')
+  const [ticker, setTicker]             = useState('^GSPC')
+  const [tickerInitialized, setTickerInitialized] = useState(false)
   const [input, setInput]   = useState('')
   const [years, setYears]   = useState<1 | 2 | 3 | 5>(1)
 
   const holdingTickers = Object.keys(holdings).filter(t => t !== 'CASH')
+
+  // Set default ticker to the largest holding by cost basis (once, when holdings load)
+  useEffect(() => {
+    if (tickerInitialized) return
+    const entries = Object.entries(holdings).filter(([t]) => t !== 'CASH')
+    if (!entries.length) return
+    const top = entries.sort(([, a], [, b]) => b.q * b.avg - a.q * a.avg)[0]?.[0]
+    if (top) { setTicker(top); setTickerInitialized(true) }
+  }, [holdings, tickerInitialized])
 
   const q = useQuery({
     queryKey: ['timing-regime', ticker, years],
@@ -78,7 +88,7 @@ export default function RegimePanel({ holdings = {} }: RegimePanelProps) {
 
   return (
     <div className="p-4 space-y-4">
-      <div className="text-[11px] text-[#64748b] font-bold tracking-widest uppercase">종목별 시장 상황 — K-means 국면 분석</div>
+      <div className="text-[11px] text-[#64748b] font-bold tracking-widest uppercase">종목별 시장 상황 — 추세 기반 국면 분석 (MA50/200)</div>
 
       {/* 검색 */}
       <div className="flex items-center gap-2">

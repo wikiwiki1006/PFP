@@ -125,7 +125,7 @@ def analyst_feedback(req: AnalystFeedbackRequest):
 
 @router.get("/analyst-feedback/auto")
 def analyst_feedback_auto():
-    """포트폴리오 + 시장 데이터를 자동으로 수집해 AI 피드백 생성."""
+    """포트폴리오 섹터 기반 AI 피드백 생성."""
     from backend.db.portfolio_repo import (
         get_holdings as _db_get_holdings,
         get_trade_log as _db_get_trade_log,
@@ -148,19 +148,48 @@ def analyst_feedback_auto():
     equity_curve = build_equity_curve(holdings, trade_log, close_df)
     metrics      = calculate_metrics(holdings, close_df, equity_curve)
 
-    sector_chgs = get_sector_changes()
-    label_map   = {etf: label for label, etf in GICS_SECTOR_ETFS}
-    sector_list = sorted(
-        [(label_map.get(etf, etf), chg) for etf, chg in sector_chgs.items()],
-        key=lambda x: x[1], reverse=True,
+    # 포트폴리오 보유 종목 섹터 비중 계산
+    sector_weights: dict[str, float] = {}
+    total_cost = sum(
+        h.get("q", 0) * h.get("avg", 0)
+        for t, h in holdings.items() if t != "CASH"
     )
-    sector_summary = ", ".join(f"{s}({c:+.1f}%)" for s, c in sector_list[:2]) if sector_list else "데이터 없음"
+    if total_cost > 0:
+        for t, h in holdings.items():
+            if t == "CASH":
+                continue
+            sec = h.get("sector") or "Other"
+            cost = h.get("q", 0) * h.get("avg", 0)
+            sector_weights[sec] = sector_weights.get(sec, 0) + cost / total_cost
+
+    # 보유 종목 섹터별 ETF 1일 변동률 조회
+    sector_chgs = get_sector_changes()
+    _etf_to_label = {etf: label for label, etf in GICS_SECTOR_ETFS}
+    _label_to_etf = {label: etf for label, etf in GICS_SECTOR_ETFS}
+
+    # 보유 섹터를 비중 내림차순 정렬
+    held_sectors = sorted(sector_weights.items(), key=lambda x: x[1], reverse=True)
+
+    # 섹터별 비중 + 오늘 변동률 조합
+    sector_lines = []
+    for sec, wt in held_sectors[:4]:
+        # GICS label → ETF lookup (대소문자 무시)
+        etf_chg = None
+        for label, etf in GICS_SECTOR_ETFS:
+            if label.lower() in sec.lower() or sec.lower() in label.lower():
+                etf_chg = sector_chgs.get(etf)
+                break
+        chg_str = f"{etf_chg:+.1f}%" if etf_chg is not None else "N/A"
+        sector_lines.append(f"{sec}({wt*100:.0f}%, 오늘{chg_str})")
+
+    portfolio_sector_summary = " / ".join(sector_lines) if sector_lines else "섹터 데이터 없음"
 
     text = get_ai_analyst_feedback(
         vix=metrics.get("vix", 18.0),
         portfolio_beta=metrics.get("portfolio_beta", 1.0),
         today_chg_pct=metrics.get("today_change_pct", 0.0),
-        sector_summary=sector_summary,
+        sector_summary=portfolio_sector_summary,
+        is_portfolio_sectors=True,
     )
     return {"feedback": text, "metrics_snapshot": metrics}
 

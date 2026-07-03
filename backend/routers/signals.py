@@ -286,7 +286,7 @@ def market_regime(
     ticker: str = Query(default="^GSPC", description="분석 티커 (기본: S&P500)"),
     years:  int = Query(default=1, ge=1, le=5, description="표시 기간 (1-5년)"),
 ):
-    """K-means 기반 시장 국면 감지 (Bull/Sideways/Bear). years 범위 내 데이터만 반환."""
+    """MA50/200 골든크로스 기반 시장 국면 감지 (Bull/Sideways/Bear). years 범위 내 데이터만 반환."""
     ticker   = ticker.upper()
     close_df = get_close_df([ticker], period="5y", ttl=300)
 
@@ -501,13 +501,71 @@ def pairs_auto(
             return {"ticker": ticker, **precomputed}
 
     def _compute():
-        universe = get_sp500_universe()
+        import yfinance as yf
+        from backend.db.market_cache import _yf_lock
+
+        universe   = get_sp500_universe()
         candidates = [t for t in universe if t != ticker][:200]
-        close_df = get_close_df([ticker] + candidates, period="2y", ttl=300)
+        close_df   = get_close_df([ticker] + candidates, period="2y", ttl=300)
+
+        # 기준 종목이 S&P500 유니버스에 없어서 DB에 없는 경우 yfinance로 직접 취득
+        if ticker not in close_df.columns:
+            try:
+                with _yf_lock:
+                    raw = yf.download(ticker, period="2y", progress=False,
+                                      auto_adjust=True, threads=False)
+                if not raw.empty:
+                    col = raw["Close"] if isinstance(raw.columns, pd.MultiIndex) else raw.get("Close", raw)
+                    if isinstance(col, pd.DataFrame):
+                        col = col.squeeze()
+                    col = col.rename(ticker)
+                    close_df = pd.concat([close_df, col], axis=1)
+            except Exception as _e:
+                logger.warning(f"pairs-auto yfinance fallback 실패 ({ticker}): {_e}")
+
         return pairs_auto_detail(ticker, close_df, candidates, threshold_pct=threshold_pct, top_n=top_n)
 
     result = _cached(f"pairs_auto::{ticker}::{threshold_pct}::{top_n}", 600, _compute)
     if not result.get("best"):
         raise HTTPException(status_code=400, detail=f"{ticker}에 대한 유사 종목을 찾을 수 없습니다.")
 
-    return {"ticker": ticker, **result}
+    # 섹터 정보: 보유 종목 DB → common_cache → yfinance 순 조회 (TTL 7일)
+    def _get_sector(t: str) -> str:
+        holdings_db = db_get_holdings("default")
+        if t in holdings_db:
+            s = holdings_db[t].get("sector", "")
+            if s and s not in ("", "Other"):
+                return s
+        cached_s = get_common(f"sector_info::{t}")
+        if cached_s:
+            return str(cached_s)
+        try:
+            import yfinance as yf
+            from backend.db.market_cache import _yf_lock, save_common as _save
+            with _yf_lock:
+                info = yf.Ticker(t).fast_info
+            sector = getattr(info, "sector", None) or ""
+            if not sector:
+                with _yf_lock:
+                    full_info = yf.Ticker(t).info
+                sector = full_info.get("sector", "Unknown")
+            if sector:
+                save_common(f"sector_info::{t}", sector, ttl_seconds=7 * 86400)
+            return sector or "Unknown"
+        except Exception:
+            return "Unknown"
+
+    base_sector      = _get_sector(ticker)
+    match_tickers    = [m["ticker"] for m in result.get("matches", [])]
+    sector_map       = {t: _get_sector(t) for t in match_tickers}
+    matches_sectored = [
+        {**m, "sector": sector_map.get(m["ticker"], "Unknown")}
+        for m in result.get("matches", [])
+    ]
+
+    return {
+        "ticker":       ticker,
+        "base_sector":  base_sector,
+        "matches":      matches_sectored,
+        **{k: v for k, v in result.items() if k != "matches"},
+    }

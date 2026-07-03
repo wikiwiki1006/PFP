@@ -6,14 +6,14 @@ import {
 } from 'recharts'
 import ReactMarkdown from 'react-markdown'
 import {
-  Zap, MessageSquare, RefreshCw,
+  MessageSquare, RefreshCw,
   Plus, Trash2, Edit3, Check, X, Play, FileText, ChevronRight,
   PanelRightClose, PanelRightOpen, Download, History,
 } from 'lucide-react'
 import {
   getPortfolioMetrics, getEquityCurve, getHoldingsDetail, getSectorWeights,
-  getMarketSnapshot, getMarketNews, getMacroData, getEarnings, getCorrelation,
-  getAnalystFeedback, getCachedScan, runSignalScan,
+  getMarketSnapshot, getMarketNews, getMacroData, getEarnings,
+  getAnalystFeedback,
   postTrade, updateHolding, deleteHolding, getHoldings,
   generateDailyBrief, getDailyBriefHistory, getDailyBriefFile,
   getIndexPrices, getTrades, updateTrade, deleteTrade, getTickerPrice, searchTickers,
@@ -977,134 +977,6 @@ function SectorsPanel({
   )
 }
 
-// ── Correlation Heatmap ───────────────────────────────────────────────────────
-function CorrelationHeatmap({ data }: { data: { tickers: string[]; labels?: string[]; matrix: number[][] } }) {
-  const [hovered, setHovered] = useState<{ i: number; j: number } | null>(null)
-
-  const label = (t: string, i: number) => {
-    if (data.labels?.[i]) return data.labels[i]
-    return t.replace('^', '').replace('-USD', '').slice(0, 6)
-  }
-
-  const cellColors = (v: number, isDiag: boolean) => {
-    if (isDiag) return { bg: 'rgba(255,255,255,0.04)', text: 'rgba(255,255,255,0.25)', border: 'rgba(255,255,255,0.06)' }
-    const c = Math.max(-1, Math.min(1, v))
-    if (c >= 0) {
-      const a = 0.12 + c * 0.62
-      const textBrightness = c > 0.6 ? '#fca5a5' : c > 0.3 ? '#f87171' : '#94a3b8'
-      return { bg: `rgba(239,68,68,${a.toFixed(2)})`, text: textBrightness, border: `rgba(239,68,68,${(a * 0.6).toFixed(2)})` }
-    } else {
-      const a = 0.12 + (-c) * 0.62
-      const textBrightness = -c > 0.6 ? '#93c5fd' : -c > 0.3 ? '#60a5fa' : '#94a3b8'
-      return { bg: `rgba(59,130,246,${a.toFixed(2)})`, text: textBrightness, border: `rgba(59,130,246,${(a * 0.6).toFixed(2)})` }
-    }
-  }
-
-  const n = data.tickers.length
-  const sz = n <= 8 ? 36 : n <= 12 ? 30 : 25
-  const gap = 3
-  const hv = hovered
-
-  const corrLabel = (v: number) => {
-    const a = Math.abs(v)
-    const dir = v > 0 ? '양의' : '음의'
-    if (a > 0.7) return `강한 ${dir} 상관`
-    if (a > 0.4) return `중간 ${dir} 상관`
-    if (a > 0.15) return `약한 ${dir} 상관`
-    return '무상관'
-  }
-
-  return (
-    <div className="select-none space-y-3">
-      <div className="overflow-auto">
-        <div style={{ display: 'inline-flex', flexDirection: 'column', gap: `${gap}px` }}>
-          <div style={{ display: 'flex', gap: `${gap}px`, paddingLeft: `${sz + gap + 8}px` }}>
-            {data.tickers.map((t, j) => (
-              <div key={j} style={{ width: sz, textAlign: 'center' }}>
-                <span style={{
-                  fontSize: '9px', fontWeight: 700, fontFamily: 'monospace',
-                  color: hv && (hv.i === j || hv.j === j) ? '#cbd5e1' : '#475569',
-                  transition: 'color 0.15s',
-                }}>
-                  {label(t, j)}
-                </span>
-              </div>
-            ))}
-          </div>
-          {data.matrix.map((row, i) => (
-            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: `${gap}px` }}>
-              <div style={{ width: sz, paddingRight: 8, textAlign: 'right' }}>
-                <span style={{
-                  fontSize: '9px', fontWeight: 700, fontFamily: 'monospace',
-                  color: hv && (hv.i === i || hv.j === i) ? '#cbd5e1' : '#475569',
-                  transition: 'color 0.15s',
-                }}>
-                  {label(data.tickers[i], i)}
-                </span>
-              </div>
-              {row.map((v, j) => {
-                const isDiag = i === j
-                const { bg, text, border } = cellColors(v, isDiag)
-                const isHov = hv?.i === i && hv?.j === j
-                return (
-                  <div key={j}
-                    onMouseEnter={() => setHovered({ i, j })}
-                    onMouseLeave={() => setHovered(null)}
-                    style={{
-                      width: sz, height: sz, background: bg, borderRadius: 5,
-                      border: `1px solid ${isHov ? 'rgba(255,255,255,0.25)' : border}`,
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      cursor: 'default',
-                      transition: 'transform 0.08s ease, box-shadow 0.08s ease',
-                      transform: isHov ? 'scale(1.18)' : 'scale(1)',
-                      boxShadow: isHov ? `0 0 10px ${bg}` : 'none',
-                      zIndex: isHov ? 10 : 1, position: 'relative',
-                    }}>
-                    {isDiag ? (
-                      <span style={{ fontSize: 8, color: 'rgba(255,255,255,0.2)', fontWeight: 700 }}>●</span>
-                    ) : (
-                      <span style={{ fontSize: sz >= 32 ? 9 : 8, fontWeight: 700, color: text, fontFamily: 'monospace', lineHeight: 1 }}>
-                        {fn(v)}
-                      </span>
-                    )}
-                  </div>
-                )
-              })}
-            </div>
-          ))}
-        </div>
-      </div>
-      <div style={{ minHeight: 28 }}>
-        {hv && hv.i !== hv.j && (
-          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#0f172a] border border-[#1e293b] text-[11px]">
-            <span className="font-mono font-bold text-[#94a3b8]">{label(data.tickers[hv.i], hv.i)}</span>
-            <span className="text-[#334155]">↔</span>
-            <span className="font-mono font-bold text-[#94a3b8]">{label(data.tickers[hv.j], hv.j)}</span>
-            <span className="text-[#1e293b] mx-1">|</span>
-            <span className={`font-mono font-bold text-[13px] ${data.matrix[hv.i][hv.j] > 0 ? 'text-[#f87171]' : 'text-[#60a5fa]'}`}>
-              {fp(data.matrix[hv.i][hv.j], 4)}
-            </span>
-            <span className="text-[#374151] text-[10px]">{corrLabel(data.matrix[hv.i][hv.j])}</span>
-          </div>
-        )}
-      </div>
-      <div className="flex items-center gap-2 px-1">
-        <span className="text-[9px] text-[#3b82f6] font-bold">-1</span>
-        <div style={{
-          flex: 1, height: 5, borderRadius: 3,
-          background: 'linear-gradient(to right, rgba(59,130,246,0.8) 0%, rgba(59,130,246,0.1) 45%, rgba(239,68,68,0.1) 55%, rgba(239,68,68,0.8) 100%)',
-        }} />
-        <span className="text-[9px] text-[#ef4444] font-bold">+1</span>
-      </div>
-      <div className="flex justify-between px-1">
-        <span className="text-[8px] text-[#3b82f6]">음의 상관</span>
-        <span className="text-[8px] text-[#374151]">무상관</span>
-        <span className="text-[8px] text-[#ef4444]">양의 상관</span>
-      </div>
-    </div>
-  )
-}
-
 // sessionStorage keys
 const SK_CONTENT  = 'pfp_brief_content'
 const SK_FILE     = 'pfp_brief_file'
@@ -1326,8 +1198,8 @@ function DailyBriefPanel() {
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
-const BOT_TABS   = ['Correlation', 'Earnings', 'Macro']
-const RIGHT_TABS = ['Brief', 'AI Feed', 'Signals', 'News']
+const BOT_TABS   = ['Earnings', 'Macro']
+const RIGHT_TABS = ['Brief', 'AI Feed', 'News']
 
 export default function AlphaTerminal() {
   const qc = useQueryClient()
@@ -1348,24 +1220,20 @@ export default function AlphaTerminal() {
   const macroQ    = useQuery({ queryKey: ['macro-data'],        queryFn: getMacroData,           staleTime: 600_000 })
   // analyst-feedback(LLM): AI Feed 탭 활성 시에만 요청 (느린 LLM 호출 — 페이지 로드에서 제외)
   const feedbackQ = useQuery({ queryKey: ['analyst-feedback'],  queryFn: getAnalystFeedback,     staleTime: 300_000, enabled: rightTab === 1 })
-  // 상관관계: Correlation 탭 활성 시에만 요청
-  const corrQ     = useQuery({ queryKey: ['correlation'],       queryFn: () => getCorrelation(), staleTime: 600_000, enabled: botTab === 0 })
-  const scanQ     = useQuery({ queryKey: ['scan'],              queryFn: getCachedScan,           retry: false, staleTime: 300_000 })
-  const scanMut   = useMutation({ mutationFn: () => runSignalScan(10), onSuccess: () => qc.invalidateQueries({ queryKey: ['scan'] }) })
 
   const holdTickers = Object.keys(rawHoldQ.data || {}).filter(t => t !== 'CASH').join(',')
   // 뉴스: News 탭 활성 시에만 요청
   const newsQ = useQuery({
     queryKey: ['market-news', holdTickers],
     queryFn:  () => getMarketNews(holdTickers.split(',').filter(Boolean)),
-    enabled: !!holdTickers && rightTab === 3,
+    enabled: !!holdTickers && rightTab === 2,
     staleTime: 300_000,
   })
   // 실적/배당: Earnings 탭 활성 시에만 요청 (병렬화했지만 여전히 yfinance N개 호출)
   const earningsQ = useQuery({
     queryKey: ['earnings', holdTickers],
     queryFn:  () => getEarnings(holdTickers.split(',').filter(Boolean)),
-    enabled: !!holdTickers && botTab === 1,
+    enabled: !!holdTickers && botTab === 0,
     staleTime: 3600_000,
   })
 
@@ -1428,11 +1296,7 @@ export default function AlphaTerminal() {
               ))}
             </div>
             <div className="p-4">
-              {botTab === 0 && (corrQ.data
-                ? <CorrelationHeatmap data={corrQ.data} />
-                : <span className="text-sm text-[#64748b]">로드 중…</span>
-              )}
-              {botTab === 1 && earningsQ.data && (
+              {botTab === 0 && earningsQ.data && (
                 <table className="w-full">
                   <thead>
                     <tr className="text-[#64748b] border-b border-[#1e2d40]">
@@ -1453,7 +1317,7 @@ export default function AlphaTerminal() {
                   </tbody>
                 </table>
               )}
-              {botTab === 2 && macroQ.data && (
+              {botTab === 1 && macroQ.data && (
                 <div className="grid grid-cols-3 gap-3">
                   {[
                     { label: 'Fed Rate',      value: `${macroQ.data.fed_rate}%` },
@@ -1530,41 +1394,6 @@ export default function AlphaTerminal() {
               )}
 
               {rightTab === 2 && (
-                <div className="h-full overflow-y-auto p-3 space-y-3">
-                  <button onClick={() => scanMut.mutate()} disabled={scanMut.isPending}
-                    className="w-full flex items-center justify-center gap-2 py-2.5 bg-[#3b82f6]/10 border border-[#3b82f6]/25 text-[#3b82f6] text-sm rounded hover:bg-[#3b82f6]/18 disabled:opacity-50 font-bold">
-                    <Zap className="w-4 h-4" />
-                    {scanMut.isPending ? '스캔 중…' : 'SCAN UNIVERSE'}
-                  </button>
-                  {scanQ.data && (
-                    <>
-                      <div className="text-[11px] text-[#10b981] font-bold tracking-widest mt-1">LONG TOP PICKS</div>
-                      {(scanQ.data.long_picks || []).slice(0, 5).map(p => (
-                        <div key={p.ticker} className="bg-[#060b14] border border-[#1e2d40] rounded p-3">
-                          <div className="flex justify-between items-center">
-                            <span className="font-mono font-bold text-base text-[#e2e8f0]">{p.ticker}</span>
-                            <span className="text-sm text-[#10b981] font-mono font-bold">+{fn(p.upside, 1)}%</span>
-                          </div>
-                          <div className="text-[12px] text-[#64748b] mt-0.5">{p.method}</div>
-                          <div className="text-[12px] text-[#4a5568] mt-0.5 truncate">${p.entry} → ${p.target} | stop ${p.stop}</div>
-                        </div>
-                      ))}
-                      <div className="text-[11px] text-[#ef4444] font-bold tracking-widest mt-1">SHORT TOP PICKS</div>
-                      {(scanQ.data.short_picks || []).slice(0, 3).map(p => (
-                        <div key={p.ticker} className="bg-[#060b14] border border-[#1e2d40] rounded p-3">
-                          <div className="flex justify-between items-center">
-                            <span className="font-mono font-bold text-base text-[#e2e8f0]">{p.ticker}</span>
-                            <span className="text-sm text-[#ef4444] font-mono font-bold">{fn(p.downside, 1)}%</span>
-                          </div>
-                          <div className="text-[12px] text-[#64748b] mt-0.5">{p.method}</div>
-                        </div>
-                      ))}
-                    </>
-                  )}
-                </div>
-              )}
-
-              {rightTab === 3 && (
                 <div className="h-full overflow-y-auto divide-y divide-[#0f172a]">
                   {(newsQ.data || []).map((n, i) => (
                     <a key={i} href={n.url} target="_blank" rel="noreferrer"

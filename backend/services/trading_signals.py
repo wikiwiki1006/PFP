@@ -177,12 +177,14 @@ def detect_market_regime(
     slope_window: int = 20,
 ) -> dict:
     """
-    200일 이동평균 기반 시장 국면 감지.
+    MA50/MA200 골든크로스 기반 시장 국면 감지.
 
-    Bull  : 가격 > 200MA  AND  (50MA > 200MA  OR  200MA 기울기 양수)
-    Bear  : 가격 < 200MA  AND  (50MA < 200MA  OR  200MA 기울기 음수)
-    Sideways : 그 외 혼조·박스권
+    Bull     : MA50 > MA200 + 1% (골든크로스 상태)
+    Bear     : MA50 < MA200 - 1% (데드크로스 상태)
+    Sideways : MA50 ≈ MA200 (±1% 이내 혼조 구간)
 
+    크로스 직전/직후의 짧은 혼조 구간을 자연스럽게 처리하며,
+    실제 가격 추세 시각과 국면 레이블이 잘 일치함.
     데이터가 200일 미만이면 20/60 MA 단순 비교로 폴백.
     """
     price = price.dropna()
@@ -192,7 +194,7 @@ def detect_market_regime(
 
     ma_short = price.rolling(short_window).mean()
     ma_long  = price.rolling(long_window).mean()
-    # 200MA 기울기 (slope_window 일 변화율)
+    # 200MA 기울기 (slope_window 일 변화율) — 크로스 ±1% 구간의 타이브레이커
     ma_slope = ma_long.diff(slope_window) / ma_long.shift(slope_window)
 
     labels_list: list[str] = []
@@ -202,23 +204,25 @@ def detect_market_regime(
             labels_list.append("Sideways")
             continue
 
-        p  = float(price.iloc[i])
-        ms = float(ma_short.iloc[i]) if not pd.isna(ma_short.iloc[i]) else ml
-        sl = float(ma_slope.iloc[i]) if not pd.isna(ma_slope.iloc[i]) else 0.0
+        ms  = float(ma_short.iloc[i]) if not pd.isna(ma_short.iloc[i]) else float(ml)
+        ml_ = float(ml)
+        sl  = float(ma_slope.iloc[i]) if not pd.isna(ma_slope.iloc[i]) else 0.0
 
-        above_long  = p  > float(ml)
-        below_long  = p  < float(ml)
-        cross_up    = ms > float(ml)   # 50MA > 200MA (골든크로스 상태)
-        cross_down  = ms < float(ml)   # 50MA < 200MA (데드크로스 상태)
-        slope_up    = sl >  0.001      # 200MA 상향 추세
-        slope_down  = sl < -0.001      # 200MA 하향 추세
+        # MA50/MA200 상대적 갭 비율
+        gap_pct = (ms - ml_) / ml_ if ml_ != 0 else 0.0
 
-        if above_long and (cross_up or slope_up):
+        if gap_pct >= 0.01:        # 50MA가 200MA 대비 1% 이상 위 → Bull
             labels_list.append("Bull")
-        elif below_long and (cross_down or slope_down):
+        elif gap_pct <= -0.01:     # 50MA가 200MA 대비 1% 이상 아래 → Bear
             labels_list.append("Bear")
         else:
-            labels_list.append("Sideways")
+            # ±1% 이내 혼조 구간 — 200MA 기울기로 타이브레이크
+            if sl > 0.002:
+                labels_list.append("Bull")
+            elif sl < -0.002:
+                labels_list.append("Bear")
+            else:
+                labels_list.append("Sideways")
 
     regime_labels  = pd.Series(labels_list, index=price.index)
     current_regime = regime_labels.iloc[-1] if len(regime_labels) > 0 else "Unknown"

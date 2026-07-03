@@ -112,16 +112,35 @@ export default function PairsTradingPanel() {
       {q.data && q.data.best && (
         <>
           {/* 활성 페어 헤더 */}
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm text-[#94a3b8]">기준:</span>
             <span className="font-mono font-bold text-[#e2e8f0]">{q.data.ticker}</span>
-            <span className="text-[#64748b]">↔</span>
-            <span className="font-mono font-bold text-[#3b82f6]">{activePair}</span>
-            {q.data.matches.find(m => m.ticker === activePair) && (
-              <span className="text-[11px] text-[#64748b]">
-                변동성 유사도 {q.data.matches.find(m => m.ticker === activePair)!.correlation.toFixed(3)}
+            {q.data.base_sector && q.data.base_sector !== 'Unknown' && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#f59e0b]/10 text-[#f59e0b] border border-[#f59e0b]/20">
+                {q.data.base_sector}
               </span>
             )}
+            <span className="text-[#64748b]">↔</span>
+            <span className="font-mono font-bold text-[#3b82f6]">{activePair}</span>
+            {(() => {
+              const m = q.data.matches.find(x => x.ticker === activePair)
+              return m ? (
+                <>
+                  {m.sector && m.sector !== 'Unknown' && (
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded border ${
+                      m.sector === q.data.base_sector
+                        ? 'bg-[#10b981]/10 text-[#10b981] border-[#10b981]/20'
+                        : 'bg-[#3b82f6]/10 text-[#3b82f6] border-[#3b82f6]/20'
+                    }`}>
+                      {m.sector}
+                    </span>
+                  )}
+                  <span className="text-[11px] text-[#64748b]">
+                    변동성 유사도 {m.correlation.toFixed(3)}
+                  </span>
+                </>
+              ) : null
+            })()}
           </div>
 
           {/* 상위 5개 유사 종목 클릭 버튼 */}
@@ -132,14 +151,21 @@ export default function PairsTradingPanel() {
                 <button
                   key={m.ticker}
                   onClick={() => setSelectedPair(m.ticker)}
-                  className={`text-[11px] font-mono px-2.5 py-1 rounded border transition-colors ${
+                  className={`text-left text-[11px] font-mono px-2.5 py-1 rounded border transition-colors ${
                     activePair === m.ticker
                       ? 'border-[#3b82f6] bg-[#3b82f6]/10 text-[#3b82f6]'
                       : 'border-[#1e2d40] text-[#94a3b8] hover:border-[#3b82f6]/50 hover:text-[#e2e8f0]'
                   }`}
                 >
-                  {m.ticker}
+                  <span>{m.ticker}</span>
                   <span className="ml-1 text-[10px] opacity-60">{m.correlation.toFixed(2)}</span>
+                  {m.sector && m.sector !== 'Unknown' && (
+                    <span className={`ml-1 text-[9px] opacity-70 ${
+                      m.sector === q.data.base_sector ? 'text-[#10b981]' : ''
+                    }`}>
+                      {m.sector.split(' ')[0]}
+                    </span>
+                  )}
                 </button>
               ))}
             </div>
