@@ -363,10 +363,10 @@ export default function Portfolio() {
                     </td>
                     <td className="py-2.5 px-4 text-right font-mono text-[#e2e8f0]">{t.q}</td>
                     <td className="py-2.5 px-4 text-right font-mono text-[#e2e8f0]">
-                      {formatCurrency(t.price)}
+                      {t.price != null ? formatCurrency(t.price) : '—'}
                     </td>
                     <td className="py-2.5 px-4 text-right font-mono text-[#64748b]">
-                      {formatCurrency(t.q * t.price)}
+                      {t.price != null ? formatCurrency(t.q * t.price) : '—'}
                     </td>
                     <td className="py-2.5 px-4 text-[#64748b] text-xs">{t.memo ?? '—'}</td>
                   </tr>

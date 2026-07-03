@@ -11,7 +11,8 @@ import {
 } from '@/api'
 import { formatCurrency, colorForValue, cn } from '@/lib/utils'
 
-function SignalBadge({ signal }: { signal: string }) {
+function SignalBadge({ signal }: { signal: string | null }) {
+  if (!signal) return null
   const upper = signal?.toUpperCase() ?? ''
   let color = 'bg-[#64748b]/10 text-[#64748b]'
   if (upper.includes('BUY') || upper.includes('LONG') || upper.includes('OVERSOLD'))
@@ -150,7 +151,7 @@ export default function Signals() {
                             {formatCurrency(pick.stop)}
                           </td>
                           <td className="py-2 px-3 text-right font-mono text-[#10b981]">
-                            +{(pick.upside * 100).toFixed(1)}%
+                            {pick.upside != null ? `+${(pick.upside * 100).toFixed(1)}%` : '—'}
                           </td>
                           <td className="py-2 px-3 text-[#64748b] max-w-48 truncate">{pick.reason}</td>
                         </tr>
@@ -210,7 +211,7 @@ export default function Signals() {
                             {formatCurrency(pick.stop)}
                           </td>
                           <td className="py-2 px-3 text-right font-mono text-[#ef4444]">
-                            {(pick.upside * 100).toFixed(1)}%
+                            {pick.upside != null ? `${(pick.upside * 100).toFixed(1)}%` : '—'}
                           </td>
                           <td className="py-2 px-3 text-[#64748b] max-w-48 truncate">{pick.reason}</td>
                         </tr>
@@ -339,7 +340,7 @@ export default function Signals() {
                   <div className="flex items-center justify-between">
                     <span className="text-[#64748b]">Resistance</span>
                     <span className="font-mono text-[#f59e0b]">
-                      {formatCurrency(momQ.data.resistance)}
+                      {momQ.data.resistance != null ? formatCurrency(momQ.data.resistance) : '—'}
                     </span>
                   </div>
                   <div className="flex items-center justify-between">

@@ -1,9 +1,16 @@
 import { AlertTriangle, ShieldCheck } from 'lucide-react'
-import type { DoomRadar } from '@/types'
 import { cn } from '@/lib/utils'
 
+interface DoomRadarLike {
+  is_doom?: boolean
+  severity?: number
+  comment?: string
+  rate_spread?: number
+  hy_spread?: number
+}
+
 interface DoomBannerProps {
-  data: DoomRadar
+  data: DoomRadarLike
   className?: string
 }
 

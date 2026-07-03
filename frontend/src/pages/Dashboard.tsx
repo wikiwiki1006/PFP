@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { TrendingUp, DollarSign, Activity, BarChart2, MessageSquare } from 'lucide-react'
+import { TrendingUp, DollarSign, Activity, BarChart2, MessageSquare, Shield } from 'lucide-react'
 import MetricCard from '@/components/MetricCard'
 import EquityCurveChart from '@/components/charts/EquityCurveChart'
 import LoadingSpinner, { SkeletonCard, ErrorMessage } from '@/components/LoadingSpinner'
