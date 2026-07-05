@@ -2,7 +2,7 @@ import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   AreaChart, Area, PieChart, Pie, Cell, Sector,
-  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceArea,
+  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, ReferenceArea,
 } from 'recharts'
 import ReactMarkdown from 'react-markdown'
 import {
@@ -108,7 +108,11 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
   // ── 줌 상태 ─────────────────────────────────────────────────────────────
   const [dragSel,    setDragSel]    = useState<{ left: string; right: string } | null>(null)
   const [zoomDomain, setZoomDomain] = useState<{ left: string; right: string } | null>(null)
+  const [yDomain,    setYDomain]    = useState<[number, number] | ['auto', 'auto']>(['auto', 'auto'])
   const dragging = useRef(false)
+
+  // ── 십자선 상태 ──────────────────────────────────────────────────────────
+  const [crosshair, setCrosshair] = useState<{ x: string; y: number } | null>(null)
 
   const rangeToPeriod = { '1M': '3mo', '3M': '6mo', '1Y': '2y', 'ALL': '5y' } as const
 
@@ -185,11 +189,21 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
   const handleMouseDown = (e: any) => {
     if (!e?.activeLabel) return
     dragging.current = true
+    setCrosshair(null)
     setDragSel({ left: e.activeLabel, right: e.activeLabel })
   }
-  const handleMouseMove = (e: any) => {
-    if (!dragging.current || !e?.activeLabel) return
-    setDragSel(prev => prev ? { ...prev, right: e.activeLabel } : null)
+  const handleChartMouseMove = (e: any) => {
+    if (!e?.activeLabel) { setCrosshair(null); return }
+    // 드래그 중: 선택 영역 업데이트
+    if (dragging.current) {
+      setDragSel(prev => prev ? { ...prev, right: e.activeLabel } : null)
+      return
+    }
+    // 드래그 아님: 십자선 업데이트
+    const portEntry = e?.activePayload?.find((p: any) => p.dataKey === 'port')
+    if (portEntry != null) {
+      setCrosshair({ x: e.activeLabel, y: portEntry.value })
+    }
   }
   const handleMouseUp = () => {
     dragging.current = false
@@ -198,10 +212,23 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
         ? [dragSel.left, dragSel.right]
         : [dragSel.right, dragSel.left]
       setZoomDomain({ left: l, right: r })
+      // 선택 영역의 모든 시리즈 Y값으로 도메인 계산
+      const sub = data.filter(d => d.date >= l && d.date <= r)
+      const vals = sub.flatMap(d => [
+        d.port,
+        ...(d.sp != null ? [d.sp] : []),
+        ...(d.nasdaq != null ? [d.nasdaq] : []),
+      ])
+      if (vals.length > 0) {
+        const minV = Math.min(...vals)
+        const maxV = Math.max(...vals)
+        const pad  = Math.max((maxV - minV) * 0.1, 0.3)
+        setYDomain([minV - pad, maxV + pad])
+      }
     }
     setDragSel(null)
   }
-  const resetZoom   = () => { setZoomDomain(null); setDragSel(null) }
+  const resetZoom   = () => { setZoomDomain(null); setDragSel(null); setYDomain(['auto', 'auto']) }
   const changeRange = (r: typeof range) => { setRange(r); resetZoom() }
   const selLeft  = dragSel && dragSel.left <= dragSel.right ? dragSel.left  : dragSel?.right
   const selRight = dragSel && dragSel.left <= dragSel.right ? dragSel.right : dragSel?.left
@@ -380,8 +407,9 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart data={displayData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}
           onMouseDown={handleMouseDown}
-          onMouseMove={handleMouseMove}
+          onMouseMove={handleChartMouseMove}
           onMouseUp={handleMouseUp}
+          onMouseLeave={() => setCrosshair(null)}
           onDoubleClick={resetZoom}
           style={{ cursor: 'crosshair' }}
         >
@@ -411,6 +439,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
             tickLine={false} axisLine={false}
             tickFormatter={v => `${v.toFixed(1)}%`}
             width={52}
+            domain={yDomain}
           />
           <Tooltip content={renderTooltip} />
           {(bm === 'sp500' || bm === 'both') && (
@@ -429,6 +458,15 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
             dot={tradeDot}
             activeDot={{ r: 5, fill: '#00e6ff', stroke: '#fff', strokeWidth: 2 }}
             isAnimationActive={false} />
+          {/* 십자선 — 드래그 중이 아닐 때만 표시 */}
+          {crosshair && !dragSel && (
+            <>
+              <ReferenceLine x={crosshair.x}
+                stroke="rgba(255,255,255,0.18)" strokeWidth={1} />
+              <ReferenceLine y={crosshair.y}
+                stroke="rgba(255,255,255,0.18)" strokeWidth={1} />
+            </>
+          )}
           {/* 드래그 줌 선택 영역 */}
           {dragSel && selLeft && selRight && selLeft !== selRight && (
             <ReferenceArea x1={selLeft} x2={selRight}
