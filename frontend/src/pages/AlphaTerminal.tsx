@@ -106,13 +106,18 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
   const [bm,    setBm]    = useState<BenchmarkMode>('sp500')
 
   // ── 줌 상태 ─────────────────────────────────────────────────────────────
-  const [dragSel,    setDragSel]    = useState<{ left: string; right: string } | null>(null)
+  const [dragBounds, setDragBounds] = useState<{
+    left: string; right: string; startY: number; endY: number
+  } | null>(null)
   const [zoomDomain, setZoomDomain] = useState<{ left: string; right: string } | null>(null)
   const [yDomain,    setYDomain]    = useState<[number, number] | ['auto', 'auto']>(['auto', 'auto'])
-  const dragging = useRef(false)
+  const dragging         = useRef(false)
+  const chartContainerRef = useRef<HTMLDivElement>(null)
+  const chartMouseYRef    = useRef<number>(0)
 
   // ── 십자선 상태 ──────────────────────────────────────────────────────────
-  const [crosshair, setCrosshair] = useState<{ x: string; y: number } | null>(null)
+  const [crosshairX,  setCrosshairX]  = useState<string | null>(null)
+  const [chartMouseY, setChartMouseY] = useState<number | null>(null)
 
   const rangeToPeriod = { '1M': '3mo', '3M': '6mo', '1Y': '2y', 'ALL': '5y' } as const
 
@@ -171,6 +176,25 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
     return data.filter(d => d.date >= zoomDomain.left && d.date <= zoomDomain.right)
   }, [data, zoomDomain])
 
+  // 현재 Y 범위 — pixel→data 변환 기준 (auto일 땐 displayData에서 계산)
+  const computedYRange = useMemo((): [number, number] => {
+    if (yDomain[0] !== 'auto') return yDomain as [number, number]
+    const vals = displayData.flatMap(d =>
+      [d.port, d.sp, d.nasdaq].filter((v): v is number => v != null)
+    )
+    if (!vals.length) return [-10, 10]
+    const minV = Math.min(...vals), maxV = Math.max(...vals)
+    const pad = Math.max((maxV - minV) * 0.1, 0.5)
+    return [minV - pad, maxV + pad]
+  }, [yDomain, displayData])
+
+  // chart 컨테이너 픽셀 Y → 데이터 값 (margin.top=8, plotH=272=300-8-20xaxis)
+  const pixelYToData = (py: number): number => {
+    const [dMin, dMax] = computedYRange
+    const ratio = Math.max(0, Math.min(1, (py - 8) / 272))
+    return dMax - ratio * (dMax - dMin)
+  }
+
   const last     = displayData[displayData.length - 1]
   const first    = displayData[0]
   // port / sp / nasdaq는 이미 % 값이므로 구간 수익률은 차이로 계산
@@ -185,53 +209,58 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
     { key: 'both',   label: 'BOTH', color: '#f59e0b' },
   ]
 
-  // ── 드래그 줌 핸들러 ─────────────────────────────────────────────────────
+  // ── native 마우스 핸들러 (chart 컨테이너에 부착 — 실제 픽셀 Y 추적) ─────
+  const handleNativeMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    const rect = chartContainerRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const py = e.clientY - rect.top
+    chartMouseYRef.current = py
+    setChartMouseY(py)
+  }
+  const handleNativeMouseLeave = () => {
+    setChartMouseY(null)
+    setCrosshairX(null)
+    chartMouseYRef.current = 0
+  }
+
+  // ── 드래그 줌 핸들러 (Recharts 이벤트 — activeLabel로 X 추적) ─────────────
   const handleMouseDown = (e: any) => {
     if (!e?.activeLabel) return
     dragging.current = true
-    setCrosshair(null)
-    setDragSel({ left: e.activeLabel, right: e.activeLabel })
+    const sy = chartMouseYRef.current
+    setCrosshairX(null)
+    setDragBounds({ left: e.activeLabel, right: e.activeLabel, startY: sy, endY: sy })
   }
   const handleChartMouseMove = (e: any) => {
-    if (!e?.activeLabel) { setCrosshair(null); return }
-    // 드래그 중: 선택 영역 업데이트
+    if (!e?.activeLabel) { setCrosshairX(null); return }
     if (dragging.current) {
-      setDragSel(prev => prev ? { ...prev, right: e.activeLabel } : null)
+      setDragBounds(prev => prev
+        ? { ...prev, right: e.activeLabel, endY: chartMouseYRef.current }
+        : null)
       return
     }
-    // 드래그 아님: 십자선 업데이트
-    const portEntry = e?.activePayload?.find((p: any) => p.dataKey === 'port')
-    if (portEntry != null) {
-      setCrosshair({ x: e.activeLabel, y: portEntry.value })
-    }
+    setCrosshairX(e.activeLabel)
   }
   const handleMouseUp = () => {
     dragging.current = false
-    if (dragSel && dragSel.left !== dragSel.right) {
-      const [l, r] = dragSel.left <= dragSel.right
-        ? [dragSel.left, dragSel.right]
-        : [dragSel.right, dragSel.left]
+    if (dragBounds && dragBounds.left !== dragBounds.right) {
+      const [l, r] = dragBounds.left <= dragBounds.right
+        ? [dragBounds.left, dragBounds.right]
+        : [dragBounds.right, dragBounds.left]
       setZoomDomain({ left: l, right: r })
-      // 선택 영역의 모든 시리즈 Y값으로 도메인 계산
-      const sub = data.filter(d => d.date >= l && d.date <= r)
-      const vals = sub.flatMap(d => [
-        d.port,
-        ...(d.sp != null ? [d.sp] : []),
-        ...(d.nasdaq != null ? [d.nasdaq] : []),
-      ])
-      if (vals.length > 0) {
-        const minV = Math.min(...vals)
-        const maxV = Math.max(...vals)
-        const pad  = Math.max((maxV - minV) * 0.1, 0.3)
-        setYDomain([minV - pad, maxV + pad])
-      }
+      // pixel Y → data Y 로 변환해 Y 도메인 설정
+      const minPy = Math.min(dragBounds.startY, dragBounds.endY)
+      const maxPy = Math.max(dragBounds.startY, dragBounds.endY)
+      const yHigh = pixelYToData(minPy)
+      const yLow  = pixelYToData(maxPy)
+      if (yHigh > yLow) setYDomain([yLow, yHigh])
     }
-    setDragSel(null)
+    setDragBounds(null)
   }
-  const resetZoom   = () => { setZoomDomain(null); setDragSel(null); setYDomain(['auto', 'auto']) }
+  const resetZoom   = () => { setZoomDomain(null); setDragBounds(null); setYDomain(['auto', 'auto']) }
   const changeRange = (r: typeof range) => { setRange(r); resetZoom() }
-  const selLeft  = dragSel && dragSel.left <= dragSel.right ? dragSel.left  : dragSel?.right
-  const selRight = dragSel && dragSel.left <= dragSel.right ? dragSel.right : dragSel?.left
+  const selLeft  = dragBounds && dragBounds.left  <= dragBounds.right ? dragBounds.left  : dragBounds?.right
+  const selRight = dragBounds && dragBounds.left  <= dragBounds.right ? dragBounds.right : dragBounds?.left
 
   // ── 커스텀 툴팁 (useCallback으로 메모이즈 — 컴포넌트 재생성 방지) ─────────
   const renderTooltip = useCallback(({ active, payload, label }: any) => {
@@ -403,13 +432,17 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
       )}
 
       {!curveQ.isLoading && data.length > 0 && (
-      <div style={{ width: '100%', height: 300 }}>
+      <div
+        ref={chartContainerRef}
+        style={{ width: '100%', height: 300 }}
+        onMouseMove={handleNativeMouseMove}
+        onMouseLeave={handleNativeMouseLeave}
+      >
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart data={displayData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}
           onMouseDown={handleMouseDown}
           onMouseMove={handleChartMouseMove}
           onMouseUp={handleMouseUp}
-          onMouseLeave={() => setCrosshair(null)}
           onDoubleClick={resetZoom}
           style={{ cursor: 'crosshair' }}
         >
@@ -458,20 +491,23 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
             dot={tradeDot}
             activeDot={{ r: 5, fill: '#00e6ff', stroke: '#fff', strokeWidth: 2 }}
             isAnimationActive={false} />
-          {/* 십자선 — 드래그 중이 아닐 때만 표시 */}
-          {crosshair && !dragSel && (
+          {/* 십자선 — 드래그 중이 아닐 때 마우스 실제 위치 */}
+          {crosshairX && chartMouseY != null && !dragBounds && (
             <>
-              <ReferenceLine x={crosshair.x}
-                stroke="rgba(255,255,255,0.18)" strokeWidth={1} />
-              <ReferenceLine y={crosshair.y}
-                stroke="rgba(255,255,255,0.18)" strokeWidth={1} />
+              <ReferenceLine x={crosshairX}
+                stroke="rgba(255,255,255,0.22)" strokeWidth={1} />
+              <ReferenceLine y={pixelYToData(chartMouseY)}
+                stroke="rgba(255,255,255,0.22)" strokeWidth={1} />
             </>
           )}
-          {/* 드래그 줌 선택 영역 */}
-          {dragSel && selLeft && selRight && selLeft !== selRight && (
-            <ReferenceArea x1={selLeft} x2={selRight}
+          {/* 드래그 줌 선택 직사각형 (X + Y 모두 표시) */}
+          {dragBounds && selLeft && selRight && selLeft !== selRight && (
+            <ReferenceArea
+              x1={selLeft} x2={selRight}
+              y1={pixelYToData(dragBounds.startY)}
+              y2={pixelYToData(dragBounds.endY)}
               fill="#3b82f6" fillOpacity={0.12}
-              stroke="#3b82f6" strokeOpacity={0.4} strokeWidth={1}
+              stroke="#3b82f6" strokeOpacity={0.5} strokeWidth={1}
             />
           )}
         </AreaChart>
