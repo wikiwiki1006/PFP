@@ -437,6 +437,187 @@ def get_holdings_detail(holdings: dict, close_df: pd.DataFrame) -> list[dict]:
     return rows
 
 
+# ── 수익률(%) 커브 ─────────────────────────────────────────────────────────────
+
+def build_return_pct_curve(
+    holdings: dict,
+    trade_log: list,
+    close_df: pd.DataFrame,
+) -> "tuple[pd.Series, dict[str, list[dict]]]":
+    """
+    주식 포트폴리오의 날짜별 누적 수익률(%) 시계열 반환.
+    (총 평가액 / 총 매입원가 - 1) × 100, 현금(CASH) 제외.
+    """
+    if close_df.empty:
+        return pd.Series(dtype=float), {}
+
+    today = pd.Timestamp.today().normalize()
+    if close_df.index[-1] < today:
+        extended_idx = pd.DatetimeIndex(list(close_df.index) + [today])
+        close_df = close_df.reindex(extended_idx).ffill()
+
+    prices = close_df.ffill()
+    idx = close_df.index
+
+    current_tickers = {t for t in holdings if t != "CASH"}
+
+    if trade_log:
+        log_df = pd.DataFrame(trade_log)
+        log_df["date"] = pd.to_datetime(log_df["date"]).dt.normalize()
+        sort_keys = ["date", "id"] if "id" in log_df.columns else ["date"]
+        log_df = log_df.sort_values(sort_keys).reset_index(drop=True)
+
+        stock_log = log_df[~log_df["ticker"].str.upper().isin(["CASH", ""])]
+        traded_tickers = set(stock_log["ticker"].str.upper().tolist())
+        all_tickers = sorted((traded_tickers | current_tickers) & set(prices.columns))
+
+        logged_tickers = set(stock_log["ticker"].str.upper().tolist())
+        static_qty: dict[str, float] = {
+            t: float(holdings[t]["q"])
+            for t in all_tickers
+            if t not in logged_tickers and holdings.get(t, {}).get("q", 0) > 0
+        }
+        static_avg: dict[str, float] = {
+            t: _safe(holdings[t].get("avg", 0))
+            for t in static_qty
+        }
+
+        events_by_pos: dict[int, list] = {}
+        for _, row in stock_log.iterrows():
+            pos = int(idx.searchsorted(row["date"], side="left"))
+            if pos < len(idx):
+                events_by_pos.setdefault(pos, []).append(row)
+    else:
+        all_tickers = sorted(current_tickers & set(prices.columns))
+        static_qty = {t: float(holdings[t]["q"]) for t in all_tickers}
+        static_avg = {t: _safe(holdings[t].get("avg", 0)) for t in all_tickers}
+        events_by_pos = {}
+
+    if not all_tickers:
+        return pd.Series(dtype=float), {}
+
+    running_qty: dict[str, float] = {t: static_qty.get(t, 0.0) for t in all_tickers}
+    running_avg: dict[str, float] = {
+        t: static_avg.get(t, _safe(holdings.get(t, {}).get("avg", 0)))
+        for t in all_tickers
+    }
+
+    return_pct_arr = np.zeros(len(idx), dtype=float)
+    holdings_by_date: dict[str, list[dict]] = {}
+
+    for i in range(len(idx)):
+        for row in events_by_pos.get(i, []):
+            ticker = str(row.get("ticker", "")).upper()
+            trade_type = str(row.get("type", "")).upper()
+            q = float(row.get("q", 0))
+            pr = float(row.get("price") or 0)
+
+            if ticker in running_qty:
+                if trade_type in ("ADD", "BUY"):
+                    prev_qty = running_qty[ticker]
+                    prev_avg = running_avg[ticker]
+                    new_qty = prev_qty + q
+                    running_avg[ticker] = (
+                        (prev_qty * prev_avg + q * pr) / new_qty if new_qty > 0 else 0.0
+                    )
+                    running_qty[ticker] = new_qty
+                elif trade_type in ("SOLD", "SELL"):
+                    running_qty[ticker] = max(0.0, running_qty[ticker] - q)
+                    if running_qty[ticker] == 0:
+                        running_avg[ticker] = 0.0
+                elif trade_type == "UPDATE":
+                    running_qty[ticker] = max(0.0, q)
+
+        row_prices = prices.iloc[i]
+        total_cost = sum(running_qty[t] * running_avg[t] for t in all_tickers)
+        total_val  = sum(running_qty[t] * _safe(row_prices.get(t, 0)) for t in all_tickers)
+
+        return_pct_arr[i] = _safe(
+            (total_val / total_cost - 1) * 100 if total_cost > 0 else 0.0
+        )
+
+        date_str = idx[i].strftime("%Y-%m-%d")
+        holdings_by_date[date_str] = [
+            {
+                "ticker": t,
+                "return_pct": round(_safe(
+                    (_safe(row_prices.get(t, 0)) / running_avg[t] - 1) * 100
+                    if running_avg[t] > 0 else 0.0
+                ), 2),
+                "price": round(_safe(row_prices.get(t, 0)), 2),
+            }
+            for t in all_tickers
+            if running_qty[t] > 0
+        ]
+
+    return pd.Series(return_pct_arr, index=idx, dtype=float), holdings_by_date
+
+
+def return_pct_to_records(
+    return_pct: pd.Series,
+    holdings_by_date: dict,
+    close_df: "pd.DataFrame | None" = None,
+    trade_markers: "list | None" = None,
+) -> list[dict]:
+    """
+    수익률(%) 시계열을 API 응답용 레코드 리스트로 변환.
+    S&P 500도 같은 시작일 기준 % 수익률로 변환해 포함.
+    """
+    if return_pct.empty:
+        return []
+
+    # 첫 보유 종목이 있는 날부터 표시
+    first_date = None
+    for date_str in sorted(holdings_by_date.keys()):
+        if holdings_by_date[date_str]:
+            first_date = pd.Timestamp(date_str)
+            break
+    if first_date is None:
+        return []
+
+    curve = return_pct.loc[return_pct.index >= first_date]
+    if curve.empty:
+        return []
+
+    # S&P 500: 같은 시작일 기준 수익률(%)
+    sp_return = None
+    if close_df is not None and "^GSPC" in close_df.columns:
+        b = close_df["^GSPC"].reindex(curve.index).ffill().bfill()
+        b_clean = b.dropna()
+        if len(b_clean) > 0:
+            b_first = float(b_clean.iloc[0])
+            if b_first > 0:
+                sp_return = (b / b_first - 1) * 100
+
+    trade_by_date: dict = {}
+    for tr in (trade_markers or []):
+        d = tr.get("date", "")
+        trade_by_date.setdefault(d, []).append({
+            "ticker": tr.get("ticker", ""),
+            "type":   tr.get("type", ""),
+            "q":      tr.get("q", 0),
+            "price":  tr.get("price", 0),
+        })
+
+    records = []
+    for date, pct in curve.items():
+        if pd.isna(pct):
+            continue
+        date_str = date.strftime("%Y-%m-%d")
+        sp_val = None
+        if sp_return is not None and date in sp_return.index:
+            v = sp_return.loc[date]
+            sp_val = None if pd.isna(v) else round(float(v), 2)
+        records.append({
+            "date":     date_str,
+            "port":     round(float(pct), 2),
+            "sp":       sp_val,
+            "trades":   trade_by_date.get(date_str, []),
+            "holdings": holdings_by_date.get(date_str, []),
+        })
+    return records
+
+
 # ── 팩터 분석 (Fama-French 스타일) ────────────────────────────────────────────
 
 def factor_analysis(portfolio_returns: pd.Series, close_df: pd.DataFrame) -> dict:

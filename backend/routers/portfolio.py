@@ -27,6 +27,8 @@ from backend.services.portfolio_calculator import (
     equity_curve_to_records,
     calculate_metrics,
     get_holdings_detail,
+    build_return_pct_curve,
+    return_pct_to_records,
 )
 
 router = APIRouter(prefix="/api/portfolio", tags=["portfolio"])
@@ -600,18 +602,8 @@ def get_equity_curve(
     if not holdings:
         raise HTTPException(status_code=400, detail="보유 종목 없음")
     close_df = _portfolio_close_df(holdings, period="2y", ttl=300)
-    equity_curve = build_equity_curve(holdings, trade_log, close_df)
 
-    # 현금 입출금 이벤트 (날짜 → 금액): 노란 수직선 + 벤치마크 리인덱싱에 사용
-    cash_event_amounts: dict = {}
-    for tr in (trade_log or []):
-        if str(tr.get("ticker", "")).upper() == "CASH" \
-                and tr.get("type", "") in ("DEPOSIT", "WITHDRAW"):
-            d   = tr.get("date", "")
-            amt = float(tr.get("q", 0))
-            if tr["type"] == "WITHDRAW":
-                amt = -amt
-            cash_event_amounts[d] = round(cash_event_amounts.get(d, 0.0) + amt, 2)
+    return_pct, holdings_by_date = build_return_pct_curve(holdings, trade_log, close_df)
 
     # 주식 매매 포인트 마커 (매수/매도 날짜에 점 표시용)
     trade_markers = [
@@ -621,7 +613,7 @@ def get_equity_curve(
         and float(tr.get("price") or 0) > 0
     ]
 
-    return equity_curve_to_records(equity_curve, close_df, cash_event_amounts, trade_markers)
+    return return_pct_to_records(return_pct, holdings_by_date, close_df, trade_markers)
 
 
 @router.get("/holdings-detail")
