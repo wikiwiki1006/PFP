@@ -83,6 +83,10 @@ def delete_holding(ticker: str, user_id: str = "default"):
                     "DELETE FROM holdings WHERE user_id=%s AND ticker=%s",
                     (user_id, ticker),
                 )
+                cur.execute(
+                    "DELETE FROM trade_log WHERE user_id=%s AND ticker=%s",
+                    (user_id, ticker),
+                )
     except Exception as e:
         logger.error(f"DB delete_holding({ticker}) 실패: {e}")
 

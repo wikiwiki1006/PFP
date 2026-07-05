@@ -124,6 +124,17 @@ def get_close_df(tickers: list[str], period: str = "2y", ttl: int = 300, include
     if is_available():
         db_df = get_prices_from_db(all_tickers, period)
         if db_df is not None and not db_df.empty:
+            # DB에 전혀 없는 신규 티커(예: 방금 매수한 종목)는 즉시 동기 수집
+            missing = [t for t in all_tickers if t not in db_df.columns]
+            if missing:
+                try:
+                    from backend.db.market_cache import _yf_download_batched
+                    fresh = _yf_download_batched(missing, period=period, inter_batch_sleep=0.5)
+                    if not fresh.empty:
+                        save_prices_to_db(fresh.ffill().dropna(axis=1, how="all"))
+                        db_df = pd.concat([db_df, fresh], axis=1)
+                except Exception as e:
+                    _logger.warning(f"신규 티커 즉시 수집 실패: {e}")
             _cache[mem_key] = (now, db_df)
             # stale 티커를 백그라운드에서 비동기 갱신 (max_age 22h: daily 업데이트 주기 기준)
             stale = get_stale_tickers(all_tickers, max_age_hours=22)

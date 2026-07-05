@@ -102,6 +102,9 @@ def get_prices_from_db(tickers: list[str], period: str = "2y") -> Optional[pd.Da
         pivot = df.pivot(index="date", columns="ticker", values="close")
         pivot.index.name = None
         pivot.columns.name = None
+        # 티커마다 업데이트 주기가 달라 최신 행에 NaN이 생길 수 있음.
+        # ffill로 마지막 유효 가격을 이월해 price=0 반환을 방지한다.
+        pivot = pivot.ffill()
         return pivot
     except Exception as e:
         logger.warning(f"DB get_prices_from_db 실패: {e}")
