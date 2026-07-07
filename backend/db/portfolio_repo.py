@@ -72,7 +72,8 @@ def save_holding(
         logger.error(f"DB save_holding({ticker}) 실패: {e}")
 
 
-def delete_holding(ticker: str, user_id: str = "default"):
+def delete_holding(ticker: str, user_id: str = "default", with_trades: bool = False):
+    """보유 종목 삭제. with_trades=True 일 때만 거래 이력도 함께 삭제."""
     if not is_available():
         logger.error(f"DB 미연결 — {ticker} 삭제 실패")
         return
@@ -83,10 +84,11 @@ def delete_holding(ticker: str, user_id: str = "default"):
                     "DELETE FROM holdings WHERE user_id=%s AND ticker=%s",
                     (user_id, ticker),
                 )
-                cur.execute(
-                    "DELETE FROM trade_log WHERE user_id=%s AND ticker=%s",
-                    (user_id, ticker),
-                )
+                if with_trades:
+                    cur.execute(
+                        "DELETE FROM trade_log WHERE user_id=%s AND ticker=%s",
+                        (user_id, ticker),
+                    )
     except Exception as e:
         logger.error(f"DB delete_holding({ticker}) 실패: {e}")
 

@@ -14,7 +14,7 @@ import {
   getPortfolioMetrics, getEquityCurve, getHoldingsDetail, getSectorWeights,
   getMarketSnapshot, getMarketNews, getMacroData, getEarnings,
   getAnalystFeedback,
-  postTrade, updateHolding, deleteHolding, getHoldings,
+  postTrade, addHolding, updateHolding, deleteHolding, getHoldings,
   generateDailyBrief, getDailyBriefHistory, getDailyBriefFile,
   getIndexPrices, getTrades, updateTrade, deleteTrade, getTickerPrice, searchTickers,
   autoDetectSectors,
@@ -187,6 +187,18 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
     const pad = Math.max((maxV - minV) * 0.1, 0.5)
     return [minV - pad, maxV + pad]
   }, [yDomain, displayData])
+
+  // XAxis에 보여줄 날짜 레이블 — 대략 6개, 첫/마지막 포함, 두번째~끝 인덱스 생략 없음
+  const xAxisTicks = useMemo(() => {
+    const n = displayData.length
+    if (n <= 1) return displayData.map(d => d.date)
+    const TARGET = 6
+    const step = Math.max(1, Math.round((n - 1) / (TARGET - 1)))
+    const ticks: string[] = []
+    for (let i = 0; i < n - 1; i += step) ticks.push(displayData[i].date)
+    ticks.push(displayData[n - 1].date)
+    return ticks
+  }, [displayData])
 
   // chart 컨테이너 픽셀 Y → 데이터 값 (margin.top=8, plotH=272=300-8-20xaxis)
   const pixelYToData = (py: number): number => {
@@ -464,7 +476,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
           <XAxis dataKey="date"
             tick={{ fill: '#64748b', fontSize: 11 }}
             tickLine={false} axisLine={false}
-            interval="preserveStartEnd"
+            ticks={xAxisTicks}
             tickFormatter={fmtCurveDate}
           />
           <YAxis
@@ -519,7 +531,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
 }
 
 // ── Holdings + History Panel ──────────────────────────────────────────────────
-function HoldingsPanel({ holdQ }: { holdQ: any }) {
+function HoldingsPanel({ holdQ, rawHoldings }: { holdQ: any; rawHoldings: Record<string, any> }) {
   const qc = useQueryClient()
   const [view, setView] = useState<'holdings' | 'history'>('holdings')
 
@@ -557,6 +569,32 @@ function HoldingsPanel({ holdQ }: { holdQ: any }) {
       autoSectorRan.current = true  // 이미 모두 분류됨
     }
   }, [holdQ.data, holdQ.isLoading, qc])
+
+  // ── Cash state ─────────────────────────────────────────────────────────
+  const cashBalance = _safe((rawHoldings?.CASH as any)?.q)
+  const hasCash     = 'CASH' in (rawHoldings || {})
+  const [cashOpen,  setCashOpen]  = useState(false)
+  const [cashAmt,   setCashAmt]   = useState(0)
+  const [cashDate,  setCashDate]  = useState(new Date().toISOString().slice(0, 10))
+  const [cashType,  setCashType]  = useState<'deposit' | 'withdraw'>('deposit')
+  const cashMut = useMutation({
+    mutationFn: () => {
+      if (!hasCash) {
+        return addHolding('CASH', { q: cashAmt, avg: 1, sector: 'Cash', date: cashDate })
+      }
+      const newQ = cashType === 'deposit'
+        ? cashBalance + cashAmt
+        : Math.max(0, cashBalance - cashAmt)
+      return updateHolding('CASH', { q: newQ, avg: 1, date: cashDate })
+    },
+    onSuccess: () => {
+      setCashOpen(false); setCashAmt(0)
+      qc.invalidateQueries({ queryKey: ['holdings-raw'] })
+      qc.invalidateQueries({ queryKey: ['equity-curve'] })
+      qc.invalidateQueries({ queryKey: ['portfolio-metrics'] })
+    },
+    onError: (e: any) => alert(`현금 설정 실패: ${e?.response?.data?.detail || e.message}`),
+  })
 
   // ── Trade form state ───────────────────────────────────────────────────
   const todayStr = useMemo(() => new Date().toISOString().slice(0, 10), [])
@@ -875,6 +913,59 @@ function HoldingsPanel({ holdQ }: { holdQ: any }) {
                 ))}
               </tbody>
             </table>
+          </div>
+
+          {/* 현금 잔고 */}
+          <div className="flex-shrink-0 border-t border-[#1e2d40] px-3 py-2 bg-[#060b14]">
+            {!cashOpen ? (
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] text-[#64748b] font-bold tracking-wider uppercase">
+                  현금 잔고
+                </span>
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-[13px] text-[#94a3b8]">
+                    {hasCash ? `$${cashBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—'}
+                  </span>
+                  <button
+                    onClick={() => { setCashOpen(true); setCashType('deposit'); setCashAmt(0) }}
+                    className="text-[11px] text-[#3b82f6] hover:text-[#60a5fa] border border-[#1e3a5f] rounded px-2 py-0.5 transition-colors">
+                    {hasCash ? '입금/출금' : '+ 초기 투자금 설정'}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[11px] text-[#64748b] font-bold">현금</span>
+                <select
+                  value={cashType}
+                  onChange={e => setCashType(e.target.value as 'deposit' | 'withdraw')}
+                  className="bg-[#0b1220] border border-[#1e2d40] text-[12px] text-[#94a3b8] rounded px-2 py-1 focus:outline-none">
+                  <option value="deposit">입금</option>
+                  <option value="withdraw">출금</option>
+                </select>
+                <input
+                  type="number"
+                  value={cashAmt || ''}
+                  onChange={e => setCashAmt(+e.target.value)}
+                  placeholder="금액"
+                  min={0}
+                  className="w-28 bg-[#0b1220] border border-[#1e2d40] text-[12px] font-mono text-[#e2e8f0] rounded px-2 py-1 focus:outline-none focus:border-[#3b82f6]"
+                />
+                <input
+                  type="date"
+                  value={cashDate}
+                  onChange={e => setCashDate(e.target.value)}
+                  className="bg-[#0b1220] border border-[#1e2d40] text-[12px] text-[#94a3b8] rounded px-2 py-1 [color-scheme:dark] focus:outline-none"
+                />
+                <button
+                  onClick={() => { if (cashAmt > 0 && !cashMut.isPending) cashMut.mutate() }}
+                  disabled={!cashAmt || cashMut.isPending}
+                  className="bg-[#1d4ed8]/80 hover:bg-[#2563eb] disabled:opacity-40 text-white rounded px-3 py-1 text-[12px] font-bold transition-colors">
+                  {cashMut.isPending ? '…' : '확인'}
+                </button>
+                <button onClick={() => setCashOpen(false)} className="text-[#64748b] hover:text-[#94a3b8] text-[12px]">취소</button>
+              </div>
+            )}
           </div>
 
           {/* 거래 입력 폼 */}
@@ -1484,7 +1575,7 @@ export default function AlphaTerminal() {
           {/* B: Holdings + Sectors */}
           <div className="flex border-b border-[#1e2d40]" style={{ height: '330px' }}>
             <div className="border-r border-[#1e2d40] overflow-hidden" style={{ width: '55%' }}>
-              <HoldingsPanel holdQ={holdQ} />
+              <HoldingsPanel holdQ={holdQ} rawHoldings={rawHoldQ.data || {}} />
             </div>
             <div className="overflow-hidden" style={{ width: '45%' }}>
               <SectorsPanel

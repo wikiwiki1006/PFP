@@ -445,8 +445,13 @@ def build_return_pct_curve(
     close_df: pd.DataFrame,
 ) -> "tuple[pd.Series, dict[str, list[dict]]]":
     """
-    주식 포트폴리오의 날짜별 누적 수익률(%) 시계열 반환.
-    (총 평가액 / 총 매입원가 - 1) × 100, 현금(CASH) 제외.
+    주식 포트폴리오의 날짜별 TWRR 누적 수익률(%) 시계열 반환. 현금(CASH) 제외.
+
+    일별 수익률:  r_t = (V_t - CF_t) / V_{t-1} - 1
+      V_t   = 당일 종가 기준 포트폴리오 평가액
+      V_{t-1} = 전날 종가 기준 포트폴리오 평가액
+      CF_t  = 당일 순 자본 흐름 (+매수금액 - 매도대금)
+    누적:  R_T = Π(1 + r_t) - 1
     """
     if close_df.empty:
         return pd.Series(dtype=float), {}
@@ -487,11 +492,33 @@ def build_return_pct_curve(
             pos = int(idx.searchsorted(row["date"], side="left"))
             if pos < len(idx):
                 events_by_pos.setdefault(pos, []).append(row)
+
+        # CASH DEPOSIT/WITHDRAW 이벤트 — 외부 자금 흐름(TWRR CF_t)용
+        cash_log = log_df[log_df["ticker"].str.upper() == "CASH"]
+        cash_entries = cash_log[
+            cash_log["type"].str.upper().isin(["DEPOSIT", "WITHDRAW"])
+        ].copy()
+        # DEPOSIT 날짜 보정: BUY 이후 늦게 입력된 초기 DEPOSIT은 첫 BUY 날짜로 당겨서 처리
+        if not stock_log.empty and not cash_entries.empty:
+            first_buy_date = stock_log["date"].min()
+            late_dep = (
+                (cash_entries["type"].str.upper() == "DEPOSIT")
+                & (cash_entries["date"] > first_buy_date)
+            )
+            cash_entries.loc[late_dep, "date"] = first_buy_date
+        cash_events_by_pos: dict[int, list] = {}
+        for _, row in cash_entries.iterrows():
+            pos = int(idx.searchsorted(row["date"], side="left"))
+            if pos < len(idx):
+                cash_events_by_pos.setdefault(pos, []).append(row)
+        has_cash_tracking: bool = bool(cash_events_by_pos)
     else:
         all_tickers = sorted(current_tickers & set(prices.columns))
         static_qty = {t: float(holdings[t]["q"]) for t in all_tickers}
         static_avg = {t: _safe(holdings[t].get("avg", 0)) for t in all_tickers}
         events_by_pos = {}
+        cash_events_by_pos = {}
+        has_cash_tracking = False
 
     if not all_tickers:
         return pd.Series(dtype=float), {}
@@ -502,10 +529,32 @@ def build_return_pct_curve(
         for t in all_tickers
     }
 
+    # TWRR 누적 복리 팩터
+    prev_v: float = 0.0
+    cumulative_factor: float = 1.0
+    has_started: bool = False
+    running_cash: float = 0.0   # 현금 추적 모드에서만 유효
+
     return_pct_arr = np.zeros(len(idx), dtype=float)
     holdings_by_date: dict[str, list[dict]] = {}
 
     for i in range(len(idx)):
+        row_prices = prices.iloc[i]
+
+        cf_t = 0.0
+
+        # ── CASH 이벤트: DEPOSIT/WITHDRAW만 외부 자금 흐름 ────────────────────
+        for row in cash_events_by_pos.get(i, []):
+            trade_type = str(row.get("type", "")).upper()
+            q = float(row.get("q", 0))
+            if trade_type == "DEPOSIT":
+                running_cash += q
+                cf_t += q          # 외부 자본 유입
+            elif trade_type == "WITHDRAW":
+                running_cash -= q
+                cf_t -= q          # 외부 자본 유출
+
+        # ── 주식 이벤트 ──────────────────────────────────────────────────────
         for row in events_by_pos.get(i, []):
             ticker = str(row.get("ticker", "")).upper()
             trade_type = str(row.get("type", "")).upper()
@@ -521,20 +570,40 @@ def build_return_pct_curve(
                         (prev_qty * prev_avg + q * pr) / new_qty if new_qty > 0 else 0.0
                     )
                     running_qty[ticker] = new_qty
+                    if has_cash_tracking:
+                        # 현금 추적: BUY는 내부 거래(cf_t=0), 현금만 감소
+                        running_cash -= q * pr
+                    else:
+                        # 현금 미추적: 종가 기준 cf_t로 스파이크 방지
+                        close_p = _safe(row_prices.get(ticker, 0))
+                        cf_t += q * (close_p if close_p > 0 else pr)
                 elif trade_type in ("SOLD", "SELL"):
+                    sell_qty = min(q, running_qty[ticker])
+                    if has_cash_tracking:
+                        # 현금 추적: SELL도 내부 거래(cf_t=0), 현금 증가
+                        running_cash += sell_qty * pr
+                    else:
+                        cf_t -= sell_qty * pr
                     running_qty[ticker] = max(0.0, running_qty[ticker] - q)
                     if running_qty[ticker] == 0:
                         running_avg[ticker] = 0.0
                 elif trade_type == "UPDATE":
                     running_qty[ticker] = max(0.0, q)
 
-        row_prices = prices.iloc[i]
-        total_cost = sum(running_qty[t] * running_avg[t] for t in all_tickers)
-        total_val  = sum(running_qty[t] * _safe(row_prices.get(t, 0)) for t in all_tickers)
+        stock_v = sum(running_qty[t] * _safe(row_prices.get(t, 0)) for t in all_tickers)
+        v_t = stock_v + (max(0.0, running_cash) if has_cash_tracking else 0.0)
 
-        return_pct_arr[i] = _safe(
-            (total_val / total_cost - 1) * 100 if total_cost > 0 else 0.0
-        )
+        if prev_v > 0:
+            # r_t = (V_t - CF_t) / V_{t-1} - 1  →  순수 주가 변동만 반영
+            r_t = _safe((v_t - cf_t) / prev_v - 1, default=0.0)
+            cumulative_factor *= (1.0 + r_t)
+            has_started = True
+        elif v_t > 0:
+            # 첫 매수일 또는 전량 청산 후 재진입 — 기준점 설정 (r = 0)
+            has_started = True
+
+        return_pct_arr[i] = (cumulative_factor - 1.0) * 100.0 if has_started else 0.0
+        prev_v = v_t
 
         date_str = idx[i].strftime("%Y-%m-%d")
         holdings_by_date[date_str] = [
@@ -566,28 +635,44 @@ def return_pct_to_records(
     if return_pct.empty:
         return []
 
-    # 첫 보유 종목이 있는 날부터 표시
+    # 첫 거래일부터 표시: holdings_by_date에 보유 종목이 있는 가장 이른 날 우선,
+    # 매수 당일 전량 매도(같은 날 BUY+SELL) 같은 엣지케이스에는 trade_markers 첫 날로 폴백
     first_date = None
     for date_str in sorted(holdings_by_date.keys()):
         if holdings_by_date[date_str]:
             first_date = pd.Timestamp(date_str)
             break
+    if first_date is None and trade_markers:
+        sorted_dates = sorted(
+            tr.get("date", "") for tr in trade_markers if tr.get("date")
+        )
+        if sorted_dates:
+            ts = pd.Timestamp(sorted_dates[0])
+            # idx에서 가장 가까운 거래일로 스냅
+            pos = int(return_pct.index.searchsorted(ts, side="left"))
+            if pos < len(return_pct.index):
+                first_date = return_pct.index[pos]
     if first_date is None:
         return []
 
-    curve = return_pct.loc[return_pct.index >= first_date]
+    # 그래프 표시: 첫 매수일 1달 전부터 (그 이전 구간은 수익률 0% 로 표시)
+    display_start = first_date - pd.DateOffset(months=1)
+    curve = return_pct.loc[return_pct.index >= display_start]
     if curve.empty:
         return []
 
-    # S&P 500: 같은 시작일 기준 수익률(%)
+    # S&P 500: 첫 매수일을 기준점(0%)으로, 그 이전 구간은 null
     sp_return = None
     if close_df is not None and "^GSPC" in close_df.columns:
-        b = close_df["^GSPC"].reindex(curve.index).ffill().bfill()
-        b_clean = b.dropna()
-        if len(b_clean) > 0:
-            b_first = float(b_clean.iloc[0])
+        b_full = close_df["^GSPC"].reindex(curve.index).ffill().bfill()
+        b_from_first = b_full.loc[b_full.index >= first_date].dropna()
+        if not b_from_first.empty:
+            b_first = float(b_from_first.iloc[0])
             if b_first > 0:
-                sp_return = (b / b_first - 1) * 100
+                sp_vals = (b_full / b_first - 1) * 100
+                # 첫 매수일 이전 구간은 NaN → 프론트에서 null 로 직렬화
+                sp_vals.loc[sp_vals.index < first_date] = float("nan")
+                sp_return = sp_vals
 
     trade_by_date: dict = {}
     for tr in (trade_markers or []):

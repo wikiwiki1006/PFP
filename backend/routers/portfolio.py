@@ -39,14 +39,21 @@ def _uid(x_user_id: Optional[str]) -> str:
     return (x_user_id or "default").strip() or "default"
 
 
-def _portfolio_close_df(holdings: dict, period: str = "2y", ttl: int = 300):
+def _portfolio_close_df(
+    holdings: dict,
+    period: str = "2y",
+    ttl: int = 300,
+    extra_tickers: list | None = None,
+):
     """
     포트폴리오 전용 close_df.
-    ALWAYS_FETCH(22개 시장 지수) 제외, 사용자 종목 + 계산에 필요한 ^GSPC/^VIX만 포함.
+    extra_tickers: 현재 미보유이나 이력이 필요한 종목 (매도 완료 종목 등).
     metrics 와 equity-curve 가 동일 파라미터로 호출 → 두 번째 요청은 메모리 캐시 히트.
     """
     tickers = sorted(set(
-        [t for t in holdings if t != "CASH"] + ["^GSPC", "^VIX"]
+        [t for t in holdings if t != "CASH"]
+        + (extra_tickers or [])
+        + ["^GSPC", "^VIX"]
     ))
     return get_close_df(tickers, period=period, ttl=ttl, include_market=False)
 
@@ -129,7 +136,8 @@ def delete_holding_endpoint(
     holdings = get_holdings(uid)
     if ticker not in holdings:
         raise HTTPException(status_code=404, detail=f"{ticker} 미보유")
-    delete_holding(ticker, uid)
+    # 명시적 삭제 시 거래 이력도 함께 삭제 (SELL로 qty=0된 경우와 구분)
+    delete_holding(ticker, uid, with_trades=True)
     return {"ok": True, "ticker": ticker}
 
 
@@ -599,9 +607,16 @@ def get_equity_curve(
     uid = _uid(x_user_id)
     holdings  = get_holdings(uid)
     trade_log = get_trade_log(uid)
-    if not holdings:
+    if not holdings and not trade_log:
         raise HTTPException(status_code=400, detail="보유 종목 없음")
-    close_df = _portfolio_close_df(holdings, period="2y", ttl=300)
+
+    # 과거 매도 종목도 가격 데이터 포함 — close_df에 없으면 해당 기간 수익률이 0으로 계산됨
+    traded_tickers = list({
+        str(tr.get("ticker", "")).upper()
+        for tr in (trade_log or [])
+        if str(tr.get("ticker", "")).upper() not in ("CASH", "")
+    })
+    close_df = _portfolio_close_df(holdings, period="2y", ttl=300, extra_tickers=traded_tickers)
 
     return_pct, holdings_by_date = build_return_pct_curve(holdings, trade_log, close_df)
 
