@@ -291,7 +291,6 @@ def delete_trade_endpoint(
     x_user_id: Optional[str] = Header(default=None),
 ):
     uid = _uid(x_user_id)
-    # 삭제 전에 어느 티커인지 먼저 파악
     all_trades = get_trade_log(uid)
     trade = next((t for t in all_trades if t.get("id") == trade_id), None)
     if not trade:
@@ -301,7 +300,18 @@ def delete_trade_endpoint(
     if not ok:
         raise HTTPException(status_code=404, detail="거래 내역 없음")
 
-    # 해당 티커의 보유수량 재계산
+    # BUY 삭제 시: 해당 날짜 이후의 동일 종목 SELL 기록도 함께 삭제
+    ttype  = str(trade.get("type",   "")).upper()
+    ticker = str(trade.get("ticker", "")).upper()
+    t_date = str(trade.get("date",   ""))[:10]
+    if ttype in ("ADD", "BUY") and ticker not in ("CASH", ""):
+        for t in all_trades:
+            if (t.get("id") != trade_id
+                    and str(t.get("ticker", "")).upper() == ticker
+                    and str(t.get("type",   "")).upper() in ("SOLD", "SELL")
+                    and str(t.get("date",   ""))[:10] >= t_date):
+                delete_trade_by_id(t["id"], uid)
+
     _recalculate_holding_from_trades(trade["ticker"], uid)
     return {"ok": True}
 
@@ -574,29 +584,30 @@ def auto_sector(x_user_id: Optional[str] = Header(default=None)):
 def get_metrics(x_user_id: Optional[str] = Header(default=None)):
     uid = _uid(x_user_id)
     holdings  = get_holdings(uid)
-    if not holdings:
-        raise HTTPException(status_code=400, detail="보유 종목 없음")
-    # 현금만 있는 경우: 가격 데이터 없이 바로 반환
-    stock_tickers = [t for t in holdings if t != "CASH"]
-    if not stock_tickers:
-        cash_val = float(holdings.get("CASH", {}).get("q", 0))
-        return {
-            "total_equity": round(cash_val, 2),
-            "total_cost":   round(cash_val, 2),
-            "total_return_pct":  0.0,
-            "today_change_val":  0.0, 
-            "today_change_pct":  0.0,
-            "portfolio_beta":    0.0,
-            "vix":               0.0,
-            "perf_1w":           0.0,
-            "perf_1m":           0.0,
-            "alpha_vs_sp500":    None,
-        }
     trade_log = get_trade_log(uid)
-    # period="2y" → equity-curve 와 동일 캐시키 공유, 두 번째 요청은 메모리 히트
-    close_df = _portfolio_close_df(holdings, period="2y", ttl=300)
+    if not holdings and not trade_log:
+        raise HTTPException(status_code=400, detail="보유 종목 없음")
+    # 과거 매도 종목 포함 → 전량 매도 이후에도 수익률 계산 가능
+    traded_tickers = list({
+        str(tr.get("ticker", "")).upper()
+        for tr in (trade_log or [])
+        if str(tr.get("ticker", "")).upper() not in ("CASH", "")
+    })
+    close_df = _portfolio_close_df(holdings, period="2y", ttl=300, extra_tickers=traded_tickers)
+    if close_df.empty:
+        raise HTTPException(status_code=400, detail="가격 데이터 없음")
     equity_curve = build_equity_curve(holdings, trade_log, close_df)
-    return calculate_metrics(holdings, close_df, equity_curve)
+    metrics = calculate_metrics(holdings, close_df, equity_curve)
+
+    # total_return_pct: TWRR(날짜 보정 없는 시간가중수익률)의 마지막 값으로 덮어쓰기
+    # calculate_metrics는 equity_curve(날짜 보정 포함)를 쓰므로 추가 입금 시 왜곡 가능
+    try:
+        twrr, _, _, _, _ = build_return_pct_curve(holdings, trade_log, close_df)
+        if not twrr.empty:
+            metrics["total_return_pct"] = round(float(twrr.dropna().iloc[-1]), 4)
+    except Exception:
+        pass
+    return metrics
 
 
 @router.get("/equity-curve")
@@ -618,7 +629,7 @@ def get_equity_curve(
     })
     close_df = _portfolio_close_df(holdings, period="2y", ttl=300, extra_tickers=traded_tickers)
 
-    return_pct, holdings_by_date = build_return_pct_curve(holdings, trade_log, close_df)
+    return_pct, holdings_by_date, initial_equity, cash_events, equity = build_return_pct_curve(holdings, trade_log, close_df)
 
     # 주식 매매 포인트 마커 (매수/매도 날짜에 점 표시용)
     trade_markers = [
@@ -628,7 +639,7 @@ def get_equity_curve(
         and float(tr.get("price") or 0) > 0
     ]
 
-    return return_pct_to_records(return_pct, holdings_by_date, close_df, trade_markers)
+    return return_pct_to_records(return_pct, holdings_by_date, close_df, trade_markers, initial_equity, cash_events, equity)
 
 
 @router.get("/holdings-detail")

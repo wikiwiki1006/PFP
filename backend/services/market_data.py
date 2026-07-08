@@ -43,13 +43,24 @@ def clear_cache():
 
 # ── 시세 ────────────────────────────────────────────────────────────────────────
 
-SNAPSHOT_TICKERS = ["SPY", "QQQ", "BTC-USD", "^VIX", "NVDA", "AAPL", "MSFT"]
+# Bloomberg 마퀴 표시 티커 (순서 = 표시 순서)
+SNAPSHOT_TICKERS = [
+    "^GSPC",    # S&P 500
+    "^IXIC",    # Nasdaq
+    "^KS11",    # KOSPI
+    "^KQ11",    # KOSDAQ
+    "^N225",    # Nikkei 225
+    "BTC-USD",  # Bitcoin
+    "USDKRW=X", # USD/KRW
+    "JPYKRW=X", # YEN/KRW
+    "CL=F",     # WTI Crude Oil
+]
 
 ALWAYS_FETCH = [
-    "^GSPC", "^IXIC", "^KS11", "^KQ11",
+    "^GSPC", "^IXIC", "^KS11", "^KQ11", "^N225",
     "XLK", "XLF", "XLE", "XLY", "XLV", "XLI", "XLB",
     "BTC-USD", "GC=F", "^VIX", "^TNX", "^IRX", "CL=F",
-    "USDKRW=X", "SPY", "QQQ", "NVDA", "AAPL", "MSFT",
+    "USDKRW=X", "JPYKRW=X", "SPY", "QQQ", "NVDA", "AAPL", "MSFT",
 ]
 
 GICS_SECTOR_ETFS = [

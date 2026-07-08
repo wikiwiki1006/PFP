@@ -42,20 +42,40 @@ const SECTOR_COLORS = [
 ]
 
 // ── Marquee ───────────────────────────────────────────────────────────────────
+const MARQUEE_CONFIG: { ticker: string; label: string; fmt: 'usd' | 'krw' | 'plain' }[] = [
+  { ticker: '^GSPC',    label: 'S&P500',   fmt: 'plain' },
+  { ticker: '^IXIC',    label: 'Nasdaq',   fmt: 'plain' },
+  { ticker: '^KS11',    label: 'KOSPI',    fmt: 'plain' },
+  { ticker: '^KQ11',    label: 'KOSDAQ',   fmt: 'plain' },
+  { ticker: '^N225',    label: 'Nikkei225',fmt: 'plain' },
+  { ticker: 'BTC-USD',  label: 'BTC',      fmt: 'usd'   },
+  { ticker: 'USDKRW=X', label: 'USD/KRW', fmt: 'krw'   },
+  { ticker: 'JPYKRW=X', label: 'YEN/KRW', fmt: 'krw'   },
+  { ticker: 'CL=F',     label: 'WTI',      fmt: 'usd'   },
+]
+
 function Marquee({ snapshot }: { snapshot: any }) {
   if (!snapshot?.prices) return null
-  const pairs = Object.entries(snapshot.prices as Record<string, any>)
+  const prices = snapshot.prices as Record<string, any>
+
+  const fmtPrice = (price: number, fmt: 'usd' | 'krw' | 'plain') => {
+    if (fmt === 'krw') return `₩${price.toLocaleString('ko-KR', { maximumFractionDigits: 0 })}`
+    if (fmt === 'usd') return `$${fn(price)}`
+    return price.toLocaleString('en-US', { maximumFractionDigits: 2 })
+  }
 
   const renderItems = (suffix = '') =>
-    pairs.map(([t, v]) => {
+    MARQUEE_CONFIG.map(({ ticker, label, fmt }) => {
+      const v = prices[ticker]
+      if (!v) return null
       const p = fv(v?.change_1d_pct)
       const col = p >= 0 ? '#ef4444' : '#3b82f6'
       const price = fv(v?.price)
-      if (!price) return null  // 가격 없으면 표시 안 함
+      if (!price) return null
       return (
-        <span key={t + suffix} className="inline-flex items-center gap-1 mr-6 font-mono text-[14px]">
-          <span className="font-bold text-[#e2e8f0]">{t}</span>
-          <span className="text-[#cbd5e1]">${fn(price)}</span>
+        <span key={ticker + suffix} className="inline-flex items-center gap-1 mr-6 font-mono text-[14px]">
+          <span className="font-bold text-[#e2e8f0]">{label}</span>
+          <span className="text-[#cbd5e1]">{fmtPrice(price, fmt)}</span>
           <span style={{ color: col }}>{fp(p)}</span>
         </span>
       )
@@ -97,6 +117,8 @@ type CurvePoint = {
   port: number
   sp?: number
   nasdaq?: number
+  total_equity?: number
+  cash_flow?: number   // 양수=입금, 음수=출금
   trades: { ticker: string; type: string; q: number; price: number }[]
   holdings: { ticker: string; return_pct: number; price: number }[]
 }
@@ -160,12 +182,14 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
       const nv = firstNqPrice != null && nc != null && isFinite(nc)
         ? +((nc / firstNqPrice - 1) * 100).toFixed(2) : undefined
       return {
-        date:     d.date,
-        port:     d.port ?? 0,
-        sp:       d.sp ?? undefined,
-        nasdaq:   nv,
-        trades:   d.trades ?? [],
-        holdings: d.holdings ?? [],
+        date:         d.date,
+        port:         d.port ?? 0,
+        sp:           d.sp ?? undefined,
+        nasdaq:       nv,
+        total_equity: d.total_equity ?? undefined,
+        cash_flow:    d.cash_flow ?? undefined,
+        trades:       d.trades ?? [],
+        holdings:     d.holdings ?? [],
       }
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -280,8 +304,13 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
     const d: CurvePoint = payload[0]?.payload
     if (!d) return null
     return (
-      <div style={{ backgroundColor: '#0b1220', border: '1px solid #1e2d40', borderRadius: 4, padding: '8px 12px', fontSize: 12, minWidth: 180 }}>
-        <div className="text-[#94a3b8] text-[11px] mb-2">{fmtCurveDate(label)}</div>
+      <div style={{ backgroundColor: '#0b1220', border: '1px solid #1e2d40', borderRadius: 4, padding: '8px 12px', fontSize: 12, minWidth: 200 }}>
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-[#94a3b8] text-[11px]">{fmtCurveDate(label)}</span>
+          {d.total_equity != null && d.total_equity > 0 && (
+            <span className="font-mono text-[11px] text-[#e2e8f0] font-bold">${fn(d.total_equity, 0).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}</span>
+          )}
+        </div>
         <div className="flex items-center justify-between gap-3 mb-0.5">
           <span className="flex items-center gap-1.5">
             <span style={{ color: '#00e6ff' }}>●</span>
@@ -305,6 +334,19 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
               <span className="text-[#4a5568] text-[10px]">NASDAQ</span>
             </span>
             <span className="font-mono text-[#a78bfa]">{fp(d.nasdaq, 2)}</span>
+          </div>
+        )}
+        {d.cash_flow != null && (
+          <div className="mt-2 pt-2 border-t border-[#1e2d40]">
+            <div className="flex items-center justify-between gap-3">
+              <span className="flex items-center gap-1.5 text-[10px]" style={{ color: d.cash_flow > 0 ? '#f59e0b' : '#f43f5e' }}>
+                <span>◆</span>
+                <span>{d.cash_flow > 0 ? '입금' : '출금'}</span>
+              </span>
+              <span className="font-mono text-[11px] font-bold" style={{ color: d.cash_flow > 0 ? '#f59e0b' : '#f43f5e' }}>
+                {d.cash_flow > 0 ? '+' : ''}{fn(Math.abs(d.cash_flow), 0).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
+              </span>
+            </div>
           </div>
         )}
         {d.holdings?.length > 0 && (
@@ -341,10 +383,34 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
     )
   }, [bm])
 
-  // ── 매매 포인트 dot 렌더러 ────────────────────────────────────────────────
+  // ── 매매 / 입출금 포인트 dot 렌더러 ────────────────────────────────────────
   const tradeDot = (props: any) => {
     const { cx, cy, payload } = props
-    if (!payload?.trades?.length) return <g />
+    const hasCashFlow = payload?.cash_flow != null
+    const hasTrades   = payload?.trades?.length > 0
+
+    if (!hasCashFlow && !hasTrades) return <g />
+
+    // 입출금 이벤트: 다이아몬드 ◆ (입금=amber, 출금=rose)
+    if (hasCashFlow) {
+      const isDeposit = (payload.cash_flow ?? 0) > 0
+      const color     = isDeposit ? '#f59e0b' : '#f43f5e'
+      const s = 6  // 반지름
+      return (
+        <g>
+          <polygon
+            points={`${cx},${cy - s} ${cx + s},${cy} ${cx},${cy + s} ${cx - s},${cy}`}
+            fill={color} opacity={0.9}
+          />
+          <polygon
+            points={`${cx},${cy - s - 2} ${cx + s + 2},${cy} ${cx},${cy + s + 2} ${cx - s - 2},${cy}`}
+            fill="none" stroke={color} strokeWidth={1} opacity={0.5}
+          />
+        </g>
+      )
+    }
+
+    // 주식 매매 이벤트: 원형 ●
     const hasBuy  = payload.trades.some((t: any) => t.type === 'ADD' || t.type === 'BUY')
     const hasSell = payload.trades.some((t: any) => t.type === 'SOLD' || t.type === 'SELL')
     const color   = hasBuy && hasSell ? '#f59e0b' : hasBuy ? '#10b981' : '#ef4444'
@@ -571,7 +637,7 @@ function HoldingsPanel({ holdQ, rawHoldings }: { holdQ: any; rawHoldings: Record
   }, [holdQ.data, holdQ.isLoading, qc])
 
   // ── Cash state ─────────────────────────────────────────────────────────
-  const cashBalance = _safe((rawHoldings?.CASH as any)?.q)
+  const cashBalance = fv((rawHoldings?.CASH as any)?.q)
   const hasCash     = 'CASH' in (rawHoldings || {})
   const [cashOpen,  setCashOpen]  = useState(false)
   const [cashAmt,   setCashAmt]   = useState(0)
