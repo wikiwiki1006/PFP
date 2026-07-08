@@ -8,10 +8,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import Optional
 
 from backend.models.macro import MacroAnalysisRequest, MacroAnalysisResponse
 from backend.services.ai_analysis import (
@@ -104,27 +105,14 @@ def list_modes():
 
 # ── AI Analyst 피드백 ─────────────────────────────────────────────────────────
 
-class AnalystFeedbackRequest(BaseModel):
-    vix: float
-    portfolio_beta: float
-    today_chg_pct: float
-    sector_summary: Optional[str] = ""
+class LiveMetrics(BaseModel):
+    vix: Optional[float] = None
+    portfolio_beta: Optional[float] = None
+    today_chg_pct: Optional[float] = None
 
 
-@router.post("/analyst-feedback")
-def analyst_feedback(req: AnalystFeedbackRequest):
-    """Claude Haiku 기반 1~2문장 실시간 시장 피드백."""
-    text = get_ai_analyst_feedback(
-        vix=req.vix,
-        portfolio_beta=req.portfolio_beta,
-        today_chg_pct=req.today_chg_pct,
-        sector_summary=req.sector_summary or "",
-    )
-    return {"feedback": text}
-
-
-@router.get("/analyst-feedback/auto")
-def analyst_feedback_auto():
+@router.post("/analyst-feedback/auto")
+def analyst_feedback_auto(live: LiveMetrics = LiveMetrics()):
     """포트폴리오 섹터 기반 AI 피드백 생성."""
     from backend.db.portfolio_repo import (
         get_holdings as _db_get_holdings,
@@ -143,7 +131,7 @@ def analyst_feedback_auto():
         raise HTTPException(status_code=400, detail="보유 종목 없음")
 
     tickers  = [t for t in holdings if t != "CASH"]
-    close_df = get_close_df(tickers, period="5d", ttl=60)
+    close_df = get_close_df(tickers, period="5d", ttl=60, include_today=False)
 
     equity_curve = build_equity_curve(holdings, trade_log, close_df)
     metrics      = calculate_metrics(holdings, close_df, equity_curve)
@@ -185,9 +173,9 @@ def analyst_feedback_auto():
     portfolio_sector_summary = " / ".join(sector_lines) if sector_lines else "섹터 데이터 없음"
 
     text = get_ai_analyst_feedback(
-        vix=metrics.get("vix", 18.0),
-        portfolio_beta=metrics.get("portfolio_beta", 1.0),
-        today_chg_pct=metrics.get("today_change_pct", 0.0),
+        vix=live.vix if live.vix is not None else metrics.get("vix", 20.0),
+        portfolio_beta=live.portfolio_beta if live.portfolio_beta is not None else metrics.get("portfolio_beta", 1.0),
+        today_chg_pct=live.today_chg_pct if live.today_chg_pct is not None else metrics.get("today_change_pct", 0.0),
         sector_summary=portfolio_sector_summary,
         is_portfolio_sectors=True,
     )
@@ -206,7 +194,7 @@ def daily_brief(portfolio: Optional[dict] = None):
         raise HTTPException(status_code=400, detail="보유 종목 없음")
 
     tickers  = [t for t in holdings if t != "CASH"]
-    close_df = get_close_df(tickers, period="5d", ttl=60)
+    close_df = get_close_df(tickers, period="5d", ttl=60, include_today=False)
 
     # 가격 데이터 수집
     price_data = {}

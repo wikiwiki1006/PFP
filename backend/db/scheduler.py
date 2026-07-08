@@ -8,7 +8,7 @@ backend/db/scheduler.py
   - market_prices (일별 종가)       : 12시간마다 (stale 티커만)
   - macro_data / doom_radar        : 60분마다
   - sector_data                    : 5분마다
-  - S&P500 전 종목 가격 수집         : KST 03:00 (UTC 18:00) 하루 1회
+  - S&P500 전 종목 가격 수집         : KST 06:00 (UTC 21:00) 하루 1회 — 미국 장 마감(EDT 16:00) 1시간 후
     - 서버가 꺼져 있었으면 기동 시 즉시 실행 (trigger_sp500_if_missed)
     - 수집 중에도 사용자 요청은 DB 조회 또는 yfinance 직접 호출로 정상 서비스
   - pairs trading 사전 계산         : SP500 수집 완료 직후 (인기 종목 20개)
@@ -38,8 +38,8 @@ _HISTORY_INTERVAL       = 43200     # 12시간
 _BB_SCAN_INTERVAL       = 21600     # 6시간 (Timing Engine: S&P500 볼린저 스캔)
 _MACRO_SPREAD_INTERVAL  = 86400     # 24시간 (Timing Engine: 금리차/HY스프레드 백분위)
 
-# KST 03:00 = UTC 18:00 (전날)
-_KST_3AM_UTC_HOUR = 18
+# KST 06:00 = UTC 21:00 (전날) = EDT 17:00 (미국 장 마감 1시간 후)
+_KST_3AM_UTC_HOUR = 21
 
 # pairs 사전 계산 대상 인기 종목 (기본 파라미터 threshold=5%, top_n=5)
 _PAIRS_PRECOMPUTE_TICKERS = [
@@ -56,7 +56,7 @@ def start():
     logger.info(
         "백그라운드 스케줄러 시작 "
         "(snapshot 60s / sector 5m / macro 1h / history 12h / "
-        "bb_scan 6h / macro_spread 24h / sp500_daily KST-03:00)"
+        "bb_scan 6h / macro_spread 24h / sp500_daily KST-06:00)"
     )
 
 
@@ -78,7 +78,7 @@ def trigger_sp500_if_missed():
 
 
 def _sp500_update_due() -> bool:
-    """오늘 KST 03:00 (= UTC 18:00) 이후 SP500 수집이 아직 안 됐으면 True."""
+    """오늘 KST 06:00 (= UTC 21:00 = EDT 17:00) 이후 SP500 수집이 아직 안 됐으면 True."""
     from backend.db.market_cache import get_common
     utc_now = datetime.now(tz=timezone.utc)
     # 가장 최근의 KST 03:00 시각(UTC)

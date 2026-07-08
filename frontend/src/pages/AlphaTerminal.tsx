@@ -13,7 +13,7 @@ import {
 import {
   getPortfolioMetrics, getEquityCurve, getHoldingsDetail, getSectorWeights,
   getMarketSnapshot, getMarketNews, getMacroData, getEarnings,
-  getAnalystFeedback,
+  getAnalystFeedback, getMarketSectors,
   postTrade, addHolding, updateHolding, deleteHolding, getHoldings,
   generateDailyBrief, getDailyBriefHistory, getDailyBriefFile,
   getIndexPrices, getTrades, updateTrade, deleteTrade, getTickerPrice, searchTickers,
@@ -35,6 +35,38 @@ const SECTORS = [
   'Real Estate','Utilities','Communication Services','Other',
 ]
 
+const SECTOR_KO: Record<string, string> = {
+  'Technology':             '기술',
+  'Healthcare':             '헬스케어',
+  'Financials':             '금융',
+  'Consumer Discretionary': '경기소비재',
+  'Consumer Staples':       '필수소비재',
+  'Energy':                 '에너지',
+  'Industrials':            '산업재',
+  'Materials':              '소재',
+  'Real Estate':            '부동산',
+  'Utilities':              '유틸리티',
+  'Communication Services': '커뮤니케이션',
+  'Cash':                   '현금',
+  'Other':                  '기타',
+}
+const toKoSector = (s: string) => SECTOR_KO[s] ?? s
+
+// 섹터 테이블 API 레이블 (대문자) → 한글
+const SECTOR_LABEL_KO: Record<string, string> = {
+  'TECHNOLOGY':       '기술',
+  'FINANCIALS':       '금융',
+  'COMMUNICATION':    '커뮤니케이션',
+  'CONSUMER_DISC':    '소비재',
+  'HEALTHCARE':       '헬스케어',
+  'INDUSTRIALS':      '산업재',
+  'CONSUMER_STAPLES': '필수소비',
+  'ENERGY':           '에너지',
+  'UTILITIES':        '유틸리티',
+  'MATERIALS':        '소재',
+  'REAL_ESTATE':      '부동산',
+}
+
 const SECTOR_COLORS = [
   '#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6',
   '#06b6d4','#84cc16','#f97316','#ec4899','#94a3b8',
@@ -44,10 +76,10 @@ const SECTOR_COLORS = [
 // ── Marquee ───────────────────────────────────────────────────────────────────
 const MARQUEE_CONFIG: { ticker: string; label: string; fmt: 'usd' | 'krw' | 'plain' }[] = [
   { ticker: '^GSPC',    label: 'S&P500',   fmt: 'plain' },
-  { ticker: '^IXIC',    label: 'Nasdaq',   fmt: 'plain' },
+  { ticker: '^IXIC',    label: 'NASDAQ',   fmt: 'plain' },
   { ticker: '^KS11',    label: 'KOSPI',    fmt: 'plain' },
   { ticker: '^KQ11',    label: 'KOSDAQ',   fmt: 'plain' },
-  { ticker: '^N225',    label: 'Nikkei225',fmt: 'plain' },
+  { ticker: '^N225',    label: 'NIKKEI',fmt: 'plain' },
   { ticker: 'BTC-USD',  label: 'BTC',      fmt: 'usd'   },
   { ticker: 'USDKRW=X', label: 'USD/KRW', fmt: 'krw'   },
   { ticker: 'JPYKRW=X', label: 'YEN/KRW', fmt: 'krw'   },
@@ -96,9 +128,32 @@ function Marquee({ snapshot }: { snapshot: any }) {
 // ── Metric Pill ───────────────────────────────────────────────────────────────
 function Pill({ label, value, color }: { label: string; value: string; color?: string }) {
   return (
-    <div className="text-center px-4 py-2 border-r border-[#1e2d40] last:border-r-0 flex-shrink-0">
-      <div className="text-[10px] text-[#64748b] font-bold tracking-widest uppercase">{label}</div>
-      <div className="text-base font-mono font-bold mt-0.5 tabular-nums" style={{ color: color || '#e2e8f0' }}>{value}</div>
+    <div className="text-center px-6 py-3 border-r border-[#1e2d40] last:border-r-0 flex-shrink-0">
+      <div className="text-[14px] text-[#94a3b8] font-bold tracking-widest uppercase">{label}</div>
+      <div className="text-[22px] font-mono font-bold mt-0.5 tabular-nums" style={{ color: color || '#e2e8f0' }}>{value}</div>
+    </div>
+  )
+}
+
+// ── Clock ─────────────────────────────────────────────────────────────────────
+function Clock() {
+  const [now, setNow] = useState(() => new Date())
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000)
+    return () => clearInterval(id)
+  }, [])
+  const kr = now.toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
+  const ny = now.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
+  return (
+    <div className="flex-shrink-0 border-l border-[#1e2d40] flex flex-col justify-center items-end gap-2 px-5 py-3">
+      <div className="flex items-center gap-3">
+        <span className="text-[11px] text-[#94a3b8] font-bold tracking-wide">서울</span>
+        <span className="text-[16px] font-mono font-bold text-[#e2e8f0] tabular-nums">{kr}</span>
+      </div>
+      <div className="flex items-center gap-3">
+        <span className="text-[11px] text-[#94a3b8] font-bold tracking-wide">뉴욕</span>
+        <span className="text-[16px] font-mono font-bold text-[#cbd5e1] tabular-nums">{ny}</span>
+      </div>
     </div>
   )
 }
@@ -231,18 +286,35 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
     return dMax - ratio * (dMax - dMin)
   }
 
-  const last     = displayData[displayData.length - 1]
-  const first    = displayData[0]
-  // port / sp / nasdaq는 이미 % 값이므로 구간 수익률은 차이로 계산
-  const portPct  = last?.port != null && first?.port != null ? last.port - first.port : 0
-  const spPct    = last?.sp != null && first?.sp != null ? last.sp - first.sp : 0
-  const nqPct    = last?.nasdaq != null && first?.nasdaq != null ? last.nasdaq - first.nasdaq : 0
-  const alpha    = portPct - (bm === 'nasdaq' ? nqPct : spPct)
+  // 오늘의 일간 변동: 전체 원본 데이터 마지막 2개 포인트 차이
+  const allRawData: any[] = curveQ.data || []
+  const portAll  = allRawData.filter((d: any) => d.port != null)
+  // 장 마감·휴장 시 ffill로 인한 0% 방지: 마지막 실제 변동값 반환
+  const lastChange = (arr: any[], key: string): number => {
+    for (let i = arr.length - 1; i >= 1; i--) {
+      const diff = (arr[i][key] as number) - (arr[i - 1][key] as number)
+      if (Math.abs(diff) > 0.001) return diff
+    }
+    return 0
+  }
+
+  const portPct = lastChange(portAll, 'port')
+
+  const spRawAll = allRawData.filter((d: any) => d.sp != null)
+  const spPct = lastChange(spRawAll, 'sp')
+
+  const nqFiltered = data.filter(d => d.nasdaq != null)
+  const nqPct = lastChange(nqFiltered, 'nasdaq')
+
+  // 알파: 첫 매수일부터 현재까지 누적 포트 수익 - 누적 S&P 수익
+  const absPortLast = portAll.length > 0 ? portAll[portAll.length - 1].port : 0
+  const absSpLast   = spRawAll.length > 0 ? spRawAll[spRawAll.length - 1].sp : 0
+  const alpha = portPct - (bm === 'nasdaq' ? nqPct : spPct)
 
   const BM_BTNS: { key: BenchmarkMode; label: string; color: string }[] = [
-    { key: 'sp500',  label: 'S&P',  color: '#64748b' },
+    { key: 'sp500',  label: 'S&P',  color: '#dc143c' },
     { key: 'nasdaq', label: 'NQ',   color: '#a78bfa' },
-    { key: 'both',   label: 'BOTH', color: '#f59e0b' },
+    { key: 'both',   label: '전체', color: '#f59e0b' },
   ]
 
   // ── native 마우스 핸들러 (chart 컨테이너에 부착 — 실제 픽셀 Y 추적) ─────
@@ -306,7 +378,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
     return (
       <div style={{ backgroundColor: '#0b1220', border: '1px solid #1e2d40', borderRadius: 4, padding: '8px 12px', fontSize: 12, minWidth: 200 }}>
         <div className="flex items-center justify-between mb-2">
-          <span className="text-[#94a3b8] text-[11px]">{fmtCurveDate(label)}</span>
+          <span className="text-[#cbd5e1] text-[11px]">{fmtCurveDate(label)}</span>
           {d.total_equity != null && d.total_equity > 0 && (
             <span className="font-mono text-[11px] text-[#e2e8f0] font-bold">${fn(d.total_equity, 0).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}</span>
           )}
@@ -314,24 +386,24 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
         <div className="flex items-center justify-between gap-3 mb-0.5">
           <span className="flex items-center gap-1.5">
             <span style={{ color: '#00e6ff' }}>●</span>
-            <span className="text-[#64748b] text-[10px]">Portfolio</span>
+            <span className="text-[#94a3b8] text-[10px]">포트폴리오</span>
           </span>
           <span className="font-mono font-bold" style={{ color: d.port >= 0 ? '#10b981' : '#ef4444' }}>{fp(d.port, 2)}</span>
         </div>
         {d.sp != null && (bm === 'sp500' || bm === 'both') && (
           <div className="flex items-center justify-between gap-3 mb-0.5">
             <span className="flex items-center gap-1.5">
-              <span style={{ color: '#64748b' }}>●</span>
-              <span className="text-[#64748b] text-[10px]">S&P 500</span>
+              <span style={{ color: '#dc143c' }}>●</span>
+              <span style={{ color: '#dc143c' }} className="text-[10px]">S&P 500</span>
             </span>
-            <span className="font-mono text-[#64748b]">{fp(d.sp, 2)}</span>
+            <span className="font-mono" style={{ color: '#dc143c' }}>{fp(d.sp, 2)}</span>
           </div>
         )}
         {d.nasdaq != null && (bm === 'nasdaq' || bm === 'both') && (
           <div className="flex items-center justify-between gap-3 mb-0.5">
             <span className="flex items-center gap-1.5">
               <span style={{ color: '#a78bfa' }}>●</span>
-              <span className="text-[#4a5568] text-[10px]">NASDAQ</span>
+              <span className="text-[#94a3b8] text-[10px]">NASDAQ</span>
             </span>
             <span className="font-mono text-[#a78bfa]">{fp(d.nasdaq, 2)}</span>
           </div>
@@ -353,7 +425,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
           <div className="mt-2 pt-2 border-t border-[#1e2d40]">
             {d.holdings.map((h, i) => (
               <div key={i} className="flex items-center justify-between gap-3 mt-0.5">
-                <span className="font-mono text-[11px] text-[#94a3b8]">{h.ticker}</span>
+                <span className="font-mono text-[11px] text-[#cbd5e1]">{h.ticker}</span>
                 <span className="font-mono text-[11px]" style={{ color: h.return_pct >= 0 ? '#10b981' : '#ef4444' }}>
                   {fp(h.return_pct, 2)}
                 </span>
@@ -371,9 +443,9 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
                   <span className="flex items-center gap-1" style={{ color }}>
                     <span style={{ fontSize: 9 }}>{isBuy ? '▲' : '▼'}</span>
                     <span className="font-bold text-[11px]">{t.ticker}</span>
-                    <span className="text-[10px] opacity-70">{isBuy ? 'BUY' : 'SELL'}</span>
+                    <span className="text-[10px] opacity-70">{isBuy ? '매수' : '매도'}</span>
                   </span>
-                  <span className="text-[#94a3b8] text-[10px] font-mono">{t.q}주 @${t.price}</span>
+                  <span className="text-[#cbd5e1] text-[10px] font-mono">{t.q}주 @${t.price}</span>
                 </div>
               )
             })}
@@ -426,7 +498,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
     <div className="px-4 pt-3 pb-2 border-b border-[#1e2d40]">
       <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
         <div className="flex items-center gap-4 flex-wrap">
-          <span className="text-[11px] text-[#94a3b8] font-bold tracking-[3px] uppercase">Portfolio Return</span>
+          <span className="text-[11px] text-[#cbd5e1] font-bold tracking-[3px] uppercase">포트폴리오 수익률</span>
           <div className="flex items-center gap-2">
             <svg width="20" height="5"><line x1="0" y1="2.5" x2="20" y2="2.5" stroke="#00e6ff" strokeWidth="2.5" /></svg>
             <span className="text-sm font-mono font-bold tabular-nums"
@@ -437,12 +509,12 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
           {(bm === 'sp500' || bm === 'both') && (
             <div className="flex items-center gap-2">
               <svg width="20" height="5">
-                <line x1="0" y1="2.5" x2="5" y2="2.5" stroke="#64748b" strokeWidth="1.5" />
-                <line x1="7" y1="2.5" x2="12" y2="2.5" stroke="#64748b" strokeWidth="1.5" />
-                <line x1="14" y1="2.5" x2="20" y2="2.5" stroke="#64748b" strokeWidth="1.5" />
+                <line x1="0" y1="2.5" x2="5" y2="2.5" stroke="#dc143c" strokeWidth="1.5" />
+                <line x1="7" y1="2.5" x2="12" y2="2.5" stroke="#dc143c" strokeWidth="1.5" />
+                <line x1="14" y1="2.5" x2="20" y2="2.5" stroke="#dc143c" strokeWidth="1.5" />
               </svg>
-              <span className="text-sm font-mono text-[#64748b] tabular-nums">
-                S&P {fp(spPct, 1)}
+              <span className="text-sm font-mono tabular-nums" style={{ color: '#dc143c' }}>
+                S&P {fp(spPct, 2)}
               </span>
             </div>
           )}
@@ -454,7 +526,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
                 <line x1="14" y1="2.5" x2="20" y2="2.5" stroke="#a78bfa" strokeWidth="1.5" />
               </svg>
               <span className="text-sm font-mono text-[#a78bfa] tabular-nums">
-                NASDAQ {fp(nqPct, 1)}
+                NASDAQ {fp(nqPct, 2)}
               </span>
             </div>
           )}
@@ -463,12 +535,12 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
               color: alpha >= 0 ? '#10b981' : '#ef4444',
               backgroundColor: alpha >= 0 ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)',
             }}>
-            α {fp(alpha, 1)}
+            α {fp(alpha, 2)}
           </span>
           {zoomDomain && (
             <button onClick={resetZoom}
               className="text-[10px] font-bold px-2 py-0.5 rounded border border-[#f59e0b]/50 text-[#f59e0b] hover:bg-[#f59e0b]/10 transition-colors">
-              RESET ZOOM
+              줌 초기화
             </button>
           )}
         </div>
@@ -478,7 +550,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
             {BM_BTNS.map(b => (
               <button key={b.key} onClick={() => setBm(b.key)}
                 className={cn('text-[11px] px-2.5 py-1 rounded font-bold transition-colors duration-100',
-                  bm === b.key ? '' : 'text-[#4a5568] hover:text-[#64748b]'
+                  bm === b.key ? '' : 'text-[#94a3b8] hover:text-[#94a3b8]'
                 )}
                 style={bm === b.key ? { backgroundColor: b.color + '28', color: b.color } : {}}>
                 {b.label}
@@ -489,9 +561,9 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
             {(['1M', '3M', '1Y', 'ALL'] as const).map(r => (
               <button key={r} onClick={() => changeRange(r)}
                 className={cn('text-[11px] px-2.5 py-1 rounded font-bold transition-colors duration-100',
-                  range === r ? 'bg-[#00e6ff]/15 text-[#00e6ff]' : 'text-[#4a5568] hover:text-[#64748b]'
+                  range === r ? 'bg-[#00e6ff]/15 text-[#00e6ff]' : 'text-[#94a3b8] hover:text-[#94a3b8]'
                 )}>
-                {r}
+                {r === 'ALL' ? '전체' : r}
               </button>
             ))}
           </div>
@@ -500,12 +572,12 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
 
       {curveQ.isLoading && (
         <div className="flex items-center justify-center" style={{ height: 300 }}>
-          <span className="text-[13px] text-[#334155] font-mono">로드 중…</span>
+          <span className="text-[13px] text-[#94a3b8] font-mono">로드 중…</span>
         </div>
       )}
       {!curveQ.isLoading && !data.length && (
         <div className="flex items-center justify-center" style={{ height: 300 }}>
-          <span className="text-[13px] text-[#334155] font-mono">데이터 없음</span>
+          <span className="text-[13px] text-[#94a3b8] font-mono">데이터 없음</span>
         </div>
       )}
 
@@ -530,8 +602,8 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
               <stop offset="100%" stopColor="#00e6ff" stopOpacity={0} />
             </linearGradient>
             <linearGradient id="gSP" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%"   stopColor="#64748b" stopOpacity={0.15} />
-              <stop offset="100%" stopColor="#64748b" stopOpacity={0} />
+              <stop offset="0%"   stopColor="#dc143c" stopOpacity={0.12} />
+              <stop offset="100%" stopColor="#dc143c" stopOpacity={0} />
             </linearGradient>
             <linearGradient id="gNQ" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%"   stopColor="#a78bfa" stopOpacity={0.15} />
@@ -554,7 +626,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
           />
           <Tooltip content={renderTooltip} />
           {(bm === 'sp500' || bm === 'both') && (
-            <Area type="monotone" dataKey="sp" stroke="#64748b" strokeWidth={1.5}
+            <Area type="monotone" dataKey="sp" stroke="#dc143c" strokeWidth={1.5}
               strokeDasharray="4 3" fill="url(#gSP)" dot={false}
               isAnimationActive={false} />
           )}
@@ -829,13 +901,13 @@ function HoldingsPanel({ holdQ, rawHoldings }: { holdQ: any; rawHoldings: Record
       <div className="flex items-center border-b border-[#1e2d40] flex-shrink-0 bg-[#070d18]">
         <button onClick={() => setView('holdings')}
           className={cn('text-[11px] font-bold tracking-[3px] uppercase px-3 py-2.5 transition-colors',
-            view === 'holdings' ? 'text-[#e2e8f0] border-b-2 border-[#3b82f6]' : 'text-[#4a5568] hover:text-[#64748b]')}>
-          Holdings
+            view === 'holdings' ? 'text-[#e2e8f0] border-b-2 border-[#3b82f6]' : 'text-[#94a3b8] hover:text-[#94a3b8]')}>
+          보유 종목
         </button>
         <button onClick={() => setView('history')}
           className={cn('flex items-center gap-1.5 text-[11px] font-bold tracking-[3px] uppercase px-3 py-2.5 transition-colors',
-            view === 'history' ? 'text-[#e2e8f0] border-b-2 border-[#3b82f6]' : 'text-[#4a5568] hover:text-[#64748b]')}>
-          <History className="w-3 h-3" />History
+            view === 'history' ? 'text-[#e2e8f0] border-b-2 border-[#3b82f6]' : 'text-[#94a3b8] hover:text-[#94a3b8]')}>
+          <History className="w-3 h-3" />거래 내역
         </button>
       </div>
 
@@ -845,8 +917,8 @@ function HoldingsPanel({ holdQ, rawHoldings }: { holdQ: any; rawHoldings: Record
           <div className="flex-1 overflow-y-auto min-h-0">
             <table className="w-full">
               <thead className="sticky top-0 bg-[#07101c] z-10">
-                <tr className="text-[#64748b] border-b border-[#1e2d40]">
-                  {['Ticker','Avg','Qty','Price','1D%','P&L','Wt','',''].map((hd, i) => (
+                <tr className="text-[#94a3b8] border-b border-[#1e2d40]">
+                  {['티커','평단가','수량','현재가','일변동률','누적수익률','비중','',''].map((hd, i) => (
                     <th key={i} className="text-left py-2.5 px-2.5 font-semibold text-[11px] tracking-wider">{hd}</th>
                   ))}
                 </tr>
@@ -896,22 +968,22 @@ function HoldingsPanel({ holdQ, rawHoldings }: { holdQ: any; rawHoldings: Record
                     ) : (
                       <>
                         <td className="py-2 px-2.5 font-mono font-bold text-[15px] text-[#e2e8f0]">{h.ticker}</td>
-                        <td className="py-2 px-2.5 font-mono text-[12px] text-[#94a3b8]">${fn(h.avg_cost, 2)}</td>
-                        <td className="py-2 px-2.5 font-mono text-[12px] text-[#94a3b8]">{fv(h.qty)}</td>
-                        <td className="py-2 px-2.5 font-mono text-[12px] text-[#cbd5e1]">${fn(h.current_price, 1)}</td>
+                        <td className="py-2 px-2.5 font-mono text-[12px] text-[#cbd5e1]">${fn(h.avg_cost, 2)}</td>
+                        <td className="py-2 px-2.5 font-mono text-[12px] text-[#cbd5e1]">{fv(h.qty)}</td>
+                        <td className="py-2 px-2.5 font-mono text-[12px] text-[#cbd5e1]">${fn(h.current_price, 2)}</td>
                         <td className="py-2 px-2.5 font-mono text-[13px] font-bold" style={{ color: fv(h.chg_pct) >= 0 ? '#10b981' : '#ef4444' }}>
                           {fp(h.chg_pct, 2)}
                         </td>
-                        <td className="py-2 px-2.5 font-mono text-[13px] font-bold" style={{ color: fv(h.pnl) >= 0 ? '#10b981' : '#ef4444' }}>
-                          {fp(h.pnl, 2)}
+                        <td className="py-2 px-2.5 font-mono text-[13px] font-bold" style={{ color: fv(h.pnl_pct) >= 0 ? '#10b981' : '#ef4444' }}>
+                          {fp(h.pnl_pct, 2)}
                         </td>
-                        <td className="py-2 px-2.5 font-mono text-[12px] text-[#94a3b8]">{fn(fv(h.weight) * 100, 0)}%</td>
+                        <td className="py-2 px-2.5 font-mono text-[12px] text-[#cbd5e1]">{fn(fv(h.weight) * 100, 0)}%</td>
                         {/* SELL 버튼 */}
                         <td className="py-2 px-1 opacity-0 group-hover:opacity-100 transition-opacity">
                           <button type="button"
                             onPointerDown={e => { e.preventDefault(); openSell(h) }}
                             className="text-[10px] font-bold text-[#f59e0b] border border-[#f59e0b]/40 rounded px-1.5 py-0.5 hover:bg-[#f59e0b]/15 transition-colors">
-                            SELL
+                            매도
                           </button>
                         </td>
                         {/* Edit / Delete */}
@@ -925,7 +997,7 @@ function HoldingsPanel({ holdQ, rawHoldings }: { holdQ: any; rawHoldings: Record
                                 setEditVals(newVals)
                                 editValsRef.current = newVals
                               }}
-                              className="text-[#374151] hover:text-[#3b82f6] transition-colors">
+                              className="text-[#94a3b8] hover:text-[#3b82f6] transition-colors">
                               <Edit3 className="w-3.5 h-3.5" />
                             </button>
                             <button type="button"
@@ -933,7 +1005,7 @@ function HoldingsPanel({ holdQ, rawHoldings }: { holdQ: any; rawHoldings: Record
                                 if (window.confirm(`${h.ticker} 보유를 삭제하시겠습니까?`))
                                   deleteMut.mutate(h.ticker)
                               }}
-                              className="text-[#374151] hover:text-[#ef4444] transition-colors">
+                              className="text-[#94a3b8] hover:text-[#ef4444] transition-colors">
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
                           </div>
@@ -946,20 +1018,20 @@ function HoldingsPanel({ holdQ, rawHoldings }: { holdQ: any; rawHoldings: Record
                     <tr className="border-b border-[#f59e0b]/20 bg-[#0a0e18]">
                       <td colSpan={9} className="px-3 py-2">
                         <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-[#f59e0b] font-mono font-bold text-[12px] flex-shrink-0">SELL {h.ticker}</span>
+                          <span className="text-[#f59e0b] font-mono font-bold text-[12px] flex-shrink-0">매도 {h.ticker}</span>
                           <input type="number" value={sellVals.q || ''}
                             onChange={e => setSellVals(v => ({ ...v, q: +e.target.value }))}
-                            placeholder="Qty" min={0.001} step={0.001}
+                            placeholder="수량" min={0.001} step={0.001}
                             className="w-16 bg-[#1e2d40] border border-[#334155] text-sm text-[#e2e8f0] rounded px-2 py-1" />
                           <input type="number" value={sellVals.price || ''}
                             onChange={e => setSellVals(v => ({ ...v, price: +e.target.value }))}
-                            placeholder={sellPriceLoading ? '조회중…' : 'Price'}
+                            placeholder={sellPriceLoading ? '조회중…' : '가격'}
                             disabled={sellPriceLoading}
                             className="w-20 bg-[#1e2d40] border border-[#334155] text-sm text-[#e2e8f0] rounded px-2 py-1" />
                           <input type="date" value={sellVals.date}
                             onChange={e => setSellVals(v => ({ ...v, date: e.target.value }))}
                             max={todayStr}
-                            className="bg-[#1e2d40] border border-[#334155] text-sm text-[#94a3b8] rounded px-2 py-1 [color-scheme:dark]" />
+                            className="bg-[#1e2d40] border border-[#334155] text-sm text-[#cbd5e1] rounded px-2 py-1 [color-scheme:dark]" />
                           <button type="button"
                             onClick={() => {
                               const v = sellValsRef.current
@@ -970,7 +1042,7 @@ function HoldingsPanel({ holdQ, rawHoldings }: { holdQ: any; rawHoldings: Record
                             {sellMut.isPending ? '…' : '확인'}
                           </button>
                           <button type="button" onClick={() => setSellTicker(null)}
-                            className="text-[#64748b] hover:text-[#94a3b8] text-[12px]">취소</button>
+                            className="text-[#94a3b8] hover:text-[#cbd5e1] text-[12px]">취소</button>
                         </div>
                       </td>
                     </tr>
@@ -981,58 +1053,6 @@ function HoldingsPanel({ holdQ, rawHoldings }: { holdQ: any; rawHoldings: Record
             </table>
           </div>
 
-          {/* 현금 잔고 */}
-          <div className="flex-shrink-0 border-t border-[#1e2d40] px-3 py-2 bg-[#060b14]">
-            {!cashOpen ? (
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] text-[#64748b] font-bold tracking-wider uppercase">
-                  현금 잔고
-                </span>
-                <div className="flex items-center gap-2">
-                  <span className="font-mono text-[13px] text-[#94a3b8]">
-                    {hasCash ? `$${cashBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—'}
-                  </span>
-                  <button
-                    onClick={() => { setCashOpen(true); setCashType('deposit'); setCashAmt(0) }}
-                    className="text-[11px] text-[#3b82f6] hover:text-[#60a5fa] border border-[#1e3a5f] rounded px-2 py-0.5 transition-colors">
-                    {hasCash ? '입금/출금' : '+ 초기 투자금 설정'}
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div className="flex items-center gap-2 flex-wrap">
-                <span className="text-[11px] text-[#64748b] font-bold">현금</span>
-                <select
-                  value={cashType}
-                  onChange={e => setCashType(e.target.value as 'deposit' | 'withdraw')}
-                  className="bg-[#0b1220] border border-[#1e2d40] text-[12px] text-[#94a3b8] rounded px-2 py-1 focus:outline-none">
-                  <option value="deposit">입금</option>
-                  <option value="withdraw">출금</option>
-                </select>
-                <input
-                  type="number"
-                  value={cashAmt || ''}
-                  onChange={e => setCashAmt(+e.target.value)}
-                  placeholder="금액"
-                  min={0}
-                  className="w-28 bg-[#0b1220] border border-[#1e2d40] text-[12px] font-mono text-[#e2e8f0] rounded px-2 py-1 focus:outline-none focus:border-[#3b82f6]"
-                />
-                <input
-                  type="date"
-                  value={cashDate}
-                  onChange={e => setCashDate(e.target.value)}
-                  className="bg-[#0b1220] border border-[#1e2d40] text-[12px] text-[#94a3b8] rounded px-2 py-1 [color-scheme:dark] focus:outline-none"
-                />
-                <button
-                  onClick={() => { if (cashAmt > 0 && !cashMut.isPending) cashMut.mutate() }}
-                  disabled={!cashAmt || cashMut.isPending}
-                  className="bg-[#1d4ed8]/80 hover:bg-[#2563eb] disabled:opacity-40 text-white rounded px-3 py-1 text-[12px] font-bold transition-colors">
-                  {cashMut.isPending ? '…' : '확인'}
-                </button>
-                <button onClick={() => setCashOpen(false)} className="text-[#64748b] hover:text-[#94a3b8] text-[12px]">취소</button>
-              </div>
-            )}
-          </div>
 
           {/* 거래 입력 폼 */}
           <div className="flex-shrink-0 border-t border-[#1e2d40] px-3 py-2 bg-[#060b14] space-y-2">
@@ -1050,7 +1070,7 @@ function HoldingsPanel({ holdQ, rawHoldings }: { holdQ: any; rawHoldings: Record
                   onChange={e => handleTickerChange(e.target.value)}
                   onBlur={handleTickerBlur}
                   onKeyDown={handleTickerKeyDown}
-                  placeholder="Ticker"
+                  placeholder="티커"
                   autoComplete="off"
                   className="w-24 bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#e2e8f0] rounded px-2 py-1.5 placeholder-[#334155] focus:outline-none focus:border-[#3b82f6]"
                 />
@@ -1061,10 +1081,10 @@ function HoldingsPanel({ holdQ, rawHoldings }: { holdQ: any; rawHoldings: Record
                         onMouseDown={e => { e.preventDefault(); selectSuggestion(s.ticker) }}
                         className={cn(
                           'flex items-center gap-2 w-full text-left px-3 py-2 transition-colors',
-                          idx === sugIdx ? 'bg-[#1e2d40] text-[#e2e8f0]' : 'text-[#94a3b8] hover:bg-[#0f1e30] hover:text-[#e2e8f0]'
+                          idx === sugIdx ? 'bg-[#1e2d40] text-[#e2e8f0]' : 'text-[#cbd5e1] hover:bg-[#0f1e30] hover:text-[#e2e8f0]'
                         )}>
                         <span className="font-mono font-bold text-[13px] flex-shrink-0">{s.ticker}</span>
-                        <span className="text-[11px] text-[#475569] truncate">{s.name}</span>
+                        <span className="text-[11px] text-[#94a3b8] truncate">{s.name}</span>
                       </button>
                     ))}
                   </div>
@@ -1073,23 +1093,23 @@ function HoldingsPanel({ holdQ, rawHoldings }: { holdQ: any; rawHoldings: Record
 
               {/* BUY / SELL */}
               <select value={form.type} onChange={e => setForm(f => ({ ...f, type: e.target.value }))}
-                className="bg-[#0b1220] border border-[#1e2d40] text-sm text-[#94a3b8] rounded px-2 py-1.5 focus:outline-none focus:border-[#3b82f6]">
-                <option value="BUY">BUY</option>
-                <option value="SELL">SELL</option>
+                className="bg-[#0b1220] border border-[#1e2d40] text-sm text-[#cbd5e1] rounded px-2 py-1.5 focus:outline-none focus:border-[#3b82f6]">
+                <option value="BUY">매수</option>
+                <option value="SELL">매도</option>
               </select>
 
               {/* QTY — 스크롤 지원 */}
               <input type="number" value={form.q || ''}
                 onChange={e => setForm(f => ({ ...f, q: +e.target.value }))}
                 onWheel={handleQtyWheel}
-                placeholder="Qty" min={0} step={1}
+                placeholder="수량" min={0} step={1}
                 className="w-14 bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#e2e8f0] rounded px-2 py-1.5 placeholder-[#334155] focus:outline-none focus:border-[#3b82f6]"
               />
 
               {/* Price — 직접 입력만 (현재가 자동 조회 유지) */}
               <input type="number" value={form.price || ''}
                 onChange={e => setForm(f => ({ ...f, price: +e.target.value }))}
-                placeholder={priceLoading ? '조회중…' : 'Price'}
+                placeholder={priceLoading ? '조회중…' : '가격'}
                 disabled={priceLoading}
                 className="w-24 bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#e2e8f0] rounded px-2 py-1.5 placeholder-[#334155] focus:outline-none focus:border-[#3b82f6]"
               />
@@ -1098,7 +1118,7 @@ function HoldingsPanel({ holdQ, rawHoldings }: { holdQ: any; rawHoldings: Record
               <input type="date" value={form.date}
                 onChange={e => setForm(f => ({ ...f, date: e.target.value }))}
                 max={todayStr}
-                className="bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#94a3b8] rounded px-2 py-1.5 focus:outline-none focus:border-[#3b82f6] [color-scheme:dark]"
+                className="bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#cbd5e1] rounded px-2 py-1.5 focus:outline-none focus:border-[#3b82f6] [color-scheme:dark]"
               />
 
               {/* Submit — onPointerDown으로 ticker blur보다 먼저 발화 */}
@@ -1117,17 +1137,68 @@ function HoldingsPanel({ holdQ, rawHoldings }: { holdQ: any; rawHoldings: Record
         </>
       )}
 
+      {/* 현금 잔고 — 항상 표시 */}
+      <div className="flex-shrink-0 border-t border-[#1e2d40] px-3 py-2 bg-[#060b14]">
+        {!cashOpen ? (
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] text-[#94a3b8] font-bold tracking-wider uppercase">현금 잔고</span>
+            <div className="flex items-center gap-2">
+              <span className="font-mono text-[13px] text-[#cbd5e1]">
+                {hasCash ? `$${cashBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—'}
+              </span>
+              <button
+                onClick={() => { setCashOpen(true); setCashType('deposit'); setCashAmt(0) }}
+                className="text-[11px] text-[#3b82f6] hover:text-[#60a5fa] border border-[#1e3a5f] rounded px-2 py-0.5 transition-colors">
+                {hasCash ? '입금/출금' : '+ 초기 투자금 설정'}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-[11px] text-[#94a3b8] font-bold">현금</span>
+            <select
+              value={cashType}
+              onChange={e => setCashType(e.target.value as 'deposit' | 'withdraw')}
+              className="bg-[#0b1220] border border-[#1e2d40] text-[12px] text-[#cbd5e1] rounded px-2 py-1 focus:outline-none">
+              <option value="deposit">입금</option>
+              <option value="withdraw">출금</option>
+            </select>
+            <input
+              type="number"
+              value={cashAmt || ''}
+              onChange={e => setCashAmt(+e.target.value)}
+              placeholder="금액"
+              min={0}
+              className="w-28 bg-[#0b1220] border border-[#1e2d40] text-[12px] font-mono text-[#e2e8f0] rounded px-2 py-1 focus:outline-none focus:border-[#3b82f6]"
+            />
+            <input
+              type="date"
+              value={cashDate}
+              onChange={e => setCashDate(e.target.value)}
+              className="bg-[#0b1220] border border-[#1e2d40] text-[12px] text-[#cbd5e1] rounded px-2 py-1 [color-scheme:dark] focus:outline-none"
+            />
+            <button
+              onClick={() => { if (cashAmt > 0 && !cashMut.isPending) cashMut.mutate() }}
+              disabled={!cashAmt || cashMut.isPending}
+              className="bg-[#1d4ed8]/80 hover:bg-[#2563eb] disabled:opacity-40 text-white rounded px-3 py-1 text-[12px] font-bold transition-colors">
+              {cashMut.isPending ? '…' : '확인'}
+            </button>
+            <button onClick={() => setCashOpen(false)} className="text-[#94a3b8] hover:text-[#cbd5e1] text-[12px]">취소</button>
+          </div>
+        )}
+      </div>
+
       {/* ── History 뷰 ──────────────────────────────────────────────────── */}
       {view === 'history' && (
         <div className="flex-1 overflow-y-auto min-h-0">
-          {tradesQ.isLoading && <div className="text-center py-4 text-sm text-[#64748b]">로드 중…</div>}
+          {tradesQ.isLoading && <div className="text-center py-4 text-sm text-[#94a3b8]">로드 중…</div>}
           {!tradesQ.isLoading && trades.length === 0 && (
-            <div className="flex items-center justify-center h-full text-sm text-[#4a5568]">거래 기록 없음</div>
+            <div className="flex items-center justify-center h-full text-sm text-[#94a3b8]">거래 기록 없음</div>
           )}
           <table className="w-full">
             <thead className="sticky top-0 bg-[#07101c] z-10">
-              <tr className="text-[#64748b] border-b border-[#1e2d40]">
-                {['Date', 'Ticker', 'Type', 'Qty', 'Price', 'Memo', ''].map(h => (
+              <tr className="text-[#94a3b8] border-b border-[#1e2d40]">
+                {['날짜', 'Ticker', '유형', '수량', '가격', '메모', ''].map(h => (
                   <th key={h} className="text-left py-2.5 px-2 font-semibold text-[11px] tracking-wider">{h}</th>
                 ))}
               </tr>
@@ -1181,24 +1252,24 @@ function HoldingsPanel({ holdQ, rawHoldings }: { holdQ: any; rawHoldings: Record
                     </>
                   ) : (
                     <>
-                      <td className="py-2 px-2 font-mono text-[11px] text-[#64748b]">{t.date}</td>
+                      <td className="py-2 px-2 font-mono text-[11px] text-[#94a3b8]">{t.date}</td>
                       <td className="py-2 px-2 font-mono font-bold text-[13px] text-[#e2e8f0]">{t.ticker}</td>
                       <td className="py-2 px-2 text-[11px] font-bold"
                         style={{ color: t.type === 'ADD' || t.type === 'BUY' ? '#10b981' : '#ef4444' }}>
                         {t.type}
                       </td>
-                      <td className="py-2 px-2 font-mono text-[12px] text-[#94a3b8]">{t.q}</td>
+                      <td className="py-2 px-2 font-mono text-[12px] text-[#cbd5e1]">{t.q}</td>
                       <td className="py-2 px-2 font-mono text-[12px] text-[#cbd5e1]">{t.price ? `$${t.price}` : '—'}</td>
-                      <td className="py-2 px-2 text-[11px] text-[#475569] max-w-[80px] truncate">{t.memo || ''}</td>
+                      <td className="py-2 px-2 text-[11px] text-[#94a3b8] max-w-[80px] truncate">{t.memo || ''}</td>
                       <td className="py-2 px-2 opacity-0 group-hover:opacity-100 transition-opacity">
                         <div className="flex gap-1">
                           <button onClick={() => {
                             setEditTradeId(t.id)
                             setEditTradeVals({ date: t.date, q: t.q, price: t.price || 0, memo: t.memo || '' })
-                          }} className="text-[#374151] hover:text-[#3b82f6]"><Edit3 className="w-3 h-3" /></button>
+                          }} className="text-[#94a3b8] hover:text-[#3b82f6]"><Edit3 className="w-3 h-3" /></button>
                           <button
                             onClick={() => { if (confirm('삭제하시겠습니까?')) deleteTradeMut.mutate(t.id) }}
-                            className="text-[#374151] hover:text-[#ef4444]"><Trash2 className="w-3 h-3" /></button>
+                            className="text-[#94a3b8] hover:text-[#ef4444]"><Trash2 className="w-3 h-3" /></button>
                         </div>
                       </td>
                     </>
@@ -1251,7 +1322,7 @@ function SectorsPanel({
         <Sector cx={cx} cy={cy} innerRadius={innerRadius} outerRadius={outerRadius + 5}
           startAngle={startAngle} endAngle={endAngle} fill={fill} />
         <text x={cx} y={cy - 12} textAnchor="middle" fill="#94a3b8" fontSize={11} fontFamily="ui-monospace,monospace">
-          {payload.name.length > 10 ? payload.name.slice(0, 10) + '…' : payload.name}
+          {toKoSector(payload.name)}
         </text>
         <text x={cx} y={cy + 12} textAnchor="middle" fill={fill} fontSize={20} fontWeight="700" fontFamily="ui-monospace,monospace">
           {`${(percent * 100).toFixed(1)}%`}
@@ -1265,8 +1336,8 @@ function SectorsPanel({
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
-      <div className="text-[11px] text-[#94a3b8] font-bold tracking-[3px] uppercase px-3 py-2.5 border-b border-[#1e2d40] flex-shrink-0 bg-[#070d18]">
-        Sectors
+      <div className="text-[11px] text-[#cbd5e1] font-bold tracking-[3px] uppercase px-3 py-2.5 border-b border-[#1e2d40] flex-shrink-0 bg-[#070d18]">
+        섹터 비중
       </div>
       <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* 원형 그래프 — 40% 증가: 150→210 */}
@@ -1302,8 +1373,8 @@ function SectorsPanel({
             <div
               className="fixed z-50 bg-[#0b1220] border border-[#1e2d40] rounded shadow-lg px-3 py-2 pointer-events-none"
               style={{ left: mousePos.x + 16, top: mousePos.y - 10 }}>
-              <div className="text-[10px] text-[#64748b] font-bold tracking-wider mb-1.5 uppercase">
-                {hoveredSector}
+              <div className="text-[10px] text-[#94a3b8] font-bold tracking-wider mb-1.5 uppercase">
+                {toKoSector(hoveredSector!)}
               </div>
               {tooltipTickers.map(t => (
                 <div key={t} className="text-[12px] font-mono text-[#cbd5e1]">{t}</div>
@@ -1322,8 +1393,8 @@ function SectorsPanel({
               <div className="w-2.5 h-2.5 rounded-full flex-shrink-0"
                 style={{ backgroundColor: s.fill, opacity: active === i ? 1 : 0.65 }} />
               <span className="text-[12px] truncate flex-1 transition-colors"
-                style={{ color: active === i ? '#cbd5e1' : '#64748b' }}>
-                {s.name}
+                style={{ color: active === i ? '#cbd5e1' : '#94a3b8' }}>
+                {toKoSector(s.name)}
               </span>
               <div className="w-12 h-2 bg-[#1e2d40] rounded-full overflow-hidden flex-shrink-0">
                 <div className="h-full rounded-full transition-all duration-300"
@@ -1334,7 +1405,7 @@ function SectorsPanel({
                   }} />
               </div>
               <span className="text-[12px] font-mono font-bold w-9 text-right flex-shrink-0 tabular-nums"
-                style={{ color: active === i ? s.fill : '#475569' }}>
+                style={{ color: active === i ? s.fill : '#94a3b8' }}>
                 {s.value}%
               </span>
             </div>
@@ -1345,11 +1416,101 @@ function SectorsPanel({
   )
 }
 
+// ── Sector Performance Panel ──────────────────────────────────────────────────
+type PerfPeriod = '1d' | '1w' | '1m' | '3m' | '6m'
+
+const PERF_PERIODS: { key: PerfPeriod; label: string; field: string }[] = [
+  { key: '1d', label: '1D', field: 'change_1d_pct' },
+  { key: '1w', label: '1W', field: 'change_1w_pct' },
+  { key: '1m', label: '1M', field: 'change_1m_pct' },
+  { key: '3m', label: '3M', field: 'change_3m_pct' },
+  { key: '6m', label: '6M', field: 'change_6m_pct' },
+]
+
+function SectorPerfPanel({ sectorTableQ }: { sectorTableQ: any }) {
+  const [period, setPeriod] = useState<PerfPeriod>('1d')
+
+  const pDef = PERF_PERIODS.find(p => p.key === period)!
+  const rows: any[] = (sectorTableQ.data || [])
+  const sorted = [...rows]
+    .map(r => ({
+      name: SECTOR_LABEL_KO[r.sector] ?? r.sector,
+      etf:  r.etf as string,
+      val:  (r[pDef.field] ?? 0) as number,
+    }))
+    .sort((a, b) => b.val - a.val)
+
+  const maxAbs = Math.max(...sorted.map(s => Math.abs(s.val)), 0.01)
+
+  return (
+    <div className="flex flex-col h-full overflow-hidden">
+      {/* Header */}
+      <div className="flex items-center justify-between px-3 py-2.5 border-b border-[#1e2d40] flex-shrink-0 bg-[#070d18]">
+        <span className="text-[11px] text-[#cbd5e1] font-bold tracking-[3px] uppercase">섹터 수익률</span>
+        <div className="flex gap-0.5">
+          {PERF_PERIODS.map(p => (
+            <button key={p.key} onClick={() => setPeriod(p.key)}
+              className={cn(
+                'px-2 py-0.5 rounded text-[10px] font-mono font-bold transition-colors',
+                period === p.key
+                  ? 'bg-[#1e2d40] text-[#00e6ff]'
+                  : 'text-[#94a3b8] hover:text-[#cbd5e1]'
+              )}>
+              {p.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Bars */}
+      <div className="flex-1 min-h-0 px-3 py-2 overflow-hidden">
+        {sectorTableQ.isLoading ? (
+          <div className="flex h-full items-center justify-center text-[11px] text-[#94a3b8]">로딩 중...</div>
+        ) : sorted.length === 0 ? (
+          <div className="flex h-full items-center justify-center text-[11px] text-[#94a3b8]">데이터 없음</div>
+        ) : (
+          <div className="flex flex-col h-full justify-around">
+            {sorted.map(s => {
+              const pos = s.val >= 0
+              const barW = (Math.abs(s.val) / maxAbs) * 100
+              return (
+                <div key={s.etf} className="flex items-center gap-2">
+                  <span className="text-[10px] text-[#94a3b8] w-[52px] text-right flex-shrink-0 font-medium truncate">
+                    {s.name}
+                  </span>
+                  <div className="flex-1 h-[14px] bg-[#0a1422] rounded-sm overflow-hidden">
+                    <div
+                      className="h-full rounded-sm transition-all duration-300"
+                      style={{
+                        width: `${barW}%`,
+                        backgroundColor: pos ? '#10b981' : '#ef4444',
+                        opacity: 0.9,
+                      }}
+                    />
+                  </div>
+                  <span className={cn(
+                    'text-[10px] font-mono font-bold w-[42px] text-right flex-shrink-0 tabular-nums',
+                    pos ? 'text-[#10b981]' : 'text-[#ef4444]'
+                  )}>
+                    {pos ? '+' : ''}{s.val.toFixed(1)}%
+                  </span>
+                  <span className="text-[9px] text-[#1e3a5f] w-[26px] flex-shrink-0 font-mono">{s.etf}</span>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // sessionStorage keys
 const SK_CONTENT  = 'pfp_brief_content'
 const SK_FILE     = 'pfp_brief_file'
 const SK_LOGS     = 'pfp_brief_logs'
 const SK_PENDING  = 'pfp_brief_pending'
+const SK_START    = 'pfp_brief_start'
 
 // ── Daily Brief (right panel) ─────────────────────────────────────────────────
 function DailyBriefPanel() {
@@ -1358,10 +1519,13 @@ function DailyBriefPanel() {
   const [logs, setLogs]         = useState<string[]>(() => {
     try { return JSON.parse(sessionStorage.getItem(SK_LOGS) || '[]') } catch { return [] }
   })
-  const [wasPending, setWasPending] = useState(() => sessionStorage.getItem(SK_PENDING) === '1')
-  const [showHist,  setShowHist]    = useState(false)
-  const [pdfBusy,   setPdfBusy]     = useState(false)
-  const contentRef                  = useRef<HTMLDivElement>(null)
+  const [wasPending,  setWasPending]  = useState(() => sessionStorage.getItem(SK_PENDING) === '1')
+  const [generating,  setGenerating]  = useState(false)
+  const [showHist,    setShowHist]    = useState(false)
+  const [pdfBusy,     setPdfBusy]     = useState(false)
+  const [progress,    setProgress]    = useState(0)
+  const [elapsedMs,   setElapsedMs]   = useState(0)
+  const contentRef                    = useRef<HTMLDivElement>(null)
 
   const histQ   = useQuery({ queryKey: ['daily-brief-history'], queryFn: getDailyBriefHistory, staleTime: 60_000 })
   const fileMut = useMutation({
@@ -1374,29 +1538,41 @@ function DailyBriefPanel() {
   const genMut = useMutation({
     mutationFn: generateDailyBrief,
     onMutate: () => {
-      setLogs(['[1/3] 가격 데이터 수집…'])
+      setGenerating(true)
       setContent(null)
+      setLogs([])
       setWasPending(false)
+      setProgress(0)
+      setElapsedMs(0)
       sessionStorage.removeItem(SK_CONTENT)
       sessionStorage.setItem(SK_PENDING, '1')
-      sessionStorage.setItem(SK_LOGS, JSON.stringify(['[1/3] 가격 데이터 수집…']))
+      sessionStorage.setItem(SK_START, String(Date.now()))
+      sessionStorage.setItem(SK_LOGS, JSON.stringify([]))
     },
     onSuccess: d => {
       const newLogs = d.logs?.length ? d.logs : ['완료']
+      setGenerating(false)
+      setWasPending(false)
       setContent(d.report)
       setLogs(newLogs)
+      setProgress(100)
       sessionStorage.setItem(SK_CONTENT, d.report)
       sessionStorage.setItem(SK_LOGS, JSON.stringify(newLogs))
       sessionStorage.removeItem(SK_PENDING)
+      sessionStorage.removeItem(SK_START)
       histQ.refetch()
     },
     onError: (e: any) => {
+      setGenerating(false)
+      setWasPending(false)
+      setProgress(0)
       setLogs(prev => {
         const next = [...prev, `오류: ${e.message}`]
         sessionStorage.setItem(SK_LOGS, JSON.stringify(next))
         return next
       })
       sessionStorage.removeItem(SK_PENDING)
+      sessionStorage.removeItem(SK_START)
     },
   })
 
@@ -1409,7 +1585,7 @@ function DailyBriefPanel() {
       const html2canvas = (h2cMod as any).default ?? h2cMod
 
       const dateStr  = new Date().toLocaleDateString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric' })
-      const titleStr = file ? file.replace(/\.md$/, '') : `Daily Brief · ${dateStr}`
+      const titleStr = file ? file.replace(/\.md$/, '') : `전날 브리핑 · ${dateStr}`
 
       const wrap = document.createElement('div')
       wrap.style.cssText = 'position:fixed;top:0;left:0;width:800px;background:#fff;z-index:-9999;pointer-events:none'
@@ -1478,21 +1654,45 @@ function DailyBriefPanel() {
     }
   }
 
-  const isGenerating = genMut.isPending
+  const isActivelyGenerating = generating || (wasPending && !content)
+
+  useEffect(() => {
+    if (!isActivelyGenerating) return
+    const startMs = parseInt(sessionStorage.getItem(SK_START) || String(Date.now()), 10)
+    const MAX_MS  = 120_000  // 2분 기준
+    const tick = () => {
+      const ms = Date.now() - startMs
+      setElapsedMs(ms)
+      setProgress(Math.min(95, (ms / MAX_MS) * 100))
+    }
+    tick()
+    const id = setInterval(tick, 500)
+    return () => clearInterval(id)
+  }, [isActivelyGenerating])
+
+  // 경과 시간 기반 단계 표시 (백엔드 로그는 완료 시에만 도착하므로 프론트에서 시뮬레이션)
+  const STAGE_LABELS = [
+    '1/3  yfinance 가격 데이터 수집 중...',
+    '2/3  뉴스 헤드라인 수집 중...',
+    '3/3  AI 브리프 생성 중 (약 30~60초)...',
+  ]
+  const displayLogs = isActivelyGenerating
+    ? STAGE_LABELS.slice(0, elapsedMs < 10_000 ? 1 : elapsedMs < 30_000 ? 2 : 3)
+    : logs
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
       <div className="flex-shrink-0 flex gap-2 p-3 border-b border-[#1e2d40]">
-        <button onClick={() => genMut.mutate()} disabled={isGenerating}
+        <button onClick={() => genMut.mutate()} disabled={isActivelyGenerating}
           className="flex-1 flex items-center justify-center gap-2 py-2 bg-[#10b981]/12 border border-[#10b981]/30 text-[#10b981] text-[11px] font-bold rounded hover:bg-[#10b981]/20 disabled:opacity-50 transition-colors">
           <Play className="w-3.5 h-3.5" />
-          {isGenerating ? 'GENERATING…' : 'GENERATE BRIEF'}
+          {isActivelyGenerating ? '생성 중…' : '브리핑 생성'}
         </button>
         <button onClick={downloadPDF} disabled={!content || pdfBusy} title="PDF로 다운로드"
           className={cn('px-3 py-2 rounded border text-[11px] font-bold transition-colors flex items-center gap-1.5',
             content && !pdfBusy
               ? 'border-[#3b82f6]/50 bg-[#3b82f6]/10 text-[#3b82f6] hover:bg-[#3b82f6]/20'
-              : 'border-[#1e2d40] text-[#374151] cursor-not-allowed opacity-40'
+              : 'border-[#1e2d40] text-[#94a3b8] cursor-not-allowed opacity-40'
           )}>
           {pdfBusy
             ? <span className="w-3.5 h-3.5 border-2 border-[#3b82f6] border-t-transparent rounded-full animate-spin" />
@@ -1501,20 +1701,11 @@ function DailyBriefPanel() {
         </button>
         <button onClick={() => setShowHist(h => !h)}
           className={cn('px-3 py-2 rounded border transition-colors',
-            showHist ? 'bg-[#1e2d40] border-[#64748b]/50 text-[#94a3b8]' : 'border-[#1e2d40] text-[#64748b] hover:text-[#94a3b8]'
+            showHist ? 'bg-[#1e2d40] border-[#64748b]/50 text-[#cbd5e1]' : 'border-[#1e2d40] text-[#94a3b8] hover:text-[#cbd5e1]'
           )}>
           <FileText className="w-4 h-4" />
         </button>
       </div>
-
-      {wasPending && !isGenerating && !content && (
-        <div className="flex-shrink-0 border-b border-[#f59e0b]/30 px-3 py-2 bg-[#f59e0b]/8 flex items-center gap-2">
-          <span className="w-2 h-2 rounded-full bg-[#f59e0b] flex-shrink-0" />
-          <span className="text-[11px] text-[#f59e0b] flex-1">생성이 진행 중이었습니다. 히스토리에서 완료된 보고서를 확인하세요.</span>
-          <button onClick={() => { setWasPending(false); sessionStorage.removeItem(SK_PENDING); setShowHist(true); histQ.refetch() }}
-            className="text-[10px] text-[#f59e0b] underline whitespace-nowrap">히스토리 열기</button>
-        </div>
-      )}
 
       {showHist && (
         <div className="flex-shrink-0 max-h-40 overflow-y-auto border-b border-[#1e2d40] bg-[#060b14]">
@@ -1526,7 +1717,7 @@ function DailyBriefPanel() {
                 setWasPending(false); sessionStorage.removeItem(SK_PENDING)
               }}
               className={cn('w-full text-left px-3 py-2 text-[12px] border-b border-[#0f172a] font-mono truncate transition-colors',
-                file === f.name ? 'text-[#10b981] bg-[#0f172a]' : 'text-[#64748b] hover:text-[#94a3b8] hover:bg-[#0a1020]'
+                file === f.name ? 'text-[#10b981] bg-[#0f172a]' : 'text-[#94a3b8] hover:text-[#cbd5e1] hover:bg-[#0a1020]'
               )}>
               {f.name}
             </button>
@@ -1534,28 +1725,43 @@ function DailyBriefPanel() {
         </div>
       )}
 
-      {isGenerating && (
+      {isActivelyGenerating && (
         <div className="flex-shrink-0 border-b border-[#1e2d40] px-3 py-2.5 space-y-1.5 bg-[#060b14]">
-          {logs.map((l, i) => (
+          {displayLogs.map((l, i) => (
             <div key={i} className="text-[12px] text-[#10b981] font-mono flex items-center gap-2">
               <ChevronRight className="w-3.5 h-3.5 flex-shrink-0" />{l}
             </div>
           ))}
           <div className="flex items-center gap-2 pt-0.5">
-            <span className="w-2 h-2 rounded-full bg-[#10b981] animate-pulse" />
-            <span className="text-[11px] text-[#64748b]">AI 분석 중… (~1-2분)</span>
+            <span className="w-2 h-2 rounded-full bg-[#10b981] animate-pulse flex-shrink-0" />
+            <span className="text-[11px] text-[#94a3b8]">
+              {wasPending && !generating ? '백그라운드 생성 중… (잠시 후 자동 완료)' : 'AI 분석 중… (~1-2분)'}
+            </span>
+          </div>
+          {/* 진행률 막대 */}
+          <div className="pt-1 space-y-1">
+            <div className="h-1.5 bg-[#1e2d40] rounded-full overflow-hidden">
+              <div
+                className="h-full bg-gradient-to-r from-[#10b981] to-[#34d399] rounded-full transition-all duration-500"
+                style={{ width: `${progress}%` }}
+              />
+            </div>
+            <div className="flex justify-between">
+              <span className="text-[10px] text-[#94a3b8]">분석 진행 중</span>
+              <span className="text-[10px] text-[#10b981] font-mono tabular-nums">{Math.round(progress)}%</span>
+            </div>
           </div>
         </div>
       )}
 
       <div className="flex-1 overflow-y-auto">
-        {!content && !isGenerating && !wasPending && (
+        {!content && !isActivelyGenerating && (
           <div className="flex flex-col items-center justify-center h-full gap-3 p-5 text-center">
             <FileText className="w-12 h-12 text-[#10b981]/20" />
-            <p className="text-sm text-[#64748b] leading-relaxed">GENERATE를 눌러<br/>AI 데일리 브리프를 생성하세요</p>
+            <p className="text-sm text-[#94a3b8] leading-relaxed">브리핑 생성 버튼을 눌러<br/>AI 데일리 브리핑을 생성하세요</p>
           </div>
         )}
-        {content && !isGenerating && (
+        {content && !isActivelyGenerating && (
           <div ref={contentRef} className="p-4 brief-md">
             <ReactMarkdown>{content}</ReactMarkdown>
           </div>
@@ -1566,8 +1772,8 @@ function DailyBriefPanel() {
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
-const BOT_TABS   = ['Earnings', 'Macro']
-const RIGHT_TABS = ['Brief', 'AI Feed', 'News']
+const BOT_TABS   = ['실적/배당', '시장지표']
+const RIGHT_TABS = ['전날 브리핑', 'AI 피드백', '뉴스']
 
 export default function AlphaTerminal() {
   const qc = useQueryClient()
@@ -1582,12 +1788,22 @@ export default function AlphaTerminal() {
   // 보유 종목 상세: 60초 (현재가 업데이트용)
   const holdQ     = useQuery({ queryKey: ['holdings-detail'],   queryFn: getHoldingsDetail,      refetchInterval: 60_000,  staleTime: 55_000 })
   const rawHoldQ  = useQuery({ queryKey: ['holdings-raw'],      queryFn: getHoldings,            staleTime: 300_000 })
-  const sectorQ   = useQuery({ queryKey: ['sector-weights'],    queryFn: getSectorWeights,       staleTime: 300_000 })
+  const sectorQ      = useQuery({ queryKey: ['sector-weights'],  queryFn: getSectorWeights,   staleTime: 300_000 })
+  const sectorTableQ = useQuery({ queryKey: ['sector-table'],    queryFn: getMarketSectors,   staleTime: 300_000, refetchInterval: 300_000 })
   // 시장 스냅샷: 60초 주기 (마커 바 업데이트)
   const snapQ     = useQuery({ queryKey: ['market-snapshot'],   queryFn: getMarketSnapshot,      refetchInterval: 60_000,  staleTime: 55_000 })
   const macroQ    = useQuery({ queryKey: ['macro-data'],        queryFn: getMacroData,           staleTime: 600_000 })
   // analyst-feedback(LLM): AI Feed 탭 활성 시에만 요청 (느린 LLM 호출 — 페이지 로드에서 제외)
-  const feedbackQ = useQuery({ queryKey: ['analyst-feedback'],  queryFn: getAnalystFeedback,     staleTime: 300_000, enabled: rightTab === 1 })
+  const feedbackQ = useQuery({
+    queryKey: ['analyst-feedback'],
+    queryFn: () => getAnalystFeedback(m ? {
+      vix: m.vix,
+      portfolio_beta: m.portfolio_beta,
+      today_chg_pct: m.today_change_pct,
+    } : undefined),
+    staleTime: 300_000,
+    enabled: rightTab === 1,
+  })
 
   const holdTickers = Object.keys(rawHoldQ.data || {}).filter(t => t !== 'CASH').join(',')
   // 뉴스: News 탭 활성 시에만 요청
@@ -1607,23 +1823,36 @@ export default function AlphaTerminal() {
 
   const m = metricsQ.data
 
+  // 누적 알파: 첫 매수일부터 현재까지 포트폴리오 - S&P 500 수익 차이
+  const absAlpha = useMemo(() => {
+    const raw: any[] = curveQ.data || []
+    if (!raw.length) return null
+    const pLast = [...raw].reverse().find((d: any) => d.port != null)
+    const sLast = [...raw].reverse().find((d: any) => d.sp != null)
+    if (!pLast || !sLast) return null
+    return Number(pLast.port) - Number(sLast.sp)
+  }, [curveQ.data])
+
   return (
     <div className="flex flex-col h-full bg-[#0b0f1a] overflow-hidden">
 
       {/* ── Metrics bar ── */}
-      <div className="flex-shrink-0 bg-[#060b14] border-b border-[#1e2d40]">
-        {m && (
-          <div className="flex items-stretch overflow-x-auto">
-            <Pill label="PORTFOLIO"  value={`$${fn(fv(m.total_equity) / 1000, 1)}K`} />
-            <Pill label="TODAY"      value={fp(m.today_change_pct)}  color={fv(m.today_change_pct) >= 0 ? '#10b981' : '#ef4444'} />
-            <Pill label="1W"         value={fp(m.perf_1w)}           color={fv(m.perf_1w) >= 0 ? '#10b981' : '#ef4444'} />
-            <Pill label="1M"         value={fp(m.perf_1m)}           color={fv(m.perf_1m) >= 0 ? '#10b981' : '#ef4444'} />
-            <Pill label="TOTAL RTN"  value={fp(m.total_return_pct)}  color={fv(m.total_return_pct) >= 0 ? '#10b981' : '#ef4444'} />
-            <Pill label="BETA"       value={fn(m.portfolio_beta)} />
-            <Pill label="VIX"        value={fn(m.vix)}               color={fv(m.vix) > 25 ? '#ef4444' : fv(m.vix) > 18 ? '#f59e0b' : '#10b981'} />
-            <Pill label="α vs S&P"   value={fp(m.alpha_vs_sp500, 1)} color={fv(m.alpha_vs_sp500) >= 0 ? '#10b981' : '#ef4444'} />
-          </div>
-        )}
+      <div className="flex-shrink-0 bg-[#060b14] border-b border-[#1e2d40] flex items-stretch">
+        <div className="flex flex-1 min-w-0 overflow-x-auto">
+          {m && (
+            <>
+              <Pill label="총 자산" value={`$${fn(fv(m.total_equity) / 1000, 2)}K`} />
+              <Pill label="1Day"       value={fp(m.today_change_pct)}  color={fv(m.today_change_pct) >= 0 ? '#10b981' : '#ef4444'} />
+              <Pill label="1Week"         value={fp(m.perf_1w)}           color={fv(m.perf_1w) >= 0 ? '#10b981' : '#ef4444'} />
+              <Pill label="1Month"         value={fp(m.perf_1m)}           color={fv(m.perf_1m) >= 0 ? '#10b981' : '#ef4444'} />
+              <Pill label="누적 수익"  value={fp(m.total_return_pct)}  color={fv(m.total_return_pct) >= 0 ? '#10b981' : '#ef4444'} />
+              <Pill label="베타"       value={fn(m.portfolio_beta)} />
+              <Pill label="변동성"        value={fn(m.vix)}               color={fv(m.vix) > 25 ? '#ef4444' : fv(m.vix) > 18 ? '#f59e0b' : '#10b981'} />
+              <Pill label="알파"   value={fp(absAlpha ?? fv(m.alpha_vs_sp500), 2)} color={(absAlpha ?? fv(m.alpha_vs_sp500)) >= 0 ? '#10b981' : '#ef4444'} />
+            </>
+          )}
+        </div>
+        <Clock />
       </div>
 
       {/* ── Marquee ── */}
@@ -1638,16 +1867,21 @@ export default function AlphaTerminal() {
           {/* A: Equity Curve */}
           <EquityCurve curveQ={curveQ} />
 
-          {/* B: Holdings + Sectors */}
-          <div className="flex border-b border-[#1e2d40]" style={{ height: '330px' }}>
-            <div className="border-r border-[#1e2d40] overflow-hidden" style={{ width: '55%' }}>
-              <HoldingsPanel holdQ={holdQ} rawHoldings={rawHoldQ.data || {}} />
-            </div>
-            <div className="overflow-hidden" style={{ width: '45%' }}>
+          {/* B: Holdings */}
+          <div className="border-b border-[#1e2d40]" style={{ height: '460px' }}>
+            <HoldingsPanel holdQ={holdQ} rawHoldings={rawHoldQ.data || {}} />
+          </div>
+
+          {/* B2: Sectors + Sector Performance */}
+          <div className="border-b border-[#1e2d40] flex" style={{ height: '300px' }}>
+            <div className="border-r border-[#1e2d40]" style={{ width: '50%' }}>
               <SectorsPanel
                 sectorData={sectorQ.data || {}}
                 rawHoldings={rawHoldQ.data || {}}
               />
+            </div>
+            <div style={{ width: '50%' }}>
+              <SectorPerfPanel sectorTableQ={sectorTableQ} />
             </div>
           </div>
 
@@ -1657,7 +1891,7 @@ export default function AlphaTerminal() {
               {BOT_TABS.map((t, i) => (
                 <button key={t} onClick={() => setBotTab(i)}
                   className={cn('px-5 py-2.5 text-[11px] font-bold tracking-widest transition-colors uppercase',
-                    botTab === i ? 'text-[#3b82f6] border-b-2 border-[#3b82f6]' : 'text-[#64748b] hover:text-[#94a3b8]'
+                    botTab === i ? 'text-[#3b82f6] border-b-2 border-[#3b82f6]' : 'text-[#94a3b8] hover:text-[#cbd5e1]'
                   )}>
                   {t}
                 </button>
@@ -1667,7 +1901,7 @@ export default function AlphaTerminal() {
               {botTab === 0 && earningsQ.data && (
                 <table className="w-full">
                   <thead>
-                    <tr className="text-[#64748b] border-b border-[#1e2d40]">
+                    <tr className="text-[#94a3b8] border-b border-[#1e2d40]">
                       {['Ticker', '실적발표일', '배당락일', '배당수익률'].map(h => (
                         <th key={h} className="text-left py-2.5 px-3 font-semibold text-[12px]">{h}</th>
                       ))}
@@ -1677,8 +1911,8 @@ export default function AlphaTerminal() {
                     {earningsQ.data.map(e => (
                       <tr key={e.ticker} className="border-b border-[#0f172a] hover:bg-[#0a1020]">
                         <td className="py-2.5 px-3 font-mono font-bold text-base text-[#e2e8f0]">{e.ticker}</td>
-                        <td className="py-2.5 px-3 text-sm text-[#94a3b8]">{e.earn_date}</td>
-                        <td className="py-2.5 px-3 text-sm text-[#94a3b8]">{e.div_date}</td>
+                        <td className="py-2.5 px-3 text-sm text-[#cbd5e1]">{e.earn_date}</td>
+                        <td className="py-2.5 px-3 text-sm text-[#cbd5e1]">{e.div_date}</td>
                         <td className="py-2.5 px-3 text-sm text-[#10b981] font-mono font-bold">{e.div_yield}</td>
                       </tr>
                     ))}
@@ -1688,15 +1922,15 @@ export default function AlphaTerminal() {
               {botTab === 1 && macroQ.data && (
                 <div className="grid grid-cols-3 gap-3">
                   {[
-                    { label: 'Fed Rate',      value: `${macroQ.data.fed_rate}%` },
-                    { label: 'Unemployment',  value: `${macroQ.data.unemployment}%` },
-                    { label: 'CPI (YoY)',     value: `${macroQ.data.cpi}%` },
-                    { label: 'GDP Growth',    value: `${macroQ.data.gdp}%` },
-                    { label: '10Y-2Y Spread', value: `${fp(macroQ.data.t10y2y)}p`, color: fv(macroQ.data.t10y2y) < 0 ? '#ef4444' : '#10b981' },
-                    { label: 'HY Spread',     value: `${fn(macroQ.data.bamlh0a0hym2, 0)} bps`, color: fv(macroQ.data.bamlh0a0hym2) > 500 ? '#ef4444' : '#f59e0b' },
+                    { label: '기준금리',       value: `${macroQ.data.fed_rate}%` },
+                    { label: '실업률',         value: `${macroQ.data.unemployment}%` },
+                    { label: 'CPI (전년비)',   value: `${macroQ.data.cpi}%` },
+                    { label: 'GDP 성장률',     value: `${macroQ.data.gdp}%` },
+                    { label: '10Y-2Y 스프레드', value: `${fp(macroQ.data.t10y2y)}p`, color: fv(macroQ.data.t10y2y) < 0 ? '#ef4444' : '#10b981' },
+                    { label: 'HY 스프레드',    value: `${fn(macroQ.data.bamlh0a0hym2, 0)} bps`, color: fv(macroQ.data.bamlh0a0hym2) > 500 ? '#ef4444' : '#f59e0b' },
                   ].map(item => (
                     <div key={item.label} className="bg-[#060b14] border border-[#1e2d40] rounded p-3">
-                      <div className="text-[11px] text-[#64748b] font-bold tracking-wider uppercase mb-1">{item.label}</div>
+                      <div className="text-[11px] text-[#94a3b8] font-bold tracking-wider uppercase mb-1">{item.label}</div>
                       <div className="text-2xl font-mono font-bold" style={{ color: (item as any).color || '#e2e8f0' }}>{item.value}</div>
                     </div>
                   ))}
@@ -1708,25 +1942,27 @@ export default function AlphaTerminal() {
 
         {/* ═══ RIGHT PANEL — collapsible ═══ */}
         {rightOpen ? (
-          <div className="flex flex-col min-h-0 flex-shrink-0" style={{ width: '30%', minWidth: '260px' }}>
-            <div className="flex-shrink-0 bg-[#060b14] border-b border-[#1e2d40] flex items-center">
-              <div className="flex flex-1">
+          <div className="flex min-h-0 flex-shrink-0" style={{ width: '30%', minWidth: '260px' }}>
+            {/* Left toggle strip */}
+            <div className="flex-shrink-0 flex items-center justify-center bg-[#060b14] border-r border-[#1e2d40]" style={{ width: '20px' }}>
+              <button onClick={() => setRightOpen(false)} title="패널 닫기"
+                className="text-[#94a3b8] hover:text-[#3b82f6] transition-colors">
+                <PanelRightClose className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <div className="flex flex-col min-h-0 flex-1 overflow-hidden">
+              <div className="flex-shrink-0 bg-[#060b14] border-b border-[#1e2d40] flex">
                 {RIGHT_TABS.map((t, i) => (
                   <button key={t} onClick={() => setRightTab(i)}
                     className={cn('flex-1 py-2.5 text-[10px] font-bold tracking-widest uppercase transition-colors',
-                      rightTab === i ? 'text-[#3b82f6] border-b-2 border-[#3b82f6] bg-[#3b82f6]/5' : 'text-[#64748b] hover:text-[#94a3b8]'
+                      rightTab === i ? 'text-[#3b82f6] border-b-2 border-[#3b82f6] bg-[#3b82f6]/5' : 'text-[#94a3b8] hover:text-[#cbd5e1]'
                     )}>
                     {t}
                   </button>
                 ))}
               </div>
-              <button onClick={() => setRightOpen(false)} title="패널 닫기"
-                className="flex-shrink-0 px-2.5 py-2.5 text-[#374151] hover:text-[#64748b] hover:bg-[#0f172a] transition-colors border-l border-[#1e2d40]">
-                <PanelRightClose className="w-4 h-4" />
-              </button>
-            </div>
 
-            <div className="flex-1 min-h-0 overflow-hidden">
+              <div className="flex-1 min-h-0 overflow-hidden">
               {rightTab === 0 && <DailyBriefPanel />}
 
               {rightTab === 1 && (
@@ -1734,7 +1970,7 @@ export default function AlphaTerminal() {
                   <div className="flex-shrink-0 flex items-center justify-between px-4 py-2.5 border-b border-[#1e2d40] bg-[#060b14]">
                     <div className="flex items-center gap-2">
                       <MessageSquare className="w-4 h-4 text-[#3b82f6]" />
-                      <span className="text-[11px] text-[#64748b] font-bold tracking-widest">AI ANALYST</span>
+                      <span className="text-[11px] text-[#94a3b8] font-bold tracking-widest">AI 분석</span>
                     </div>
                     <button
                       onClick={() => {
@@ -1751,11 +1987,11 @@ export default function AlphaTerminal() {
                     {feedbackQ.isFetching && (
                       <div className="flex items-center gap-2 py-4 justify-center">
                         <span className="w-2 h-2 rounded-full bg-[#3b82f6] animate-pulse" />
-                        <span className="text-sm text-[#64748b]">AI 분석 중…</span>
+                        <span className="text-sm text-[#94a3b8]">AI 분석 중…</span>
                       </div>
                     )}
                     {feedbackQ.data && !feedbackQ.isFetching && (
-                      <p className="text-sm text-[#94a3b8] leading-relaxed whitespace-pre-wrap">{feedbackQ.data.feedback}</p>
+                      <p className="text-sm text-[#cbd5e1] leading-relaxed whitespace-pre-wrap">{feedbackQ.data.feedback}</p>
                     )}
                   </div>
                 </div>
@@ -1771,37 +2007,40 @@ export default function AlphaTerminal() {
                           n.ticker === 'MACRO' ? 'bg-[#9b59b6]/20 text-[#9b59b6]' : 'bg-[#3b82f6]/20 text-[#3b82f6]')}>
                           {n.ticker}
                         </span>
-                        <span className="text-[11px] text-[#64748b]">
+                        <span className="text-[11px] text-[#94a3b8]">
                           {new Date(n.datetime * 1000).toLocaleDateString('ko-KR', { month: 'numeric', day: 'numeric' })}
                         </span>
                       </div>
-                      <p className="text-sm text-[#94a3b8] leading-relaxed line-clamp-2">{n.headline}</p>
+                      <p className="text-sm text-[#cbd5e1] leading-relaxed line-clamp-2">{n.headline}</p>
                     </a>
                   ))}
                 </div>
               )}
             </div>
+            </div>
           </div>
         ) : (
-          <div className="flex flex-col items-center bg-[#060b14] border-l border-[#1e2d40] flex-shrink-0 py-3 gap-3"
-            style={{ width: '32px' }}>
+          <div className="flex flex-col items-center bg-[#060b14] border-l border-[#1e2d40] flex-shrink-0"
+            style={{ width: '48px' }}>
+            <div className="flex flex-col items-center gap-3 pt-3">
+              {RIGHT_TABS.map((t, i) => (
+                <button key={t} onClick={() => { setRightTab(i); setRightOpen(true) }} title={t}
+                  className={cn('text-[9px] font-bold tracking-widest uppercase transition-colors px-0.5',
+                    rightTab === i ? 'text-[#3b82f6]' : 'text-[#94a3b8] hover:text-[#cbd5e1]'
+                  )}
+                  style={{ writingMode: 'vertical-rl', textOrientation: 'mixed', transform: 'rotate(180deg)' }}>
+                  {t}
+                </button>
+              ))}
+            </div>
             <button onClick={() => setRightOpen(true)} title="패널 열기"
-              className="text-[#64748b] hover:text-[#3b82f6] transition-colors">
+              className="my-auto text-[#94a3b8] hover:text-[#3b82f6] transition-colors">
               <PanelRightOpen className="w-4 h-4" />
             </button>
-            {RIGHT_TABS.map((t, i) => (
-              <button key={t} onClick={() => { setRightTab(i); setRightOpen(true) }} title={t}
-                className={cn('text-[9px] font-bold tracking-widest uppercase transition-colors px-0.5',
-                  rightTab === i ? 'text-[#3b82f6]' : 'text-[#374151] hover:text-[#64748b]'
-                )}
-                style={{ writingMode: 'vertical-rl', textOrientation: 'mixed', transform: 'rotate(180deg)' }}>
-                {t}
-              </button>
-            ))}
             <button onClick={() => {
               qc.invalidateQueries({ queryKey: ['analyst-feedback'] })
               qc.invalidateQueries({ queryKey: ['market-snapshot'] })
-            }} className="text-[#374151] hover:text-[#64748b] transition-colors mt-auto">
+            }} className="text-[#94a3b8] hover:text-[#cbd5e1] transition-colors mb-3">
               <RefreshCw className="w-3.5 h-3.5" />
             </button>
           </div>
@@ -1814,16 +2053,16 @@ export default function AlphaTerminal() {
 
         .brief-md h1,.brief-md h2,.brief-md h3 { font-size:13px; color:#cbd5e1; font-weight:700; margin-top:12px; margin-bottom:4px; }
         .brief-md h1 { font-size:14px; color:#e2e8f0; border-bottom:1px solid #1e2d40; padding-bottom:5px; }
-        .brief-md p  { font-size:13px; color:#94a3b8; line-height:1.65; margin-bottom:6px; }
+        .brief-md p  { font-size:13px; color:#cbd5e1; line-height:1.65; margin-bottom:6px; }
         .brief-md strong { color:#e2e8f0; }
-        .brief-md ul,.brief-md ol { font-size:12px; color:#94a3b8; padding-left:16px; margin-bottom:6px; }
+        .brief-md ul,.brief-md ol { font-size:12px; color:#cbd5e1; padding-left:16px; margin-bottom:6px; }
         .brief-md li { margin-bottom:3px; }
         .brief-md hr { border-color:#1e2d40; margin:8px 0; }
         .brief-md code { background:#0f172a; color:#10b981; padding:2px 5px; border-radius:3px; font-size:12px; }
-        .brief-md blockquote { border-left:2px solid #1d4ed8; padding-left:10px; color:#64748b; margin:6px 0; }
+        .brief-md blockquote { border-left:2px solid #1d4ed8; padding-left:10px; color:#94a3b8; margin:6px 0; }
         .brief-md table { font-size:12px; width:100%; }
-        .brief-md th { color:#64748b; border-bottom:1px solid #1e2d40; padding:4px 6px; text-align:left; font-weight:600; }
-        .brief-md td { color:#94a3b8; padding:4px 6px; border-bottom:1px solid #0f172a; }
+        .brief-md th { color:#94a3b8; border-bottom:1px solid #1e2d40; padding:4px 6px; text-align:left; font-weight:600; }
+        .brief-md td { color:#cbd5e1; padding:4px 6px; border-bottom:1px solid #0f172a; }
       `}</style>
     </div>
   )

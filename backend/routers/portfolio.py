@@ -6,9 +6,11 @@ routers/portfolio.py
 """
 from __future__ import annotations
 
-from datetime import datetime
+import time as _time
+from datetime import datetime, time as _dtime
 from typing import Optional
 
+import pandas as pd
 from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel
 
@@ -30,6 +32,87 @@ from backend.services.portfolio_calculator import (
     build_return_pct_curve,
     return_pct_to_records,
 )
+
+# ─── 실시간 현재가 (장중 주입용) ──────────────────────────────────────────────
+
+try:
+    from zoneinfo import ZoneInfo as _ZI
+    _ET_TZ = _ZI("America/New_York")
+except Exception:
+    try:
+        import pytz as _pytz  # type: ignore
+        _ET_TZ = _pytz.timezone("America/New_York")
+    except Exception:
+        _ET_TZ = None
+
+_live_px: dict = {"ts": 0.0, "prices": {}}
+_LIVE_TTL = 60  # seconds
+
+
+def _is_market_open() -> bool:
+    """미국 주식 시장 개장 여부 (ET 월–금 09:30–16:00)."""
+    if _ET_TZ is not None:
+        now = datetime.now(_ET_TZ)  # type: ignore[arg-type]
+    else:
+        from datetime import timezone, timedelta
+        now = datetime.now(timezone.utc) + timedelta(hours=-4)
+    if now.weekday() >= 5:
+        return False
+    t = now.time()
+    return _dtime(9, 30) <= t < _dtime(16, 0)
+
+
+def _get_live_prices(tickers: list[str]) -> dict[str, float]:
+    """실시간 현재가 조회 (60초 메모리 캐시). 실패 시 빈 dict."""
+    import yfinance as yf
+    now = _time.time()
+    cached: dict[str, float] = _live_px["prices"]
+    if now - _live_px["ts"] < _LIVE_TTL and all(t in cached for t in tickers):
+        return {t: cached[t] for t in tickers if t in cached}
+
+    prices: dict[str, float] = dict(cached)
+    try:
+        data = yf.download(
+            tickers, period="1d", interval="1m",
+            progress=False, auto_adjust=True, threads=False,
+        )
+        if not data.empty:
+            close = (
+                data["Close"]
+                if isinstance(data.columns, pd.MultiIndex)
+                else data[["Close"]].rename(columns={"Close": tickers[0]})
+                if len(tickers) == 1
+                else data
+            )
+            for t in tickers:
+                if t in close.columns:
+                    col = close[t].dropna()
+                    if not col.empty:
+                        prices[t] = float(col.iloc[-1])
+    except Exception:
+        pass
+
+    _live_px["ts"] = now
+    _live_px["prices"] = prices
+    return {t: prices[t] for t in tickers if t in prices}
+
+
+def _inject_live(df: pd.DataFrame) -> pd.DataFrame:
+    """시장 개장 중에만 today 행에 실시간 가격을 주입해 반환 (원본 불변)."""
+    if df.empty or not _is_market_open():
+        return df
+    live = _get_live_prices(list(df.columns))
+    if not live:
+        return df
+    df = df.copy()
+    today = pd.Timestamp.today().normalize()
+    for t, p in live.items():
+        if t in df.columns and p > 0:
+            df.loc[today, t] = p
+    df.sort_index(inplace=True)
+    df.ffill(inplace=True)
+    return df
+
 
 router = APIRouter(prefix="/api/portfolio", tags=["portfolio"])
 
@@ -55,7 +138,8 @@ def _portfolio_close_df(
         + (extra_tickers or [])
         + ["^GSPC", "^VIX"]
     ))
-    return get_close_df(tickers, period=period, ttl=ttl, include_market=False)
+    df = get_close_df(tickers, period=period, ttl=ttl, include_market=False)
+    return _inject_live(df)
 
 
 # ── Holdings ───────────────────────────────────────────────────────────────────
@@ -661,6 +745,7 @@ def get_holdings_detail_endpoint(x_user_id: Optional[str] = Header(default=None)
         }]
     # include_market=False: 현재가만 필요, 시장 지수 불필요
     close_df = get_close_df(tickers, period="5d", ttl=60, include_market=False)
+    close_df = _inject_live(close_df)
     return get_holdings_detail(holdings, close_df)
 
 

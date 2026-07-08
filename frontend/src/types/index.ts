@@ -83,6 +83,8 @@ export interface SectorData {
   change_1d_pct: number
   change_1w_pct: number
   change_1m_pct: number
+  change_3m_pct?: number
+  change_6m_pct?: number
 }
 
 export interface MacroData {

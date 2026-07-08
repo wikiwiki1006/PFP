@@ -6,10 +6,18 @@ backend/services/daily_report.py
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, time as _time
 from typing import Callable
 
 import yfinance as yf
+
+
+def _is_market_open() -> bool:
+    """미국 장중 여부 (UTC 기준 13:30~20:00, 평일)."""
+    now = datetime.now(timezone.utc)
+    if now.weekday() >= 5:
+        return False
+    return _time(13, 30) <= now.time() < _time(20, 0)
 
 
 def _fetch_price_data(holdings: dict) -> dict:
@@ -24,16 +32,21 @@ def _fetch_price_data(holdings: dict) -> dict:
 
     import pandas as pd
     close = df["Close"].ffill() if isinstance(df.columns, pd.MultiIndex) else df.ffill()
+
+    # 장중이고 마지막 행이 오늘 날짜면 intraday 스냅샷 → 전날 종가를 사용
+    today_utc = datetime.now(timezone.utc).date()
+    shift = 1 if (_is_market_open() and close.index[-1].date() == today_utc) else 0
+
     result: dict = {}
 
     for t in tickers:
         if t not in close.columns:
             continue
         series = close[t].dropna()
-        if len(series) < 2:
+        if len(series) < 2 + shift:
             continue
-        today_c = float(series.iloc[-1])
-        prev_c  = float(series.iloc[-2])
+        today_c = float(series.iloc[-(1 + shift)])
+        prev_c  = float(series.iloc[-(2 + shift)])
         chg_pct = (today_c / prev_c - 1) * 100 if prev_c else 0.0
         qty      = holdings[t].get("q", 0)
         avg_cost = holdings[t].get("avg", 0)
@@ -52,14 +65,14 @@ def _fetch_price_data(holdings: dict) -> dict:
     for meta_key, col in [("SPY", "SPY"), ("VIX", "^VIX"), ("TNX", "^TNX")]:
         if col in close.columns:
             s = close[col].dropna()
-            if len(s) >= 2:
+            if len(s) >= 2 + shift:
                 result[f"__{meta_key}"] = {
-                    "close":   round(float(s.iloc[-1]), 2),
-                    "prev":    round(float(s.iloc[-2]), 2),
-                    "chg_pct": round((float(s.iloc[-1]) / float(s.iloc[-2]) - 1) * 100, 2),
+                    "close":   round(float(s.iloc[-(1 + shift)]), 2),
+                    "prev":    round(float(s.iloc[-(2 + shift)]), 2),
+                    "chg_pct": round((float(s.iloc[-(1 + shift)]) / float(s.iloc[-(2 + shift)]) - 1) * 100, 2),
                 }
 
-    result["__date"] = close.index[-1].strftime("%Y년 %m월 %d일 (%a)")
+    result["__date"] = close.index[-(1 + shift)].strftime("%Y년 %m월 %d일 (%a)")
     return result
 
 
@@ -148,7 +161,7 @@ def _build_prompt(holdings: dict, price_data: dict, news: dict) -> str:
 절대 변동 3% 이상 종목은 반드시 섹션 2에 포함하고, 원인 분석은 뉴스 + 금융공학적 시각으로 작성하라.
 
 === 출력 형식 ===
-# 📊 ALPHA TERMINAL DAILY BRIEF ({date_str} 정산)
+# 📊 ALPHA TERMINAL DAILY BRIEF ({date_str} 정산(미국 동부시간))
 
 ## 1. 포트폴리오 전일 요약 (Portfolio Snapshot)
 * **최고 상승 종목:** [Ticker] ([+X.XX%])
@@ -186,7 +199,7 @@ def generate_daily_report(
     gemini_key    = os.getenv("GEMINI_API_KEY", "")
     _log = log or (lambda m: print(f"  {m}"))
 
-    _log("1/3  yfinance 가격 데이터 수집 중...")
+    _log("1/3 가격 데이터 수집 중...")
     price_data = _fetch_price_data(holdings)
     if not price_data:
         raise RuntimeError("가격 데이터를 가져오지 못했습니다.")

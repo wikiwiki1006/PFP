@@ -164,8 +164,12 @@ export const getMacroModes = async (): Promise<MacroModes> =>
 export const runMacroAnalysis = async (body: { event: string; model?: string; mode?: string }): Promise<MacroAnalysisResult> =>
   (await api.post('/api/macro/analyze', body)).data
 
-export const getAnalystFeedback = async (): Promise<AnalystFeedback> =>
-  (await api.get('/api/macro/analyst-feedback/auto')).data
+export const getAnalystFeedback = async (metrics?: {
+  vix?: number
+  portfolio_beta?: number
+  today_chg_pct?: number
+}): Promise<AnalystFeedback> =>
+  (await api.post('/api/macro/analyst-feedback/auto', metrics ?? {})).data
 
 // ── Reports ────────────────────────────────────────────────────────────────────
 export const generateDailyBrief = async (): Promise<DailyBriefResult> =>

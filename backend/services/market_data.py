@@ -218,16 +218,32 @@ def get_sector_changes() -> dict[str, float]:
 
 
 def get_sector_table() -> list[dict]:
-    """섹터 ETF 상세 테이블: [{ sector, etf, price, change_1d_pct, change_1w_pct, change_1m_pct }, ...]"""
+    """섹터 ETF 상세 테이블: 1D/1W/1M/3M/6M 변동률 포함.
+
+    1D/1W: _get_sector_etf_df_1mo() (yfinance 직접 — 장 중 실시간 반영)
+    1M/3M/6M: get_close_df(6mo) (DB 일봉 — 긴 기간 정확도 우선)
+    """
     try:
-        df = _get_sector_etf_df_1mo()
-        if df.empty or len(df) < 2:
+        df_1mo = _get_sector_etf_df_1mo()
+        if df_1mo.empty or len(df_1mo) < 2:
             return []
 
-        cur = df.iloc[-1]
-        prev_1d = df.iloc[-2]
-        prev_1w = df.iloc[-6] if len(df) >= 6 else df.iloc[0]
-        prev_1m = df.iloc[0]
+        # 장 마감 후 yfinance가 당일 가격을 전일과 동일하게 반환하는 경우
+        # (ffill 아티팩트) — 마지막 두 행이 동일하면 오늘 행 제거
+        if (df_1mo.iloc[-1] == df_1mo.iloc[-2]).all():
+            df_1mo = df_1mo.iloc[:-1]
+        if len(df_1mo) < 2:
+            return []
+
+        cur     = df_1mo.iloc[-1]
+        prev_1d = df_1mo.iloc[-2]
+        prev_1w = df_1mo.iloc[-6] if len(df_1mo) >= 6 else df_1mo.iloc[0]
+
+        # 중장기 기간은 DB 6개월 일봉 사용
+        df_6mo  = get_close_df(SECTOR_ETF_TICKERS, period="6mo", ttl=300, include_market=False)
+        prev_1m = df_6mo.iloc[-22]  if len(df_6mo) >= 22  else df_6mo.iloc[0] if not df_6mo.empty else prev_1d
+        prev_3m = df_6mo.iloc[-66]  if len(df_6mo) >= 66  else df_6mo.iloc[0] if not df_6mo.empty else prev_1d
+        prev_6m = df_6mo.iloc[-132] if len(df_6mo) >= 132 else df_6mo.iloc[0] if not df_6mo.empty else prev_1d
 
         def _chg(c, p):
             if pd.isna(c) or pd.isna(p) or float(p) == 0:
@@ -236,7 +252,7 @@ def get_sector_table() -> list[dict]:
 
         rows = []
         for label, etf in GICS_SECTOR_ETFS:
-            if etf not in df.columns:
+            if etf not in df_1mo.columns:
                 continue
             c = cur.get(etf)
             if pd.isna(c):
@@ -247,7 +263,9 @@ def get_sector_table() -> list[dict]:
                 "price":         round(float(c), 2),
                 "change_1d_pct": _chg(c, prev_1d.get(etf)),
                 "change_1w_pct": _chg(c, prev_1w.get(etf)),
-                "change_1m_pct": _chg(c, prev_1m.get(etf)),
+                "change_1m_pct": _chg(c, prev_1m.get(etf, c)),
+                "change_3m_pct": _chg(c, prev_3m.get(etf, c)),
+                "change_6m_pct": _chg(c, prev_6m.get(etf, c)),
             })
         return rows
     except Exception:

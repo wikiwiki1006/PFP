@@ -3,12 +3,12 @@ import { Home, Monitor, Globe, Dice5, TrendingUp, Zap, BookOpen } from 'lucide-r
 import { cn } from '@/lib/utils'
 
 const navItems = [
-  { to: '/',            icon: Home,       label: 'HOME',          sub: 'Dashboard Hub' },
-  { to: '/terminal',    icon: Monitor,    label: 'ALPHA TERMINAL',sub: 'Portfolio HQ + Brief' },
-  { to: '/macro',       icon: Globe,      label: 'MACRO SCENARIO',sub: '9-Agent Pipeline' },
+  { to: '/',            icon: Home,       label: '홈',          sub: 'Dashboard Hub' },
+  { to: '/terminal',    icon: Monitor,    label: '포토폴리오',sub: 'Portfolio HQ + Brief' },
+  { to: '/macro',       icon: Globe,      label: '시장 시나리오',sub: '9-Agent Pipeline' },
   { to: '/monte-carlo', icon: Dice5,      label: 'MONTE CARLO',   sub: 'Simulations' },
-  { to: '/optimizer',   icon: TrendingUp, label: 'OPTIMIZER',     sub: 'Portfolio Opt' },
-  { to: '/timing',      icon: Zap,        label: 'TIMING ENGINE', sub: 'Trade Signals' },
+  { to: '/optimizer',   icon: TrendingUp, label: '포토폴리오 최적화',     sub: 'Portfolio Opt' },
+  { to: '/timing',      icon: Zap,        label: '트레이딩 신호', sub: 'Trade Signals' },
   { to: '/lens',        icon: BookOpen,   label: 'LENS REPORT',   sub: 'AI Research' },
 ]
 

@@ -344,10 +344,10 @@ def get_ai_analyst_feedback(
     if not ANTHROPIC_API_KEY:
         return "ANTHROPIC_API_KEY 미설정"
 
-    vix_state = "발작" if vix >= 30 else ("주의" if vix >= 20 else "정상")
+    vix_state = "위험" if vix >= 30 else ("주의" if vix >= 20 else "정상")
 
     if is_portfolio_sectors:
-        prompt = f"""다음 데이터를 바탕으로 투자자에게 2~3문장(120자 이내)의 포트폴리오 섹터 분석 피드백을 한국어로 작성해줘.
+        prompt = f"""다음 데이터를 바탕으로 투자자에게 3~4문장(120자 이내)의 포트폴리오 섹터 분석 피드백을 한국어로 작성해줘.
 보유 섹터의 오늘 흐름과 리스크를 관찰 기반 코멘트 톤으로, 구체적 수치를 인용해서 작성해.
 
 - VIX 지수: {vix:.1f} ({vix_state})
@@ -355,7 +355,7 @@ def get_ai_analyst_feedback(
 - 오늘 포트폴리오 변동률: {today_chg_pct:+.2f}%
 - 보유 섹터 비중 및 오늘 변동: {sector_summary}
 
-출력은 텍스트 2~3문장만, 따옴표나 마크다운 없이. 보유 섹터를 중심으로 분석할 것."""
+출력은 텍스트 3~4문장만, 따옴표나 마크다운 없이. 보유 섹터를 중심으로 분석할 것."""
     else:
         prompt = f"""다음 데이터를 바탕으로 투자자에게 1~2문장(80자 이내)의 간결한 매매 방향성 피드백을 한국어로 작성해줘.
 조언이 아닌 관찰 기반 코멘트 톤으로, 구체적 수치를 인용해서 작성해.
@@ -415,7 +415,7 @@ def generate_daily_brief(
 **📊 데일리 브리프 — {TODAY}**
 
 ## 포트폴리오 총평
-(2~3문장: 오늘 전체 등락 원인 분석)
+(3~4문장: 오늘 전체 등락 원인 분석)
 
 ## 주목 종목
 (등락 상위/하위 2~3개, 원인 한 줄씩)
