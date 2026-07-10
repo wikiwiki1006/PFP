@@ -8,7 +8,7 @@ import ReactMarkdown from 'react-markdown'
 import {
   MessageSquare, RefreshCw,
   Plus, Trash2, Edit3, Check, X, Play, FileText, ChevronRight,
-  PanelRightClose, PanelRightOpen, Download, History,
+  PanelRightClose, PanelRightOpen, Download, History, Search,
 } from 'lucide-react'
 import {
   getPortfolioMetrics, getEquityCurve, getHoldingsDetail, getSectorWeights,
@@ -20,6 +20,7 @@ import {
   autoDetectSectors,
 } from '@/api'
 import { cn } from '@/lib/utils'
+import TickerDetailModal from '@/components/TickerDetailModal'
 
 // null/NaN-safe 숫자 포맷터
 const fn = (v: number | null | undefined, d = 2) => ((v == null || isNaN(v as number)) ? 0 : v).toFixed(d)
@@ -728,6 +729,7 @@ function HoldingsPanel({ holdQ, rawHoldings }: { holdQ: any; rawHoldings: Record
     onSuccess: () => {
       setCashOpen(false); setCashAmt(0)
       qc.invalidateQueries({ queryKey: ['holdings-raw'] })
+      qc.invalidateQueries({ queryKey: ['holdings-detail'] })
       qc.invalidateQueries({ queryKey: ['equity-curve'] })
       qc.invalidateQueries({ queryKey: ['portfolio-metrics'] })
     },
@@ -1777,9 +1779,14 @@ const RIGHT_TABS = ['전날 브리핑', 'AI 피드백', '뉴스']
 
 export default function AlphaTerminal() {
   const qc = useQueryClient()
-  const [botTab,    setBotTab]    = useState(0)
-  const [rightTab,  setRightTab]  = useState(0)
-  const [rightOpen, setRightOpen] = useState(true)
+  const [botTab,       setBotTab]       = useState(0)
+  const [rightTab,     setRightTab]     = useState(0)
+  const [rightOpen,    setRightOpen]    = useState(true)
+  const [tickerModal,  setTickerModal]  = useState<string | null>(null)
+  const [searchQuery,  setSearchQuery]  = useState('')
+  const [searchSugs,   setSearchSugs]   = useState<{ ticker: string; name: string }[]>([])
+  const [showTopSugs,  setShowTopSugs]  = useState(false)
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // 핵심 지표: 60초 주기 (30초는 너무 자주 백엔드 호출)
   const metricsQ  = useQuery({ queryKey: ['portfolio-metrics'], queryFn: getPortfolioMetrics,   refetchInterval: 60_000,  staleTime: 55_000 })
@@ -1787,7 +1794,7 @@ export default function AlphaTerminal() {
   const curveQ    = useQuery({ queryKey: ['equity-curve'],      queryFn: getEquityCurve,         staleTime: 300_000 })
   // 보유 종목 상세: 60초 (현재가 업데이트용)
   const holdQ     = useQuery({ queryKey: ['holdings-detail'],   queryFn: getHoldingsDetail,      refetchInterval: 60_000,  staleTime: 55_000 })
-  const rawHoldQ  = useQuery({ queryKey: ['holdings-raw'],      queryFn: getHoldings,            staleTime: 300_000 })
+  const rawHoldQ  = useQuery({ queryKey: ['holdings-raw'],      queryFn: getHoldings,            staleTime: 300_000, placeholderData: (prev: any) => prev })
   const sectorQ      = useQuery({ queryKey: ['sector-weights'],  queryFn: getSectorWeights,   staleTime: 300_000 })
   const sectorTableQ = useQuery({ queryKey: ['sector-table'],    queryFn: getMarketSectors,   staleTime: 300_000, refetchInterval: 300_000 })
   // 시장 스냅샷: 60초 주기 (마커 바 업데이트)
@@ -1836,6 +1843,14 @@ export default function AlphaTerminal() {
   return (
     <div className="flex flex-col h-full bg-[#0b0f1a] overflow-hidden">
 
+      {/* ── Ticker Detail Modal ── */}
+      {tickerModal && (
+        <TickerDetailModal
+          initialTicker={tickerModal}
+          onClose={() => setTickerModal(null)}
+        />
+      )}
+
       {/* ── Metrics bar ── */}
       <div className="flex-shrink-0 bg-[#060b14] border-b border-[#1e2d40] flex items-stretch">
         <div className="flex flex-1 min-w-0 overflow-x-auto">
@@ -1851,6 +1866,59 @@ export default function AlphaTerminal() {
               <Pill label="알파"   value={fp(absAlpha ?? fv(m.alpha_vs_sp500), 2)} color={(absAlpha ?? fv(m.alpha_vs_sp500)) >= 0 ? '#10b981' : '#ef4444'} />
             </>
           )}
+        </div>
+        {/* ── 종목 검색 (우측 상단) ── */}
+        <div className="flex-shrink-0 flex items-center px-3 border-l border-[#1e2d40]" style={{ position: 'relative' }}>
+          <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+            <input
+              value={searchQuery}
+              onChange={e => {
+                setSearchQuery(e.target.value)
+                setShowTopSugs(true)
+                if (searchTimer.current) clearTimeout(searchTimer.current)
+                if (!e.target.value.trim()) { setSearchSugs([]); return }
+                searchTimer.current = setTimeout(async () => {
+                  try { setSearchSugs(await searchTickers(e.target.value)) } catch { setSearchSugs([]) }
+                }, 250)
+              }}
+              onKeyDown={e => {
+                if (e.key === 'Enter') {
+                  const sym = searchQuery.trim().toUpperCase()
+                  if (sym) { setTickerModal(sym); setSearchQuery(''); setSearchSugs([]); setShowTopSugs(false) }
+                }
+              }}
+              onFocus={() => setShowTopSugs(true)}
+              onBlur={() => setTimeout(() => setShowTopSugs(false), 150)}
+              placeholder="종목 검색…"
+              className="bg-[#0b1220] border border-[#1e2d40] text-[#e2e8f0] rounded-l text-[11px] focus:outline-none focus:border-[#3b82f6]"
+              style={{ padding: '4px 8px', width: 130 }}
+            />
+            <button
+              onClick={() => {
+                const sym = searchQuery.trim().toUpperCase()
+                if (sym) { setTickerModal(sym); setSearchQuery(''); setSearchSugs([]); setShowTopSugs(false) }
+              }}
+              className="bg-[#1d4ed8] hover:bg-[#2563eb] border border-[#1d4ed8] rounded-r flex items-center justify-center transition-colors"
+              style={{ padding: '4px 8px' }}>
+              <Search size={12} color="#fff" />
+            </button>
+            {showTopSugs && searchSugs.length > 0 && (
+              <div style={{
+                position: 'absolute', top: '100%', left: 0, zIndex: 1000,
+                background: '#0b1220', border: '1px solid #1e2d40', borderRadius: 6,
+                minWidth: 220, marginTop: 2, overflow: 'hidden',
+              }}>
+                {searchSugs.map(s => (
+                  <div key={s.ticker}
+                    onMouseDown={() => { setTickerModal(s.ticker); setSearchQuery(''); setSearchSugs([]); setShowTopSugs(false) }}
+                    className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-[#1e2d40] text-[11px]">
+                    <span className="font-mono font-bold text-[#e2e8f0]">{s.ticker}</span>
+                    <span className="text-[#94a3b8] truncate">{s.name}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
         <Clock />
       </div>

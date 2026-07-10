@@ -7,7 +7,7 @@ routers/portfolio.py
 from __future__ import annotations
 
 import time as _time
-from datetime import datetime, time as _dtime
+from datetime import datetime, time as _dtime, timedelta, timezone
 from typing import Optional
 
 import pandas as pd
@@ -72,9 +72,15 @@ def _get_live_prices(tickers: list[str]) -> dict[str, float]:
 
     prices: dict[str, float] = dict(cached)
     try:
+        # 최근 30분의 2분봉만 다운로드 (당일 전체 1분봉 대비 데이터량 대폭 감소)
+        if _ET_TZ is not None:
+            end_dt   = datetime.now(_ET_TZ)
+        else:
+            end_dt   = datetime.now(timezone.utc) + timedelta(hours=-4)
+        start_dt = end_dt - timedelta(minutes=30)
         data = yf.download(
-            tickers, period="1d", interval="1m",
-            progress=False, auto_adjust=True, threads=False,
+            tickers, start=start_dt, end=end_dt, interval="2m",
+            progress=False, auto_adjust=True,
         )
         if not data.empty:
             close = (
@@ -98,17 +104,28 @@ def _get_live_prices(tickers: list[str]) -> dict[str, float]:
 
 
 def _inject_live(df: pd.DataFrame) -> pd.DataFrame:
-    """시장 개장 중에만 today 행에 실시간 가격을 주입해 반환 (원본 불변)."""
+    """장중에만 ET 날짜 기준 오늘 행에 실시간 현재가 주입.
+    DB에 오늘 부분(intraday) 행이 있으면 먼저 제거해 전일 종가가 prev로 오도록 보장."""
     if df.empty or not _is_market_open():
         return df
     live = _get_live_prices(list(df.columns))
     if not live:
         return df
     df = df.copy()
-    today = pd.Timestamp.today().normalize()
+
+    # 서버 로컬 타임이 아닌 ET 날짜 기준 (KST 서버에서도 미국 거래일과 일치)
+    if _ET_TZ is not None:
+        today_et = pd.Timestamp(datetime.now(_ET_TZ).date())
+    else:
+        today_et = pd.Timestamp((datetime.now(timezone.utc) + timedelta(hours=-4)).date())
+
+    # DB/스냅샷에 오늘 intraday 행이 저장돼 있으면 제거 → prev = 전일 종가가 됨
+    if today_et in df.index:
+        df = df.drop(today_et)
+
     for t, p in live.items():
         if t in df.columns and p > 0:
-            df.loc[today, t] = p
+            df.loc[today_et, t] = p
     df.sort_index(inplace=True)
     df.ffill(inplace=True)
     return df
@@ -125,7 +142,7 @@ def _uid(x_user_id: Optional[str]) -> str:
 def _portfolio_close_df(
     holdings: dict,
     period: str = "2y",
-    ttl: int = 300,
+    ttl: int = 3600,
     extra_tickers: list | None = None,
 ):
     """
@@ -321,18 +338,9 @@ def add_trade_endpoint(
         elif trade_type == "UPDATE":
             save_holding(ticker, q, cur["avg"], cur.get("sector", "Other"), uid)
 
-    # CASH 잔고 자동 조정 — BUY 시 차감, SELL 시 증가 (CASH 보유분이 있을 때만)
+    # CASH 잔고 델타 조정 — BUY 시 차감, SELL 시 증가
     if ticker != "CASH":
-        _q_adj = float(body.q)
-        _p_adj = float(body.price or 0)
-        cash_h = holdings.get("CASH")
-        if cash_h is not None and _p_adj > 0:
-            cur_cash = float(cash_h.get("q", 0))
-            cash_delta = round(_q_adj * _p_adj, 2)
-            if trade_type == "ADD":
-                save_holding("CASH", round(max(0.0, cur_cash - cash_delta), 2), 1.0, "Cash", uid)
-            elif trade_type == "SOLD":
-                save_holding("CASH", round(cur_cash + cash_delta, 2), 1.0, "Cash", uid)
+        _adjust_cash(uid, _cash_delta(trade_type, float(body.q), float(body.price or 0)))
 
     return {"ok": True, "record": record}
 
@@ -366,6 +374,16 @@ def update_trade_endpoint(
     _recalculate_holding_from_trades(body.ticker.upper(), uid)
     if old_ticker and old_ticker.upper() != body.ticker.upper():
         _recalculate_holding_from_trades(old_ticker.upper(), uid)
+
+    # CASH 잔고: 기존 거래 델타와 새 거래 델타의 차이만큼 조정
+    if body.ticker.upper() != "CASH" and old_trade:
+        old_delta = _cash_delta(
+            old_trade.get("type", ""),
+            float(old_trade.get("q", 0)),
+            float(old_trade.get("price") or 0),
+        )
+        new_delta = _cash_delta(body.type, float(body.q), float(body.price or 0))
+        _adjust_cash(uid, new_delta - old_delta)
     return {"ok": True}
 
 
@@ -388,20 +406,64 @@ def delete_trade_endpoint(
     ttype  = str(trade.get("type",   "")).upper()
     ticker = str(trade.get("ticker", "")).upper()
     t_date = str(trade.get("date",   ""))[:10]
+    cascade_sells: list[dict] = []
     if ttype in ("ADD", "BUY") and ticker not in ("CASH", ""):
         for t in all_trades:
             if (t.get("id") != trade_id
                     and str(t.get("ticker", "")).upper() == ticker
                     and str(t.get("type",   "")).upper() in ("SOLD", "SELL")
                     and str(t.get("date",   ""))[:10] >= t_date):
+                cascade_sells.append(t)
                 delete_trade_by_id(t["id"], uid)
 
     _recalculate_holding_from_trades(trade["ticker"], uid)
+
+    # CASH 잔고: 삭제된 거래(및 연쇄 삭제 SELL) 델타를 역방향으로 복원
+    if ticker != "CASH":
+        total_delta = _cash_delta(
+            trade.get("type", ""),
+            float(trade.get("q", 0)),
+            float(trade.get("price") or 0),
+        )
+        for s in cascade_sells:
+            total_delta += _cash_delta(
+                s.get("type", ""),
+                float(s.get("q", 0)),
+                float(s.get("price") or 0),
+            )
+        _adjust_cash(uid, -total_delta)
     return {"ok": True}
 
 
+def _cash_delta(trade_type: str, q: float, price: float) -> float:
+    """거래 유형에 따른 현금 변화량 반환. BUY → 음수(차감), SELL → 양수(증가)."""
+    t = trade_type.upper()
+    if t in ("ADD", "BUY"):
+        return -(q * price)
+    if t in ("SOLD", "SELL"):
+        return +(q * price)
+    return 0.0
+
+
+def _adjust_cash(uid: str, delta: float) -> None:
+    """CASH 잔고에 delta를 가감. 잔고가 없으면 delta > 0일 때만 생성."""
+    if abs(delta) < 0.001:
+        return
+    holdings_ = get_holdings(uid)
+    cash_h = holdings_.get("CASH")
+    if cash_h is None:
+        if delta > 0:
+            save_holding("CASH", round(delta, 2), 1.0, "Cash", uid)
+        return
+    cur = float(cash_h.get("q", 0)) if isinstance(cash_h, dict) else float(cash_h or 0)
+    save_holding("CASH", round(max(0.0, cur + delta), 2), 1.0, "Cash", uid)
+
+
 def _recalculate_holding_from_trades(ticker: str, uid: str) -> None:
-    """거래 기록 전체를 재생해 보유 수량·단가를 재계산. 수량 0이면 삭제."""
+    """거래 기록 전체를 재생해 보유 수량·단가를 재계산. 수량 0이면 삭제.
+    CASH는 _adjust_cash로 별도 처리."""
+    if ticker.upper() == "CASH":
+        return
     trades = sorted(
         [t for t in get_trade_log(uid) if t["ticker"] == ticker],
         key=lambda t: (t.get("date", ""), t.get("id", 0)),
@@ -744,7 +806,8 @@ def get_holdings_detail_endpoint(x_user_id: Optional[str] = Header(default=None)
             "market_value": round(cash_q, 2), "weight": 1.0,
         }]
     # include_market=False: 현재가만 필요, 시장 지수 불필요
-    close_df = get_close_df(tickers, period="5d", ttl=60, include_market=False)
+    # ttl=1800: 역사 종가는 하루 1회만 갱신되므로 30분 캐시 (live 가격은 _inject_live가 별도 60초 갱신)
+    close_df = get_close_df(tickers, period="5d", ttl=1800, include_market=False)
     close_df = _inject_live(close_df)
     return get_holdings_detail(holdings, close_df)
 
@@ -757,7 +820,7 @@ def get_sector_weights(x_user_id: Optional[str] = Header(default=None)):
         return {}
     tickers = [t for t in holdings if t != "CASH"]
     # holdings-detail 과 동일 캐시키 공유 (5d, include_market=False, 같은 tickers)
-    close_df = get_close_df(tickers, period="5d", ttl=60, include_market=False) if tickers else None
+    close_df = _inject_live(get_close_df(tickers, period="5d", ttl=1800, include_market=False)) if tickers else None
     rows: dict[str, float] = {}
     for t, info in holdings.items():
         price = 1.0 if t == "CASH" else (

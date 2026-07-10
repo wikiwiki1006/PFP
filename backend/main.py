@@ -48,7 +48,7 @@ class SafeJSONResponse(JSONResponse):
             separators=(",", ":"),
         ).encode("utf-8")
 
-from backend.routers import portfolio, market, macro, signals, optimizer, reports
+from backend.routers import portfolio, market, macro, signals, optimizer, reports, ticker
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -102,6 +102,7 @@ app.include_router(macro.router)
 app.include_router(signals.router)
 app.include_router(optimizer.router)
 app.include_router(reports.router)
+app.include_router(ticker.router)
 
 
 # ── 시작 이벤트 ────────────────────────────────────────────────────────────────

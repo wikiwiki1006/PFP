@@ -9,6 +9,7 @@ import type {
   MacroModes, MacroAnalysisResult, AnalystFeedback,
   DailyBriefResult, ReportFile, Industry, EquityReportResult, IndustryReportResult,
   MarketSituation, BBScanFullResult, TechnicalChartResult, PairsAutoResult,
+  TickerDetail,
 } from '@/types'
 
 // 개발(로컬+LAN): VITE_API_URL 미설정 → undefined → axios 상대경로 → Vite proxy가 /api/* 를 localhost:8000 으로 중계
@@ -198,3 +199,7 @@ export const getReportFile = async (filename: string): Promise<{ content: string
 
 export const getTelegramStatus = async (): Promise<{ configured: boolean }> =>
   (await api.get('/api/reports/telegram/status')).data
+
+// ── Ticker Detail ──────────────────────────────────────────────────────────────
+export const getTickerDetail = async (ticker: string, period = '1y'): Promise<TickerDetail> =>
+  (await api.get(`/api/ticker/${ticker.toUpperCase()}/detail`, { params: { period } })).data

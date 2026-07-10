@@ -131,7 +131,7 @@ def analyst_feedback_auto(live: LiveMetrics = LiveMetrics()):
         raise HTTPException(status_code=400, detail="보유 종목 없음")
 
     tickers  = [t for t in holdings if t != "CASH"]
-    close_df = get_close_df(tickers, period="5d", ttl=60, include_today=False)
+    close_df = get_close_df(tickers, period="5d", ttl=60)
 
     equity_curve = build_equity_curve(holdings, trade_log, close_df)
     metrics      = calculate_metrics(holdings, close_df, equity_curve)
@@ -194,7 +194,7 @@ def daily_brief(portfolio: Optional[dict] = None):
         raise HTTPException(status_code=400, detail="보유 종목 없음")
 
     tickers  = [t for t in holdings if t != "CASH"]
-    close_df = get_close_df(tickers, period="5d", ttl=60, include_today=False)
+    close_df = get_close_df(tickers, period="5d", ttl=60)
 
     # 가격 데이터 수집
     price_data = {}

@@ -432,3 +432,82 @@ export interface IndustryReportResult {
   file_path: string
   telegram_sent: boolean
 }
+
+// Ticker Detail Types
+export interface OHLCVPoint {
+  date: string
+  open: number
+  high: number
+  low: number
+  close: number
+  volume: number
+  ma20: number | null
+  ma50: number | null
+  ma200: number | null
+  bb_upper: number | null
+  bb_mid: number | null
+  bb_lower: number | null
+  stoch_k: number | null
+  stoch_d: number | null
+}
+
+export interface TickerDetailInfo {
+  name: string
+  sector: string
+  industry: string
+  market_cap: string
+  pe: number | null
+  div_yield: number
+}
+
+export interface TickerDetailPerformance {
+  '1w': number | null
+  '1m': number | null
+  '6m': number | null
+  ytd: number | null
+  '1y': number | null
+  '5y': number | null
+  s52w_high: number
+  s52w_low: number
+}
+
+export interface TickerDetailRisk {
+  beta: number
+  volatility: number | null
+  avg_volume: number
+  rsi14: number | null
+  current_price: number
+  change_pct: number
+}
+
+export interface TickerDetailVar {
+  var95: number | null
+  return_dist: { x: number; count: number }[]
+}
+
+export interface TickerDetailQuant {
+  score: number
+  score_label: string
+  regime: string
+  optimizer: {
+    target_weight: number
+    risk_contribution: number
+    current_weight: number
+    correlation: number
+    correlation_label: string
+    beta_exposure: number
+  }
+  panic_score: number
+  panic_status: string
+}
+
+export interface TickerDetail {
+  ticker: string
+  period: string
+  ohlcv: OHLCVPoint[]
+  info: TickerDetailInfo
+  performance: TickerDetailPerformance
+  risk: TickerDetailRisk
+  var: TickerDetailVar
+  quant: TickerDetailQuant
+}
