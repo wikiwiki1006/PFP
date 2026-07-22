@@ -362,10 +362,17 @@ export interface MacroAgent {
 }
 
 export interface VerdictCard {
-  category: string
-  rating: string
-  rationale: string
-  risk_level: string
+  // 백엔드 실제 필드
+  title?: string
+  icon?: string
+  color?: string       // "danger" | "warning" | "success" | "info"
+  headline?: string
+  summary?: string
+  details?: string
+  // 구버전 호환
+  category?: string
+  rating?: string
+  rationale?: string
 }
 
 export interface MacroAnalysisResult {

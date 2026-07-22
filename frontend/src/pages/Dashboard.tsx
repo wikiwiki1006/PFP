@@ -1,3 +1,4 @@
+import React from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { TrendingUp, DollarSign, Activity, BarChart2, MessageSquare, Shield } from 'lucide-react'
 import MetricCard from '@/components/MetricCard'
@@ -16,7 +17,7 @@ export default function Dashboard() {
   const metricsQ = useQuery({ queryKey: ['portfolio-metrics'], queryFn: getPortfolioMetrics })
   const curveQ = useQuery({ queryKey: ['equity-curve'], queryFn: getEquityCurve })
   const holdingsQ = useQuery({ queryKey: ['holdings-detail'], queryFn: getHoldingsDetail })
-  const feedbackQ = useQuery({ queryKey: ['analyst-feedback'], queryFn: getAnalystFeedback })
+  const feedbackQ = useQuery({ queryKey: ['analyst-feedback'], queryFn: () => getAnalystFeedback() })
 
   const m = metricsQ.data
 
@@ -41,7 +42,7 @@ export default function Dashboard() {
       {/* Metric Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         {metricsQ.isLoading ? (
-          Array.from({ length: 5 }).map((_, i) => <SkeletonCard key={i} />)
+          (Array.from({ length: 5 }).map((_, i) => <SkeletonCard key={i} />) as React.ReactNode)
         ) : metricsQ.isError ? (
           <div className="col-span-5">
             <ErrorMessage message="Failed to load portfolio metrics" retry={metricsQ.refetch} />
@@ -94,7 +95,7 @@ export default function Dashboard() {
             <h2 className="text-sm font-semibold text-[#e2e8f0]">AI Analyst Feedback</h2>
           </div>
           <p className="text-sm text-[#e2e8f0] leading-relaxed whitespace-pre-wrap">
-            {feedbackQ.data.feedback}
+            {(feedbackQ.data as any)?.feedback}
           </p>
         </div>
       )}

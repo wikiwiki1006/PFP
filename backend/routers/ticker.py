@@ -76,6 +76,9 @@ def get_ticker_detail(
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"yfinance 오류: {e}")
 
+    # 장중 부분 데이터(오늘 행) NaN Close 제거 — yfinance는 장중에 Close=NaN 행을 반환할 수 있음
+    hist = hist[hist["Close"].notna()]
+
     if hist.empty or len(hist) < 5:
         raise HTTPException(status_code=404, detail=f"{sym} 데이터 없음")
 

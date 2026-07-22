@@ -33,9 +33,9 @@ def _fetch_price_data(holdings: dict) -> dict:
     import pandas as pd
     close = df["Close"].ffill() if isinstance(df.columns, pd.MultiIndex) else df.ffill()
 
-    # 장중이고 마지막 행이 오늘 날짜면 intraday 스냅샷 → 전날 종가를 사용
+    # 브리핑은 항상 이전 완료된 거래일 기준 (장중이어도 전날 종가 사용)
     today_utc = datetime.now(timezone.utc).date()
-    shift = 1 if (_is_market_open() and close.index[-1].date() == today_utc) else 0
+    shift = 1 if close.index[-1].date() >= today_utc else 0
 
     result: dict = {}
 

@@ -3,8 +3,23 @@ import { useQuery, useMutation } from '@tanstack/react-query'
 import { Globe, Play, ChevronDown, ChevronRight } from 'lucide-react'
 import LoadingSpinner, { ErrorMessage } from '@/components/LoadingSpinner'
 import { getMacroModes, runMacroAnalysis } from '@/api'
-import type { MacroAnalysisResult, MacroAgent } from '@/types'
-import { cn, ratingColor } from '@/lib/utils'
+import type { MacroAnalysisResult, MacroAgent, VerdictCard } from '@/types'
+import { cn } from '@/lib/utils'
+
+// 백엔드의 color 값("danger","warning","success","info")을 CSS 색상으로 변환
+function verdictColor(card: VerdictCard): string {
+  const c = (card.color ?? '').toLowerCase()
+  if (c === 'danger')  return '#ef4444'
+  if (c === 'warning') return '#f59e0b'
+  if (c === 'success') return '#10b981'
+  if (c === 'info')    return '#3b82f6'
+  // 구버전 rating 필드 fallback
+  const r = (card.rating ?? '').toLowerCase()
+  if (r.includes('bull') || r.includes('positive') || r.includes('buy')) return '#10b981'
+  if (r.includes('bear') || r.includes('negative') || r.includes('sell')) return '#ef4444'
+  if (r.includes('neutral') || r.includes('hold')) return '#f59e0b'
+  return '#64748b'
+}
 
 const PRESETS = [
   { label: 'Fed Shock', icon: '🏦', event: 'Federal Reserve raises interest rates by 75bp, signals further hikes ahead amid persistent inflation. 10Y Treasury yield surges past 5%, mortgage rates hit 8%.' },
@@ -142,16 +157,26 @@ export default function MacroScenario() {
           {result.verdict_cards && result.verdict_cards.length > 0 && (
             <div>
               <div className="text-[10px] text-[#4a5568] font-bold tracking-wider mb-2">VERDICT CARDS</div>
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
                 {result.verdict_cards.map((card, i) => {
-                  const color = ratingColor(card.rating)
+                  const color = verdictColor(card)
+                  const label = card.title ?? card.category ?? '—'
+                  const sub   = card.headline ?? card.rating ?? ''
+                  const body  = card.summary ?? card.rationale ?? ''
+                  const detail = card.details ?? ''
                   return (
-                    <div key={i} className="bg-[#060b14] border rounded p-3" style={{ borderColor: `${color}25` }}>
-                      <div className="flex items-start justify-between gap-1 mb-1.5">
-                        <span className="text-xs font-semibold text-[#e2e8f0]">{card.category}</span>
-                        <span className="text-[10px] px-1.5 py-0.5 rounded font-bold flex-shrink-0" style={{ backgroundColor: `${color}20`, color }}>{card.rating}</span>
+                    <div key={i} className="bg-[#060b14] border rounded-lg p-3 flex flex-col gap-1.5" style={{ borderColor: `${color}30` }}>
+                      <div className="flex items-center gap-1.5">
+                        {card.icon && <span className="text-base leading-none">{card.icon}</span>}
+                        <span className="text-xs font-bold text-[#e2e8f0] leading-tight">{label}</span>
                       </div>
-                      <p className="text-[10px] text-[#64748b] leading-relaxed">{card.rationale}</p>
+                      {sub && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold self-start" style={{ backgroundColor: `${color}20`, color }}>
+                          {sub}
+                        </span>
+                      )}
+                      {body && <p className="text-[10px] text-[#94a3b8] leading-relaxed">{body}</p>}
+                      {detail && <p className="text-[9px] text-[#64748b] leading-relaxed border-t border-[#1e2d40] pt-1.5 mt-0.5">{detail}</p>}
                     </div>
                   )
                 })}

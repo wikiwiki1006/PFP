@@ -9,13 +9,22 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone, time as _time
 from typing import Any
 
 import pandas as pd
 import yfinance as yf
 
 _logger = logging.getLogger(__name__)
+
+
+def _is_us_market_open() -> bool:
+    """NYSE 장중 여부 (UTC 13:30~20:00, 평일)."""
+    now = datetime.now(timezone.utc)
+    if now.weekday() >= 5:
+        return False
+    return _time(13, 30) <= now.time() < _time(20, 0)
+
 
 # ── TTL 캐시 ──────────────────────────────────────────────────────────────────
 
@@ -94,7 +103,8 @@ def _bg_refresh_tickers(stale: list[str], period: str) -> None:
         try:
             close_df = _yf_download_batched(new_stale, period=period, inter_batch_sleep=1.0)
             if not close_df.empty:
-                save_prices_to_db(close_df.ffill().dropna(axis=1, how="all"))
+                # ffill 없이 저장: 장중 NaN close가 ffill로 전일 종가로 저장되는 현상 방지
+                save_prices_to_db(close_df.dropna(axis=1, how="all"))
                 _logger.debug(f"백그라운드 갱신 완료: {len(new_stale)}개 티커")
         except Exception as e:
             _logger.warning(f"백그라운드 갱신 실패: {e}")
@@ -142,7 +152,7 @@ def get_close_df(tickers: list[str], period: str = "2y", ttl: int = 300, include
                     from backend.db.market_cache import _yf_download_batched
                     fresh = _yf_download_batched(missing, period=period, inter_batch_sleep=0.5)
                     if not fresh.empty:
-                        save_prices_to_db(fresh.ffill().dropna(axis=1, how="all"))
+                        save_prices_to_db(fresh.dropna(axis=1, how="all"))
                         db_df = pd.concat([db_df, fresh], axis=1)
                 except Exception as e:
                     _logger.warning(f"신규 티커 즉시 수집 실패: {e}")
@@ -160,7 +170,7 @@ def get_close_df(tickers: list[str], period: str = "2y", ttl: int = 300, include
                 from backend.db.market_cache import _yf_download_batched
                 fresh_df = _yf_download_batched(all_stale, period=period, inter_batch_sleep=0.5)
                 if not fresh_df.empty:
-                    save_prices_to_db(fresh_df.ffill().dropna(axis=1, how="all"))
+                    save_prices_to_db(fresh_df.dropna(axis=1, how="all"))
             except Exception as e:
                 _logger.warning(f"최초 yfinance 수집 실패: {e}")
         db_df = get_prices_from_db(all_tickers, period)
@@ -472,11 +482,28 @@ def get_earnings_dividends(tickers: list[str], ttl: int = 3600) -> list[dict]:
 # ── 시장 스냅샷 ─────────────────────────────────────────────────────────────────
 
 def get_market_snapshot(close_df: pd.DataFrame) -> dict:
-    """WATCH_TICKERS 현재가/전일대비를 {prices: {ticker: {...}}, timestamp} 형태로 반환."""
+    """WATCH_TICKERS 현재가/전일대비를 {prices: {ticker: {...}}, timestamp} 형태로 반환.
+    장중: 마지막 행이 오늘 intraday면 현재가 사용. 장외: 전날 종가 기준.
+    """
     if close_df.empty or len(close_df) < 2:
         return {"prices": {}, "timestamp": datetime.now().isoformat()}
 
-    cur, prev = close_df.iloc[-1], close_df.iloc[-2]
+    today_utc = datetime.now(timezone.utc).date()
+    last_date = close_df.index[-1].date() if hasattr(close_df.index[-1], 'date') else None
+
+    if _is_us_market_open() and last_date == today_utc:
+        # 장중: 마지막 행 = intraday 현재가, 두번째 = 전날 종가
+        cur  = close_df.iloc[-1]
+        prev = close_df.iloc[-2]
+    elif (not _is_us_market_open()) and last_date == today_utc:
+        # 장 마감 후 오늘 행이 이미 있음: 오늘 종가 vs 전날 종가
+        cur  = close_df.iloc[-1]
+        prev = close_df.iloc[-2]
+    else:
+        # 아직 오늘 행 없음 (주말·공휴일 등): 가장 최근 종가 vs 그 전날
+        cur  = close_df.iloc[-1]
+        prev = close_df.iloc[-2]
+
     prices = {}
 
     for ticker in SNAPSHOT_TICKERS:
@@ -484,8 +511,13 @@ def get_market_snapshot(close_df: pd.DataFrame) -> dict:
             continue
         c = cur.get(ticker)
         p = prev.get(ticker)
-        if pd.isna(c):
-            continue
+        # 현재가 NaN이면 유효한 최근 행으로 fallback
+        if c is None or pd.isna(c):
+            col = close_df[ticker].dropna()
+            if col.empty:
+                continue
+            c = col.iloc[-1]
+            p = col.iloc[-2] if len(col) >= 2 else c
         c_f = float(c)
         p_f = float(p) if p is not None and not pd.isna(p) else c_f
         change_1d = round(c_f - p_f, 2)

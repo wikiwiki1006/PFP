@@ -20,7 +20,8 @@ load_dotenv(Path(__file__).parent.parent.parent / "pfp" / ".env")
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 TODAY = datetime.now().strftime("%Y년 %m월 %d일")
-CONTEXT_CHAR_LIMIT = 2000
+CONTEXT_CHAR_LIMIT = 4000    # Phase 1 에이전트 컨텍스트 한도
+PHASE2_CONTEXT_LIMIT = 10000  # Phase 2 에이전트(8, 9)는 더 많은 컨텍스트 허용
 
 ANALYSIS_MODES = {
     "fast":     [1, 6, 9],
@@ -36,30 +37,43 @@ MODEL_OPTIONS = {
 
 # ── 에이전트 정의 ───────────────────────────────────────────────────────────────
 
-def _build_agents(ev: str, portfolio_str: str) -> list[dict]:
+def _build_agents(
+    ev: str,
+    portfolio_str: str,
+    prev_results: list[str] | None = None,
+    context_limit: int = CONTEXT_CHAR_LIMIT,
+) -> list[dict]:
+    prev = "\n\n---\n\n".join([r for r in (prev_results or []) if r])[-context_limit:]
     return [
         {
             "id": 1, "label": "Event Analysis", "max_tokens": 900, "use_search": True,
             "prompt": f"""You are a macro event analysis expert. Respond in Korean, concisely.
 Today: {TODAY}
 
-Use web_search to find current Fed rate, S&P500, KOSPI, USD/KRW, WTI, 10Y yield, and recent news on the event.
+Use web_search to find:
+1. Current Fed funds rate and latest Fed statement
+2. Current S&P500, KOSPI index levels
+3. Current USD/KRW exchange rate
+4. Current WTI oil price and 10Y Treasury yield
+5. Any recent news directly related to this event
 
+Then analyze:
 Event: {ev}
 
 Format:
 [이벤트 유형] War/Financial Crisis/Policy Change/Commodity Shock/Mixed
-[현재 시장 지표] 웹서치로 확인한 현재값
+[현재 시장 지표] 웹서치로 확인한 금리/환율/지수/유가 현재값
 [영향 범위] Regional or global, key affected countries
-[핵심 변수] 4-5 key variables
+[핵심 변수] 4-5 key variables (oil, rates, dollar, supply chains, etc.)
 [긴급도] High/Med/Low — one-line reason
-[메커니즘 분석] 2-3 sentences on causal transmission."""
+[메커니즘 분석] 2-3 sentences on causal transmission to markets."""
         },
         {
             "id": 2, "label": "Historical Analogs", "max_tokens": 1100, "use_search": False,
             "prompt": f"""You are a financial history expert. Respond in Korean, concisely.
 Today: {TODAY}
 Event: {ev}
+Prior analysis: {prev}
 
 Find 2-3 historical analogs. For each:
 [사례명 + 연도]
@@ -76,23 +90,25 @@ Find 2-3 historical analogs. For each:
             "prompt": f"""You are a market analyst. Respond in Korean, concisely.
 Today: {TODAY}
 Event: {ev}
+Context: {prev}
 
-Use web_search to confirm current S&P500, VIX, 10Y yield, DXY, gold.
+Use web_search to confirm current levels of S&P500, VIX, 10Y yield, DXY, gold before answering.
 
-[현재 시장 베이스라인] 웹서치 확인값
-[즉시 0-4주] S&P500/KOSPI range, rates, DXY, gold, VIX
-[단기 1-3개월] bounce probability, continued decline scenario
+[현재 시장 베이스라인] 웹서치로 확인한 현재 S&P500/KOSPI/VIX/금리/환율
+[즉시 0-4주] S&P500/KOSPI range, 10Y rates, DXY, gold, VIX expected levels
+[단기 1-3개월] bounce probability and conditions, continued decline scenario
 [중기 3-12개월] structural direction
-[반복 패턴] 2 historically recurring patterns"""
+[반복 패턴] 2 historically recurring patterns for this event type"""
         },
         {
             "id": 4, "label": "Sector Impact", "max_tokens": 1100, "use_search": False,
             "prompt": f"""You are a sector analyst. Respond in Korean, concisely.
 Today: {TODAY}
 Event: {ev}
+Context: {prev}
 
-[수혜 산업 TOP 3] name + tickers, return range, WHY, temporary vs structural
-[피해 산업 TOP 3] name + tickers, decline range, WHY, recovery timeline
+[수혜 산업 TOP 3] each: name + example tickers, return range, WHY 1-2 sentences, temporary vs structural
+[피해 산업 TOP 3] each: name + tickers, decline range, WHY 1-2 sentences, recovery timeline
 [투자자 흔한 실수] one pattern where investors reflexively get it wrong"""
         },
         {
@@ -100,6 +116,7 @@ Event: {ev}
             "prompt": f"""You are a macro strategist. Respond in Korean, concisely.
 Today: {TODAY}
 Event: {ev}
+Context: {prev}
 
 [공통점 2-3가지] 1 sentence each
 [결정적 차이점 3가지]
@@ -113,11 +130,12 @@ Event: {ev}
             "prompt": f"""You are a hedge fund CIO. Respond in Korean, concisely.
 Today: {TODAY}
 Event: {ev}
+Context: {prev}
 
 [즉시 0-1개월] buy: ETF/tickers, entry conditions, size%; reduce/short: targets, exit triggers
 [단기 1-3개월] 2 core positions with rationale, exit conditions
 [중기 3-12개월] structural themes, tickers, target return range
-[롱/숏 페어] Long x2, Short x2
+[롱/숏 페어] Long x2 (ticker+reason), Short x2 (ticker+reason)
 [포트폴리오 배분] Cash/Bonds/Equities/Commodities/Gold = 100%
 [확신도] 0-100 per idea"""
         },
@@ -126,8 +144,9 @@ Event: {ev}
             "prompt": f"""You are the Chief Risk Officer. Respond in Korean, concisely.
 Today: {TODAY}
 Event: {ev}
+Strategy: {prev}
 
-[전략이 틀릴 조건 2-3가지]
+[전략이 틀릴 조건 2-3가지] specific scenarios that reverse the thesis
 [시나리오]
 Bull (prob%): conditions, S&P 6mo, optimal positioning
 Base (prob%): conditions, S&P, hold positions
@@ -140,12 +159,13 @@ Bear (prob%): conditions, S&P, defense/hedge
             "prompt": f"""You are a personal investment advisor. Respond in Korean.
 Today: {TODAY}
 Macro event: {ev}
+Full analysis: {prev}
 
-The investor holds:
+The investor holds the following portfolio:
 {portfolio_str}
 
-For EACH holding, provide a specific action.
-Return ONLY a raw JSON array (no markdown):
+For EACH holding, provide a specific action recommendation.
+Return ONLY a raw JSON array (no markdown, no preamble):
 [
   {{
     "ticker": "AAPL",
@@ -157,31 +177,45 @@ Return ONLY a raw JSON array (no markdown):
         },
         {
             "id": 9, "label": "Final Verdict", "max_tokens": 2200, "use_search": False,
-            "prompt": f"""You are the final synthesis agent. Respond ONLY in Korean text values.
+            "prompt": f"""You are the final synthesis agent for a fintech dashboard. Respond ONLY in Korean text values.
 Today: {TODAY}
 Event: {ev}
+All analyses: {prev}
 
-Synthesize into EXACTLY 4 scenario cards. Keep "details" to 2-3 short sentences MAX (under 120 Korean chars each).
-Return ONLY raw JSON — no markdown, no backticks, no preamble.
+Synthesize everything above into EXACTLY 4 scenario cards covering different
+risk levels / situations (e.g. base case, bull case, bear case, tail risk —
+or whatever 4 distinct angles best fit this specific event). Each card must
+be genuinely different in tone/color, not 4 variations of the same view.
+
+CRITICAL LENGTH CONSTRAINT: Keep "details" to 2-3 short sentences MAX (under
+120 Korean characters each). You MUST finish the complete JSON with the final
+closing braces — running out of tokens mid-JSON is a hard failure. Prioritize
+completing valid JSON over adding more detail. Brevity in each field is
+required so all 4 cards fit within the token budget.
+
+Return ONLY a raw JSON object — no markdown code fences, no ``` backticks,
+no preamble, no explanation text before or after. The response must start
+with {{ and end with }}. Exactly this schema:
 
 {{
   "cards": [
     {{
-      "title": "시나리오 제목 (짧게)",
-      "icon": "이모지 1개",
-      "color": "danger | warning | success | info",
-      "headline": "핵심 헤드라인 (30자 이내)",
+      "title": "시나리오 제목 (짧게, 예: 고인플레이션 & 금리 인상)",
+      "icon": "한 개의 이모지 (예: 🔺, 📉, ⚡, 🛡️)",
+      "color": "danger 또는 warning 또는 success 또는 info 중 정확히 하나",
+      "headline": "핵심 헤드라인 한 줄 (30자 이내)",
       "summary": "1줄 요약 (40자 이내)",
-      "details": "2~3문장, 120자 이내"
+      "details": "2~3문장, 120자 이내의 간결한 상세 분석 및 포트폴리오 영향도"
     }}
   ]
 }}
 
 Rules:
-- "cards" must contain EXACTLY 4 objects.
-- "color" must be exactly one of: danger, warning, success, info.
-- All text in Korean, kept SHORT.
-- Valid JSON only. Must be syntactically complete."""
+- "cards" array must contain EXACTLY 4 objects.
+- "color" must be exactly one of: danger, warning, success, info (lowercase, no other values).
+- All text values in Korean, kept SHORT as specified above.
+- No trailing commas, valid JSON only.
+- The JSON MUST be syntactically complete — do not cut off mid-string or mid-object."""
         },
     ]
 
@@ -218,28 +252,19 @@ def call_claude(prompt: str, model: str, max_tokens: int, use_search: bool = Fal
     )
 
 
-# ── 병렬 에이전트 실행 ───────────────────────────────────────────────────────────
+# ── 병렬 에이전트 실행 (Phase 1) ─────────────────────────────────────────────────
 
-def run_macro_agents(
-    event: str,
-    portfolio: dict,
-    model_key: str = "sonnet",
-    mode: str = "fast",
-) -> list[dict]:
-    """
-    선택된 에이전트들을 ThreadPoolExecutor로 병렬 실행.
-    반환: [{ id, label, text, ok }, ...]
-    """
-    model = MODEL_OPTIONS.get(model_key, MODEL_OPTIONS["sonnet"])
-    selected_ids = ANALYSIS_MODES.get(mode, ANALYSIS_MODES["fast"])
-    portfolio_str = _format_portfolio(portfolio)
-
-    all_agents = _build_agents(event, portfolio_str)
+def _run_parallel_agents(
+    selected_ids: list[int],
+    ev: str,
+    portfolio_str: str,
+    model: str,
+) -> dict[int, tuple[str, float]]:
+    """Phase 1: 선택된 에이전트를 컨텍스트 없이 병렬 실행."""
+    all_agents = _build_agents(ev, portfolio_str, prev_results=[])
     agent_map = {a["id"]: a for a in all_agents if a["id"] in selected_ids}
 
-    results: dict[int, str] = {}
-
-    elapsed: dict[int, float] = {}
+    results: dict[int, tuple[str, float]] = {}
 
     def _call(ag: dict):
         import time
@@ -254,16 +279,80 @@ def run_macro_agents(
         futures = [executor.submit(_call, ag) for ag in agent_map.values()]
         for f in as_completed(futures):
             ag_id, text, t = f.result()
-            results[ag_id] = text
-            elapsed[ag_id] = round(t, 2)
+            results[ag_id] = (text, round(t, 2))
 
+    return results
+
+
+def _run_contextual_agents(
+    selected_ids: list[int],
+    ev: str,
+    portfolio_str: str,
+    model: str,
+    context_texts: list[str],
+) -> dict[int, tuple[str, float]]:
+    """Phase 2: Phase 1 결과를 컨텍스트로 받아 에이전트를 순차 실행 (agents 8, 9)."""
+    all_agents = _build_agents(ev, portfolio_str, prev_results=context_texts, context_limit=PHASE2_CONTEXT_LIMIT)
+    agent_map = {a["id"]: a for a in all_agents if a["id"] in selected_ids}
+
+    results: dict[int, tuple[str, float]] = {}
+    for ag_id in sorted(selected_ids):
+        if ag_id not in agent_map:
+            continue
+        ag = agent_map[ag_id]
+        import time
+        t0 = time.time()
+        try:
+            text = call_claude(ag["prompt"], model, ag["max_tokens"], ag.get("use_search", False))
+        except Exception as exc:
+            text = f"[오류: {exc}]"
+        results[ag_id] = (text, round(time.time() - t0, 2))
+
+    return results
+
+
+def run_macro_agents(
+    event: str,
+    portfolio: dict,
+    model_key: str = "sonnet",
+    mode: str = "fast",
+) -> list[dict]:
+    """
+    2단계 파이프라인으로 에이전트 실행.
+    Phase 1 (id ≤ 7): 병렬 독립 분석
+    Phase 2 (id > 7): Phase 1 전체 결과를 컨텍스트로 받아 순차 종합
+    반환: [{ id, name, text, elapsed, ok }, ...]
+    """
+    model = MODEL_OPTIONS.get(model_key, MODEL_OPTIONS["sonnet"])
+    selected_ids = ANALYSIS_MODES.get(mode, ANALYSIS_MODES["fast"])
+    portfolio_str = _format_portfolio(portfolio)
+
+    phase1_ids = [i for i in selected_ids if i <= 7]
+    phase2_ids = [i for i in selected_ids if i > 7]
+
+    all_results: dict[int, tuple[str, float]] = {}
+
+    # Phase 1: 병렬 독립 실행
+    if phase1_ids:
+        all_results.update(_run_parallel_agents(phase1_ids, event, portfolio_str, model))
+
+    # Phase 2: Phase 1 컨텍스트 기반 순차 실행
+    if phase2_ids:
+        p1_texts = [
+            all_results[i][0] for i in sorted(phase1_ids)
+            if i in all_results and not all_results[i][0].startswith("[오류")
+        ]
+        all_results.update(_run_contextual_agents(phase2_ids, event, portfolio_str, model, p1_texts))
+
+    # 정의된 에이전트 순서 기준으로 반환 목록 구성
+    all_agents = _build_agents(event, portfolio_str)
     return [
         {
             "id":      ag["id"],
             "name":    ag["label"],
-            "text":    results.get(ag["id"], "[오류: 결과 없음]"),
-            "elapsed": elapsed.get(ag["id"], 0.0),
-            "ok":      not results.get(ag["id"], "").startswith("[오류"),
+            "text":    all_results.get(ag["id"], ("[오류: 결과 없음]", 0.0))[0],
+            "elapsed": all_results.get(ag["id"], ("[오류: 결과 없음]", 0.0))[1],
+            "ok":      not all_results.get(ag["id"], ("[오류: 결과 없음]", 0.0))[0].startswith("[오류"),
         }
         for ag in all_agents if ag["id"] in selected_ids
     ]

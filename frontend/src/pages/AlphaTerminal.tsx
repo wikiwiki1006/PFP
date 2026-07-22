@@ -8,7 +8,7 @@ import ReactMarkdown from 'react-markdown'
 import {
   MessageSquare, RefreshCw,
   Plus, Trash2, Edit3, Check, X, Play, FileText, ChevronRight,
-  PanelRightClose, PanelRightOpen, Download, History, Search,
+  Download, History, Search,
 } from 'lucide-react'
 import {
   getPortfolioMetrics, getEquityCurve, getHoldingsDetail, getSectorWeights,
@@ -280,12 +280,23 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
     return ticks
   }, [displayData])
 
-  // chart 컨테이너 픽셀 Y → 데이터 값 (margin.top=8, plotH=272=300-8-20xaxis)
+  // chart 컨테이너 픽셀 Y → 데이터 값 (margin.top=8, XAxis height≈30, plotH≈262)
   const pixelYToData = (py: number): number => {
     const [dMin, dMax] = computedYRange
-    const ratio = Math.max(0, Math.min(1, (py - 8) / 272))
+    const ratio = Math.max(0, Math.min(1, (py - 8) / 262))
     return dMax - ratio * (dMax - dMin)
   }
+
+  // 픽셀 X → displayData 날짜 (YAxis width=52, right margin=8)
+  const pixelXToDate = useCallback((px: number): string | null => {
+    const N = displayData.length
+    if (!N || !chartContainerRef.current) return null
+    const plotLeft  = 52
+    const plotRight = chartContainerRef.current.offsetWidth - 8
+    const plotWidth = plotRight - plotLeft
+    const i = Math.round((px - plotLeft) / plotWidth * N - 0.5)
+    return displayData[Math.max(0, Math.min(N - 1, i))]?.date ?? null
+  }, [displayData])
 
   // 오늘의 일간 변동: 전체 원본 데이터 마지막 2개 포인트 차이
   const allRawData: any[] = curveQ.data || []
@@ -307,11 +318,6 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
   const nqFiltered = data.filter(d => d.nasdaq != null)
   const nqPct = lastChange(nqFiltered, 'nasdaq')
 
-  // 알파: 첫 매수일부터 현재까지 누적 포트 수익 - 누적 S&P 수익
-  const absPortLast = portAll.length > 0 ? portAll[portAll.length - 1].port : 0
-  const absSpLast   = spRawAll.length > 0 ? spRawAll[spRawAll.length - 1].sp : 0
-  const alpha = portPct - (bm === 'nasdaq' ? nqPct : spPct)
-
   const BM_BTNS: { key: BenchmarkMode; label: string; color: string }[] = [
     { key: 'sp500',  label: 'S&P',  color: '#dc143c' },
     { key: 'nasdaq', label: 'NQ',   color: '#a78bfa' },
@@ -332,9 +338,22 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
     chartMouseYRef.current = 0
   }
 
-  // ── 드래그 줌 핸들러 (Recharts 이벤트 — activeLabel로 X 추적) ─────────────
+  // ── 드래그 줌 핸들러 ────────────────────────────────────────────────────────
+  // 컨테이너 mouseDown: 차트 전체 영역에서 드래그 시작 가능 (넓은 드래그 영역)
+  const handleContainerMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    const rect = chartContainerRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const px = e.clientX - rect.left
+    const label = pixelXToDate(px)
+    if (!label) return
+    dragging.current = true
+    const sy = chartMouseYRef.current
+    setCrosshairX(null)
+    setDragBounds({ left: label, right: label, startY: sy, endY: sy })
+  }
   const handleMouseDown = (e: any) => {
-    if (!e?.activeLabel) return
+    // Recharts onMouseDown: dragging already started by container, just update if activeLabel present
+    if (!e?.activeLabel || dragging.current) return
     dragging.current = true
     const sy = chartMouseYRef.current
     setCrosshairX(null)
@@ -496,7 +515,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
   }
 
   return (
-    <div className="px-4 pt-3 pb-2 border-b border-[#1e2d40]">
+    <div className="px-4 pt-3 pb-3 border-b border-[#1e2d40]">
       <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
         <div className="flex items-center gap-4 flex-wrap">
           <span className="text-[11px] text-[#cbd5e1] font-bold tracking-[3px] uppercase">포트폴리오 수익률</span>
@@ -531,13 +550,6 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
               </span>
             </div>
           )}
-          <span className="text-sm font-mono font-bold tabular-nums px-2 py-0.5 rounded"
-            style={{
-              color: alpha >= 0 ? '#10b981' : '#ef4444',
-              backgroundColor: alpha >= 0 ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)',
-            }}>
-            α {fp(alpha, 2)}
-          </span>
           {zoomDomain && (
             <button onClick={resetZoom}
               className="text-[10px] font-bold px-2 py-0.5 rounded border border-[#f59e0b]/50 text-[#f59e0b] hover:bg-[#f59e0b]/10 transition-colors">
@@ -583,12 +595,27 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
       )}
 
       {!curveQ.isLoading && data.length > 0 && (
+      <div style={{ margin: '0 12px 8px', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 4 }}>
       <div
         ref={chartContainerRef}
-        style={{ width: '100%', height: 300 }}
+        style={{ width: '100%', height: 300, position: 'relative' }}
         onMouseMove={handleNativeMouseMove}
         onMouseLeave={handleNativeMouseLeave}
+        onMouseDown={handleContainerMouseDown}
       >
+        {/* 가로 십자선: HTML overlay로 정확한 마우스 Y 위치에 표시 */}
+        {crosshairX && chartMouseY != null && !dragBounds && (
+          <div style={{
+            position: 'absolute',
+            top: chartMouseY,
+            left: 52,
+            right: 8,
+            height: 1,
+            background: 'rgba(255,255,255,0.22)',
+            pointerEvents: 'none',
+            zIndex: 10,
+          }} />
+        )}
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart data={displayData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}
           onMouseDown={handleMouseDown}
@@ -642,14 +669,10 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
             dot={tradeDot}
             activeDot={{ r: 5, fill: '#00e6ff', stroke: '#fff', strokeWidth: 2 }}
             isAnimationActive={false} />
-          {/* 십자선 — 드래그 중이 아닐 때 마우스 실제 위치 */}
+          {/* 세로 십자선 — 드래그 중이 아닐 때 (가로선은 HTML overlay로 렌더) */}
           {crosshairX && chartMouseY != null && !dragBounds && (
-            <>
-              <ReferenceLine x={crosshairX}
-                stroke="rgba(255,255,255,0.22)" strokeWidth={1} />
-              <ReferenceLine y={pixelYToData(chartMouseY)}
-                stroke="rgba(255,255,255,0.22)" strokeWidth={1} />
-            </>
+            <ReferenceLine x={crosshairX}
+              stroke="rgba(255,255,255,0.22)" strokeWidth={1} />
           )}
           {/* 드래그 줌 선택 직사각형 (X + Y 모두 표시) */}
           {dragBounds && selLeft && selRight && selLeft !== selRight && (
@@ -664,13 +687,14 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
         </AreaChart>
       </ResponsiveContainer>
       </div>
+      </div>
       )}
     </div>
   )
 }
 
 // ── Holdings + History Panel ──────────────────────────────────────────────────
-function HoldingsPanel({ holdQ, rawHoldings }: { holdQ: any; rawHoldings: Record<string, any> }) {
+function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawHoldings: Record<string, any>; onTickerClick?: (ticker: string) => void }) {
   const qc = useQueryClient()
   const [view, setView] = useState<'holdings' | 'history'>('holdings')
 
@@ -969,7 +993,12 @@ function HoldingsPanel({ holdQ, rawHoldings }: { holdQ: any; rawHoldings: Record
                       </>
                     ) : (
                       <>
-                        <td className="py-2 px-2.5 font-mono font-bold text-[15px] text-[#e2e8f0]">{h.ticker}</td>
+                        <td className="py-2 px-2.5 font-mono font-bold text-[15px] text-[#e2e8f0]">
+                          <span
+                            onClick={() => onTickerClick?.(h.ticker)}
+                            className={onTickerClick ? 'cursor-pointer hover:text-[#3b82f6] transition-colors' : ''}
+                          >{h.ticker}</span>
+                        </td>
                         <td className="py-2 px-2.5 font-mono text-[12px] text-[#cbd5e1]">${fn(h.avg_cost, 2)}</td>
                         <td className="py-2 px-2.5 font-mono text-[12px] text-[#cbd5e1]">{fv(h.qty)}</td>
                         <td className="py-2 px-2.5 font-mono text-[12px] text-[#cbd5e1]">${fn(h.current_price, 2)}</td>
@@ -1781,7 +1810,6 @@ export default function AlphaTerminal() {
   const qc = useQueryClient()
   const [botTab,       setBotTab]       = useState(0)
   const [rightTab,     setRightTab]     = useState(0)
-  const [rightOpen,    setRightOpen]    = useState(true)
   const [tickerModal,  setTickerModal]  = useState<string | null>(null)
   const [searchQuery,  setSearchQuery]  = useState('')
   const [searchSugs,   setSearchSugs]   = useState<{ ticker: string; name: string }[]>([])
@@ -1830,16 +1858,6 @@ export default function AlphaTerminal() {
 
   const m = metricsQ.data
 
-  // 누적 알파: 첫 매수일부터 현재까지 포트폴리오 - S&P 500 수익 차이
-  const absAlpha = useMemo(() => {
-    const raw: any[] = curveQ.data || []
-    if (!raw.length) return null
-    const pLast = [...raw].reverse().find((d: any) => d.port != null)
-    const sLast = [...raw].reverse().find((d: any) => d.sp != null)
-    if (!pLast || !sLast) return null
-    return Number(pLast.port) - Number(sLast.sp)
-  }, [curveQ.data])
-
   return (
     <div className="flex flex-col h-full bg-[#0b0f1a] overflow-hidden">
 
@@ -1863,68 +1881,69 @@ export default function AlphaTerminal() {
               <Pill label="누적 수익"  value={fp(m.total_return_pct)}  color={fv(m.total_return_pct) >= 0 ? '#10b981' : '#ef4444'} />
               <Pill label="베타"       value={fn(m.portfolio_beta)} />
               <Pill label="변동성"        value={fn(m.vix)}               color={fv(m.vix) > 25 ? '#ef4444' : fv(m.vix) > 18 ? '#f59e0b' : '#10b981'} />
-              <Pill label="알파"   value={fp(absAlpha ?? fv(m.alpha_vs_sp500), 2)} color={(absAlpha ?? fv(m.alpha_vs_sp500)) >= 0 ? '#10b981' : '#ef4444'} />
             </>
           )}
-        </div>
-        {/* ── 종목 검색 (우측 상단) ── */}
-        <div className="flex-shrink-0 flex items-center px-3 border-l border-[#1e2d40]" style={{ position: 'relative' }}>
-          <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
-            <input
-              value={searchQuery}
-              onChange={e => {
-                setSearchQuery(e.target.value)
-                setShowTopSugs(true)
-                if (searchTimer.current) clearTimeout(searchTimer.current)
-                if (!e.target.value.trim()) { setSearchSugs([]); return }
-                searchTimer.current = setTimeout(async () => {
-                  try { setSearchSugs(await searchTickers(e.target.value)) } catch { setSearchSugs([]) }
-                }, 250)
-              }}
-              onKeyDown={e => {
-                if (e.key === 'Enter') {
-                  const sym = searchQuery.trim().toUpperCase()
-                  if (sym) { setTickerModal(sym); setSearchQuery(''); setSearchSugs([]); setShowTopSugs(false) }
-                }
-              }}
-              onFocus={() => setShowTopSugs(true)}
-              onBlur={() => setTimeout(() => setShowTopSugs(false), 150)}
-              placeholder="종목 검색…"
-              className="bg-[#0b1220] border border-[#1e2d40] text-[#e2e8f0] rounded-l text-[11px] focus:outline-none focus:border-[#3b82f6]"
-              style={{ padding: '4px 8px', width: 130 }}
-            />
-            <button
-              onClick={() => {
-                const sym = searchQuery.trim().toUpperCase()
-                if (sym) { setTickerModal(sym); setSearchQuery(''); setSearchSugs([]); setShowTopSugs(false) }
-              }}
-              className="bg-[#1d4ed8] hover:bg-[#2563eb] border border-[#1d4ed8] rounded-r flex items-center justify-center transition-colors"
-              style={{ padding: '4px 8px' }}>
-              <Search size={12} color="#fff" />
-            </button>
-            {showTopSugs && searchSugs.length > 0 && (
-              <div style={{
-                position: 'absolute', top: '100%', left: 0, zIndex: 1000,
-                background: '#0b1220', border: '1px solid #1e2d40', borderRadius: 6,
-                minWidth: 220, marginTop: 2, overflow: 'hidden',
-              }}>
-                {searchSugs.map(s => (
-                  <div key={s.ticker}
-                    onMouseDown={() => { setTickerModal(s.ticker); setSearchQuery(''); setSearchSugs([]); setShowTopSugs(false) }}
-                    className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-[#1e2d40] text-[11px]">
-                    <span className="font-mono font-bold text-[#e2e8f0]">{s.ticker}</span>
-                    <span className="text-[#94a3b8] truncate">{s.name}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
         </div>
         <Clock />
       </div>
 
       {/* ── Marquee ── */}
       <Marquee snapshot={snapQ.data} />
+
+      {/* ── 종목 검색 바 (Marquee 아래) ── */}
+      <div className="flex-shrink-0 bg-[#060b14] border-b border-[#1e2d40] px-4 py-2" style={{ position: 'relative' }}>
+        <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+          <input
+            value={searchQuery}
+            onChange={e => {
+              setSearchQuery(e.target.value)
+              setShowTopSugs(true)
+              if (searchTimer.current) clearTimeout(searchTimer.current)
+              if (!e.target.value.trim()) { setSearchSugs([]); return }
+              searchTimer.current = setTimeout(async () => {
+                try { setSearchSugs(await searchTickers(e.target.value)) } catch { setSearchSugs([]) }
+              }, 250)
+            }}
+            onKeyDown={e => {
+              if (e.key === 'Enter') {
+                const sym = searchQuery.trim().toUpperCase()
+                if (sym) { setTickerModal(sym); setSearchQuery(''); setSearchSugs([]); setShowTopSugs(false) }
+              }
+            }}
+            onFocus={() => setShowTopSugs(true)}
+            onBlur={() => setTimeout(() => setShowTopSugs(false), 150)}
+            placeholder="종목 검색 (티커·이름)…"
+            className="bg-[#0b1220] border border-[#1e2d40] text-[#e2e8f0] rounded-l text-[12px] focus:outline-none focus:border-[#3b82f6]"
+            style={{ padding: '5px 10px', width: 280 }}
+          />
+          <button
+            onClick={() => {
+              const sym = searchQuery.trim().toUpperCase()
+              if (sym) { setTickerModal(sym); setSearchQuery(''); setSearchSugs([]); setShowTopSugs(false) }
+            }}
+            className="bg-[#1d4ed8] hover:bg-[#2563eb] border border-[#1d4ed8] rounded-r flex items-center gap-1.5 transition-colors"
+            style={{ padding: '5px 12px' }}>
+            <Search size={13} color="#fff" />
+            <span className="text-white text-[11px] font-bold">검색</span>
+          </button>
+          {showTopSugs && searchSugs.length > 0 && (
+            <div style={{
+              position: 'absolute', top: '100%', left: 0, zIndex: 1000,
+              background: '#0b1220', border: '1px solid #1e2d40', borderRadius: 6,
+              minWidth: 300, marginTop: 2, overflow: 'hidden',
+            }}>
+              {searchSugs.map(s => (
+                <div key={s.ticker}
+                  onMouseDown={() => { setTickerModal(s.ticker); setSearchQuery(''); setSearchSugs([]); setShowTopSugs(false) }}
+                  className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-[#1e2d40] text-[11px]">
+                  <span className="font-mono font-bold text-[#e2e8f0]">{s.ticker}</span>
+                  <span className="text-[#94a3b8] truncate">{s.name}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
 
       {/* ── Main layout ── */}
       <div className="flex flex-1 min-h-0">
@@ -1937,7 +1956,7 @@ export default function AlphaTerminal() {
 
           {/* B: Holdings */}
           <div className="border-b border-[#1e2d40]" style={{ height: '460px' }}>
-            <HoldingsPanel holdQ={holdQ} rawHoldings={rawHoldQ.data || {}} />
+            <HoldingsPanel holdQ={holdQ} rawHoldings={rawHoldQ.data || {}} onTickerClick={t => setTickerModal(t)} />
           </div>
 
           {/* B2: Sectors + Sector Performance */}
@@ -2008,111 +2027,77 @@ export default function AlphaTerminal() {
           </div>
         </div>
 
-        {/* ═══ RIGHT PANEL — collapsible ═══ */}
-        {rightOpen ? (
-          <div className="flex min-h-0 flex-shrink-0" style={{ width: '30%', minWidth: '260px' }}>
-            {/* Left toggle strip */}
-            <div className="flex-shrink-0 flex items-center justify-center bg-[#060b14] border-r border-[#1e2d40]" style={{ width: '20px' }}>
-              <button onClick={() => setRightOpen(false)} title="패널 닫기"
-                className="text-[#94a3b8] hover:text-[#3b82f6] transition-colors">
-                <PanelRightClose className="w-3.5 h-3.5" />
-              </button>
-            </div>
-            <div className="flex flex-col min-h-0 flex-1 overflow-hidden">
-              <div className="flex-shrink-0 bg-[#060b14] border-b border-[#1e2d40] flex">
-                {RIGHT_TABS.map((t, i) => (
-                  <button key={t} onClick={() => setRightTab(i)}
-                    className={cn('flex-1 py-2.5 text-[10px] font-bold tracking-widest uppercase transition-colors',
-                      rightTab === i ? 'text-[#3b82f6] border-b-2 border-[#3b82f6] bg-[#3b82f6]/5' : 'text-[#94a3b8] hover:text-[#cbd5e1]'
-                    )}>
-                    {t}
-                  </button>
-                ))}
-              </div>
-
-              <div className="flex-1 min-h-0 overflow-hidden">
-              {rightTab === 0 && <DailyBriefPanel />}
-
-              {rightTab === 1 && (
-                <div className="h-full flex flex-col overflow-hidden">
-                  <div className="flex-shrink-0 flex items-center justify-between px-4 py-2.5 border-b border-[#1e2d40] bg-[#060b14]">
-                    <div className="flex items-center gap-2">
-                      <MessageSquare className="w-4 h-4 text-[#3b82f6]" />
-                      <span className="text-[11px] text-[#94a3b8] font-bold tracking-widest">AI 분석</span>
-                    </div>
-                    <button
-                      onClick={() => {
-                        qc.invalidateQueries({ queryKey: ['analyst-feedback'] })
-                        feedbackQ.refetch()
-                      }}
-                      disabled={feedbackQ.isFetching}
-                      className="flex items-center gap-1.5 text-[11px] text-[#3b82f6] hover:text-[#60a5fa] disabled:opacity-40 transition-colors">
-                      <RefreshCw className={cn('w-3 h-3', feedbackQ.isFetching && 'animate-spin')} />
-                      재분석
-                    </button>
-                  </div>
-                  <div className="flex-1 overflow-y-auto p-4">
-                    {feedbackQ.isFetching && (
-                      <div className="flex items-center gap-2 py-4 justify-center">
-                        <span className="w-2 h-2 rounded-full bg-[#3b82f6] animate-pulse" />
-                        <span className="text-sm text-[#94a3b8]">AI 분석 중…</span>
-                      </div>
-                    )}
-                    {feedbackQ.data && !feedbackQ.isFetching && (
-                      <p className="text-sm text-[#cbd5e1] leading-relaxed whitespace-pre-wrap">{feedbackQ.data.feedback}</p>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {rightTab === 2 && (
-                <div className="h-full overflow-y-auto divide-y divide-[#0f172a]">
-                  {(newsQ.data || []).map((n, i) => (
-                    <a key={i} href={n.url} target="_blank" rel="noreferrer"
-                      className="block p-3.5 hover:bg-[#0a1525] transition-colors">
-                      <div className="flex items-center gap-2 mb-2">
-                        <span className={cn('text-[10px] font-bold px-2 py-0.5 rounded',
-                          n.ticker === 'MACRO' ? 'bg-[#9b59b6]/20 text-[#9b59b6]' : 'bg-[#3b82f6]/20 text-[#3b82f6]')}>
-                          {n.ticker}
-                        </span>
-                        <span className="text-[11px] text-[#94a3b8]">
-                          {new Date(n.datetime * 1000).toLocaleDateString('ko-KR', { month: 'numeric', day: 'numeric' })}
-                        </span>
-                      </div>
-                      <p className="text-sm text-[#cbd5e1] leading-relaxed line-clamp-2">{n.headline}</p>
-                    </a>
-                  ))}
-                </div>
-              )}
-            </div>
-            </div>
-          </div>
-        ) : (
-          <div className="flex flex-col items-center bg-[#060b14] border-l border-[#1e2d40] flex-shrink-0"
-            style={{ width: '48px' }}>
-            <div className="flex flex-col items-center gap-3 pt-3">
+        {/* ═══ RIGHT PANEL — always visible ═══ */}
+        <div className="flex min-h-0 flex-shrink-0" style={{ width: '30%', minWidth: '260px' }}>
+          <div className="flex flex-col min-h-0 flex-1 overflow-hidden">
+            <div className="flex-shrink-0 bg-[#060b14] border-b border-[#1e2d40] flex">
               {RIGHT_TABS.map((t, i) => (
-                <button key={t} onClick={() => { setRightTab(i); setRightOpen(true) }} title={t}
-                  className={cn('text-[9px] font-bold tracking-widest uppercase transition-colors px-0.5',
-                    rightTab === i ? 'text-[#3b82f6]' : 'text-[#94a3b8] hover:text-[#cbd5e1]'
-                  )}
-                  style={{ writingMode: 'vertical-rl', textOrientation: 'mixed', transform: 'rotate(180deg)' }}>
+                <button key={t} onClick={() => setRightTab(i)}
+                  className={cn('flex-1 py-2.5 text-[10px] font-bold tracking-widest uppercase transition-colors',
+                    rightTab === i ? 'text-[#3b82f6] border-b-2 border-[#3b82f6] bg-[#3b82f6]/5' : 'text-[#94a3b8] hover:text-[#cbd5e1]'
+                  )}>
                   {t}
                 </button>
               ))}
             </div>
-            <button onClick={() => setRightOpen(true)} title="패널 열기"
-              className="my-auto text-[#94a3b8] hover:text-[#3b82f6] transition-colors">
-              <PanelRightOpen className="w-4 h-4" />
-            </button>
-            <button onClick={() => {
-              qc.invalidateQueries({ queryKey: ['analyst-feedback'] })
-              qc.invalidateQueries({ queryKey: ['market-snapshot'] })
-            }} className="text-[#94a3b8] hover:text-[#cbd5e1] transition-colors mb-3">
-              <RefreshCw className="w-3.5 h-3.5" />
-            </button>
+
+            <div className="flex-1 min-h-0 overflow-hidden">
+            {rightTab === 0 && <DailyBriefPanel />}
+
+            {rightTab === 1 && (
+              <div className="h-full flex flex-col overflow-hidden">
+                <div className="flex-shrink-0 flex items-center justify-between px-4 py-2.5 border-b border-[#1e2d40] bg-[#060b14]">
+                  <div className="flex items-center gap-2">
+                    <MessageSquare className="w-4 h-4 text-[#3b82f6]" />
+                    <span className="text-[11px] text-[#94a3b8] font-bold tracking-widest">AI 분석</span>
+                  </div>
+                  <button
+                    onClick={() => {
+                      qc.invalidateQueries({ queryKey: ['analyst-feedback'] })
+                      feedbackQ.refetch()
+                    }}
+                    disabled={feedbackQ.isFetching}
+                    className="flex items-center gap-1.5 text-[11px] text-[#3b82f6] hover:text-[#60a5fa] disabled:opacity-40 transition-colors">
+                    <RefreshCw className={cn('w-3 h-3', feedbackQ.isFetching && 'animate-spin')} />
+                    재분석
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto p-4">
+                  {feedbackQ.isFetching && (
+                    <div className="flex items-center gap-2 py-4 justify-center">
+                      <span className="w-2 h-2 rounded-full bg-[#3b82f6] animate-pulse" />
+                      <span className="text-sm text-[#94a3b8]">AI 분석 중…</span>
+                    </div>
+                  )}
+                  {feedbackQ.data && !feedbackQ.isFetching && (
+                    <p className="text-sm text-[#cbd5e1] leading-relaxed whitespace-pre-wrap">{feedbackQ.data.feedback}</p>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {rightTab === 2 && (
+              <div className="h-full overflow-y-auto divide-y divide-[#0f172a]">
+                {(newsQ.data || []).map((n, i) => (
+                  <a key={i} href={n.url} target="_blank" rel="noreferrer"
+                    className="block p-3.5 hover:bg-[#0a1525] transition-colors">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className={cn('text-[10px] font-bold px-2 py-0.5 rounded',
+                        n.ticker === 'MACRO' ? 'bg-[#9b59b6]/20 text-[#9b59b6]' : 'bg-[#3b82f6]/20 text-[#3b82f6]')}>
+                        {n.ticker}
+                      </span>
+                      <span className="text-[11px] text-[#94a3b8]">
+                        {new Date(n.datetime * 1000).toLocaleDateString('ko-KR', { month: 'numeric', day: 'numeric' })}
+                      </span>
+                    </div>
+                    <p className="text-sm text-[#cbd5e1] leading-relaxed line-clamp-2">{n.headline}</p>
+                  </a>
+                ))}
+              </div>
+            )}
           </div>
-        )}
+          </div>
+        </div>
       </div>
 
       <style>{`

@@ -809,6 +809,21 @@ def get_holdings_detail_endpoint(x_user_id: Optional[str] = Header(default=None)
     # ttl=1800: 역사 종가는 하루 1회만 갱신되므로 30분 캐시 (live 가격은 _inject_live가 별도 60초 갱신)
     close_df = get_close_df(tickers, period="5d", ttl=1800, include_market=False)
     close_df = _inject_live(close_df)
+
+    # 장 외 시간: 오늘 ET 행이 DB의 ffill 아티팩트(전일 종가 복사)일 수 있어 제거.
+    # → curr = 마지막 완료 거래일 종가, prev = 그 전날 종가 → 올바른 "마지막날 변동률" 표시.
+    # 오늘 행이 실제 종가(전일과 다름)이면 제거하지 않는다.
+    if not _is_market_open() and len(close_df) >= 2:
+        if _ET_TZ is not None:
+            today_et = pd.Timestamp(datetime.now(_ET_TZ).date())
+        else:
+            today_et = pd.Timestamp((datetime.now(timezone.utc) + timedelta(hours=-4)).date())
+        if today_et in close_df.index:
+            today_vals = close_df.loc[today_et].dropna()
+            prev_vals  = close_df.iloc[-2].reindex(today_vals.index).dropna()
+            if not today_vals.empty and today_vals.equals(prev_vals.reindex(today_vals.index)):
+                close_df = close_df.drop(today_et)
+
     return get_holdings_detail(holdings, close_df)
 
 

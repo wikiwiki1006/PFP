@@ -290,8 +290,7 @@ def _update_sp500_prices():
         logger.warning("SP500 가격 수집: yfinance 빈 응답")
         return
 
-    close_df = close_df.ffill().dropna(axis=1, how="all")
-    save_prices_to_db(close_df)
+    save_prices_to_db(close_df.dropna(axis=1, how="all"))
     save_common(
         "sp500_price_update_last",
         datetime.now(tz=timezone.utc).isoformat(),

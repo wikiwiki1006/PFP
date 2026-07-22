@@ -11,7 +11,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
   ComposedChart, BarChart, LineChart,
   Bar, Line, Area, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, ReferenceLine, Cell,
+  ResponsiveContainer, ReferenceLine, Cell, Customized,
 } from 'recharts'
 import { X, Search, TrendingUp, TrendingDown, Minus } from 'lucide-react'
 import { getTickerDetail, searchTickers } from '@/api'
@@ -60,52 +60,41 @@ const fvol = (v: number) => {
 const perfColor = (v: number | null | undefined) =>
   v == null ? C.muted : v >= 0 ? C.up : C.down
 
-// ── 캔들스틱 SVG 레이어 (Recharts customized prop) ───────────────────────────
-const CandlestickLayer = ({ xAxisMap, yAxisMap, data }: any) => {
-  const xAxis = Object.values(xAxisMap || {})[0] as any
-  const yAxis = Object.values(yAxisMap || {})[0] as any
-  if (!xAxis || !yAxis || !data?.length) return null
+// ── 캔들스틱 SVG 레이어 (offset 기반 직접 픽셀 계산 — recharts 내부 scale 의존 없음) ──
+function makeCandleRenderer(visData: OHLCVPoint[], priceDomain: [number, number]) {
+  return function CandlestickLayer({ offset }: any) {
+    if (!offset || !visData?.length) return null
+    const { left, top, width, height } = offset
+    const [yMin, yMax] = priceDomain
+    const N = visData.length
+    const bw = Math.max(2, (width / N) * 0.7)
 
-  const xScale   = xAxis.scale
-  const yScale   = yAxis.scale
-  const bandwidth = xAxis.bandSize || 4
+    const yPx = (v: number) =>
+      Number.isFinite(v) ? top + (yMax - v) / (yMax - yMin) * height : top
 
-  return (
-    <g>
-      {data.map((d: OHLCVPoint, i: number) => {
-        const cx = xScale(d.date) + bandwidth / 2
-        if (cx == null || isNaN(cx)) return null
-
-        const isUp = d.close >= d.open
-        const color = isUp ? C.up : C.down
-        const yH = yScale(d.high)
-        const yL = yScale(d.low)
-        const yO = yScale(d.open)
-        const yC = yScale(d.close)
-
-        const bodyTop    = Math.min(yO, yC)
-        const bodyBottom = Math.max(yO, yC)
-        const bodyH      = Math.max(1, bodyBottom - bodyTop)
-        const bw         = Math.max(2, bandwidth * 0.65)
-
-        return (
-          <g key={i}>
-            <line x1={cx} y1={yH} x2={cx} y2={yL} stroke={color} strokeWidth={1} />
-            <rect
-              x={cx - bw / 2}
-              y={bodyTop}
-              width={bw}
-              height={bodyH}
-              fill={isUp ? color : color}
-              fillOpacity={isUp ? 0.9 : 0.9}
-              stroke={color}
-              strokeWidth={0.5}
-            />
-          </g>
-        )
-      })}
-    </g>
-  )
+    return (
+      <g>
+        {visData.map((d, i) => {
+          const cx = left + (i + 0.5) * (width / N)
+          const isUp = d.close >= d.open
+          const color = isUp ? C.up : C.down
+          const yH = yPx(d.high)
+          const yL = yPx(d.low)
+          const yO = yPx(d.open)
+          const yC = yPx(d.close)
+          const bodyTop = Math.min(yO, yC)
+          const bodyH   = Math.max(1, Math.abs(yC - yO))
+          return (
+            <g key={i}>
+              <line x1={cx} y1={yH} x2={cx} y2={yL} stroke={color} strokeWidth={1} />
+              <rect x={cx - bw / 2} y={bodyTop} width={bw} height={bodyH}
+                fill={color} stroke={color} strokeWidth={0.5} opacity={0.9} />
+            </g>
+          )
+        })}
+      </g>
+    )
+  }
 }
 
 // ── Quant 게이지 (반원 SVG) ───────────────────────────────────────────────────
@@ -266,10 +255,12 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
   const [suggests, setSuggests] = useState<{ ticker: string; name: string }[]>([])
   const [showSug,  setShowSug]  = useState(false)
 
-  // ── zoom state ──────────────────────────────────────────────────────────
+  // ── zoom/pan state ─────────────────────────────────────────────────────
   const [viewStart, setViewStart] = useState(0)
   const [viewEnd,   setViewEnd]   = useState(0)
-  const chartRef = useRef<HTMLDivElement>(null)
+  const chartRef  = useRef<HTMLDivElement>(null)
+  const panRef    = useRef<{ x: number; start: number; end: number } | null>(null)
+  const isPanning = useRef(false)
   const sugTimer  = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // ── 데이터 로드 ──────────────────────────────────────────────────────────
@@ -289,11 +280,12 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
 
   useEffect(() => { if (ticker) load(ticker, period) }, [ticker, period, load])
 
-  // ── 마우스 휠 줌 ────────────────────────────────────────────────────────
+  // ── 마우스 휠 줌 + 드래그 팬 (investing.com 스타일) ───────────────────
   useEffect(() => {
     const el = chartRef.current
     if (!el || !data) return
     const total = data.ohlcv.length
+
     const onWheel = (e: WheelEvent) => {
       e.preventDefault()
       const factor = e.deltaY > 0 ? 1.15 : 0.85
@@ -303,8 +295,37 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
       const ne = Math.min(total, Math.ceil(center  + half))
       if (ne - ns >= 10) { setViewStart(ns); setViewEnd(ne) }
     }
+
+    const onMouseDown = (e: MouseEvent) => {
+      isPanning.current = true
+      panRef.current = { x: e.clientX, start: viewStart, end: viewEnd }
+      el.style.cursor = 'grabbing'
+    }
+    const onMouseMove = (e: MouseEvent) => {
+      if (!isPanning.current || !panRef.current) return
+      const range = panRef.current.end - panRef.current.start
+      const dx = panRef.current.x - e.clientX
+      const shift = Math.round(dx / el.offsetWidth * range)
+      const ns = Math.max(0, Math.min(total - range, panRef.current.start + shift))
+      setViewStart(ns)
+      setViewEnd(ns + range)
+    }
+    const onMouseUp = () => {
+      isPanning.current = false
+      panRef.current = null
+      el.style.cursor = 'default'
+    }
+
     el.addEventListener('wheel', onWheel, { passive: false })
-    return () => el.removeEventListener('wheel', onWheel)
+    el.addEventListener('mousedown', onMouseDown)
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+    return () => {
+      el.removeEventListener('wheel', onWheel)
+      el.removeEventListener('mousedown', onMouseDown)
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+    }
   }, [data, viewStart, viewEnd])
 
   // ── 자동완성 ─────────────────────────────────────────────────────────────
@@ -349,6 +370,9 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
     const pad = (hi - lo) * 0.05
     return [Math.max(0, lo - pad), hi + pad]
   }, [visData, showMA])
+
+  // 캔들스틱 레이어: priceDomain이 바뀔 때마다 재생성 (클로저로 최신 데이터 캡처)
+  const CandleLayer = useMemo(() => makeCandleRenderer(visData, priceDomain), [visData, priceDomain])
 
   // ── 날짜 라벨 (밀집도에 따라 자동 조절) ─────────────────────────────────
   const xInterval = Math.max(1, Math.floor(visData.length / 6))
@@ -518,9 +542,6 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                     <ComposedChart
                       data={visData}
                       margin={{ top: 8, right: 12, left: 0, bottom: 0 }}
-                      customized={[
-                        <CandlestickLayer key="candle" />
-                      ]}
                     >
                       <CartesianGrid strokeDasharray="3 3" stroke={C.grid} opacity={0.5} />
                       <XAxis dataKey="date" tick={axisStyle} interval={xInterval}
@@ -555,8 +576,9 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                         </>
                       )}
 
-                      {/* dummy bar to set X scale (candlestick layer uses it) */}
+                      {/* dummy bar to set X scale; Customized layer draws real candles */}
                       <Bar dataKey="close" fill="transparent" isAnimationActive={false} />
+                      <Customized component={CandleLayer} />
                     </ComposedChart>
                   </ResponsiveContainer>
                 </div>
@@ -630,48 +652,48 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
               {/* ─── 우측 패널 (30%) ──────────────────────────────────────── */}
               <div style={{ flex: '0 0 30%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
-                {/* Quant Scoreboard */}
+                {/* 퀀트 스코어보드 */}
                 <div style={{ padding: '10px 14px', borderBottom: `1px solid ${C.border}` }}>
                   <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 4 }}>
-                    Quant Scoreboard
+                    퀀트 스코어보드
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                     <QuantGauge score={data.quant.score} />
                     <div>
-                      <div style={{ fontSize: 10, color: C.muted }}>Quant Score: <span style={{ color: C.up, fontWeight: 700 }}>{data.quant.score}/100</span></div>
+                      <div style={{ fontSize: 10, color: C.muted }}>퀀트 점수: <span style={{ color: C.up, fontWeight: 700 }}>{data.quant.score}/100</span></div>
                       <div style={{ fontSize: 11, color: C.up, fontWeight: 700, marginTop: 2 }}>{data.quant.score_label}</div>
                     </div>
                   </div>
                 </div>
 
-                {/* Market Regime + Optimizer Insight */}
+                {/* 시장 국면 + 옵티마이저 */}
                 <div style={{ padding: '10px 14px', borderBottom: `1px solid ${C.border}` }}>
                   <div style={{ fontSize: 10, color: '#f59e0b', fontWeight: 700, marginBottom: 6 }}>
-                    Market Regime: <span style={{ color: C.text }}>{data.quant.regime}</span>
+                    시장 국면: <span style={{ color: C.text }}>{data.quant.regime}</span>
                   </div>
                   <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 6 }}>
-                    Optimizer Insight
+                    옵티마이저 인사이트
                   </div>
                   {[
-                    [`Target Optimal Weight: ${data.quant.optimizer.target_weight}%`, null],
-                    [`Risk Contribution: ${data.quant.optimizer.risk_contribution}% (at ${data.quant.optimizer.current_weight}% Weight)`, null],
-                    [`Correlation to Port: ${data.quant.optimizer.correlation} (${data.quant.optimizer.correlation_label})`, null],
-                    [`Beta Exposure: ${data.quant.optimizer.beta_exposure}x`, null],
+                    [`목표 최적 비중: ${data.quant.optimizer.target_weight}%`, null],
+                    [`리스크 기여도: ${data.quant.optimizer.risk_contribution}% (현재 비중 ${data.quant.optimizer.current_weight}%)`, null],
+                    [`포트 상관관계: ${data.quant.optimizer.correlation} (${data.quant.optimizer.correlation_label})`, null],
+                    [`Beta 익스포저: ${data.quant.optimizer.beta_exposure}x`, null],
                   ].map(([label], i) => (
                     <div key={i} style={{ fontSize: 10, color: C.muted, marginBottom: 3 }}>{label as string}</div>
                   ))}
                   <div style={{ fontSize: 9, color: '#64748b', marginTop: 4, fontStyle: 'italic' }}>
-                    (Note 1) This is a mathematically derived baseline recommendation, not a compulsory position.
+                    (주) 수학적 기반 참고 추천으로, 강제 포지션이 아닙니다.
                   </div>
                 </div>
 
-                {/* Panic Hunting Score */}
+                {/* 패닉 헌팅 점수 */}
                 <div style={{ padding: '10px 14px', borderBottom: `1px solid ${C.border}`, background: 'rgba(239,68,68,0.05)', border: `1px solid rgba(239,68,68,0.2)`, margin: '8px', borderRadius: 6 }}>
                   <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 6 }}>
-                    Panic Hunting Score
+                    패닉 헌팅 점수
                   </div>
                   <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, marginBottom: 8 }}>
-                    <span style={{ fontSize: 10, color: C.muted }}>Panic Status Score:</span>
+                    <span style={{ fontSize: 10, color: C.muted }}>패닉 상태 점수:</span>
                     <span style={{ fontSize: 22, fontWeight: 700, color: '#ef4444', fontFamily: 'monospace' }}>
                       {data.quant.panic_score}
                     </span>
@@ -679,7 +701,7 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                   </div>
                   <PanicBar score={data.quant.panic_score} />
                   <div style={{ fontSize: 10, color: '#ef4444', marginTop: 6, fontWeight: 600 }}>
-                    Signal Status: {data.quant.panic_status}
+                    시그널 상태: {data.quant.panic_status}
                   </div>
                 </div>
 
@@ -704,33 +726,33 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
               borderTop: `1px solid ${C.border}`, background: C.panel,
             }}>
 
-              {/* Fund Info */}
+              {/* 펀드 정보 */}
               <div style={{ flex: 1, padding: '10px 14px', borderRight: `1px solid ${C.border}` }}>
                 <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <span>ℹ</span> Fund Info
+                  <span>ℹ</span> 펀드 정보
                 </div>
                 {[
-                  ['Ticker',      data.ticker],
-                  ['Name',        data.info.name],
-                  ['Sector',      data.info.sector],
-                  ['Industry',    data.info.industry],
-                  ['Market Cap',  data.info.market_cap],
+                  ['티커',        data.ticker],
+                  ['종목명',      data.info.name],
+                  ['섹터',        data.info.sector],
+                  ['산업',        data.info.industry],
+                  ['시가총액',    data.info.market_cap],
                   ['P/E',         data.info.pe != null ? fn(data.info.pe, 1) : 'N/A'],
-                  ['Div Yield',   `${fn(data.info.div_yield, 2)}%`],
+                  ['배당수익률',  `${fn(data.info.div_yield, 2)}%`],
                 ].map(([k, v]) => (
                   <div key={k} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3, fontSize: 11 }}>
                     <span style={{ color: C.muted }}>{k}</span>
-                    <span style={{ color: C.text, fontWeight: k === 'Ticker' ? 700 : 400, fontFamily: k === 'Ticker' ? 'monospace' : undefined }}>
+                    <span style={{ color: C.text, fontWeight: k === '티커' ? 700 : 400, fontFamily: k === '티커' ? 'monospace' : undefined }}>
                       {v}
                     </span>
                   </div>
                 ))}
               </div>
 
-              {/* Performance */}
+              {/* 성과 */}
               <div style={{ flex: 1, padding: '10px 14px', borderRight: `1px solid ${C.border}` }}>
                 <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <TrendingUp size={11} /> Performance
+                  <TrendingUp size={11} /> 성과
                 </div>
                 {[
                   ['1W',   data.performance['1w']],
@@ -749,8 +771,8 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                 ))}
                 <div style={{ borderTop: `1px solid ${C.border}`, marginTop: 4, paddingTop: 4 }}>
                   {[
-                    ['S2W High', `$${fn(data.performance.s52w_high)}`],
-                    ['S2W Low',  `$${fn(data.performance.s52w_low)}`],
+                    ['52W 고가', `$${fn(data.performance.s52w_high)}`],
+                    ['52W 저가', `$${fn(data.performance.s52w_low)}`],
                   ].map(([k, v]) => (
                     <div key={k} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2, fontSize: 11 }}>
                       <span style={{ color: C.muted }}>{k}</span>
@@ -760,22 +782,22 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                 </div>
               </div>
 
-              {/* Risk/Technical */}
+              {/* 리스크/기술적 지표 */}
               <div style={{ flex: 1, padding: '10px 14px' }}>
                 <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <TrendingDown size={11} /> Risk/Technical
+                  <TrendingDown size={11} /> 리스크/기술적 지표
                 </div>
                 {[
                   ['Beta',          fn(data.risk.beta)],
-                  ['Volatility',    data.risk.volatility != null ? `${fn(data.risk.volatility, 1)}%` : 'N/A'],
-                  ['Avg Volume',    fvol(data.risk.avg_volume)],
+                  ['변동성',        data.risk.volatility != null ? `${fn(data.risk.volatility, 1)}%` : 'N/A'],
+                  ['평균 거래량',   fvol(data.risk.avg_volume)],
                   ['RSI(14)',       data.risk.rsi14 != null ? fn(data.risk.rsi14, 1) : 'N/A'],
-                  ['Current Price', `$${fn(data.risk.current_price)}`],
-                  ['Change',        null],
+                  ['현재가',        `$${fn(data.risk.current_price)}`],
+                  ['등락률',        null],
                 ].map(([k, v]) => (
                   <div key={k as string} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3, fontSize: 11 }}>
                     <span style={{ color: C.muted }}>{k}</span>
-                    {k === 'Change' ? (
+                    {k === '등락률' ? (
                       <span style={{ color: perfColor(data.risk.change_pct), fontFamily: 'monospace', fontWeight: 600 }}>
                         {fp(data.risk.change_pct)}
                       </span>

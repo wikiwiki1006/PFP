@@ -407,15 +407,30 @@ def calculate_metrics(
 # ── 보유 종목 상세 ─────────────────────────────────────────────────────────────
 
 def get_holdings_detail(holdings: dict, close_df: pd.DataFrame) -> list[dict]:
-    if close_df.empty or len(close_df) < 2:
+    if close_df.empty:
         return []
 
-    curr = close_df.iloc[-1]
-    prev = close_df.iloc[-2]
+    # 티커별로 마지막 유효(non-NaN) 가격 2개를 독립적으로 추출.
+    # iloc[-1]/iloc[-2] 방식은 다른 티커 때문에 생긴 NaN 행이나
+    # 장 중 ffill 저장된 행(= 전일 종가 복사)으로 chg_pct=0이 되는 버그를 방지한다.
+    ticker_px: dict[str, tuple[float, float]] = {}
+    for t in holdings:
+        if t == "CASH":
+            continue
+        if t in close_df.columns:
+            col = close_df[t].dropna()
+            if not col.empty:
+                curr_p = float(col.iloc[-1])
+                prev_p = float(col.iloc[-2]) if len(col) >= 2 else curr_p
+            else:
+                curr_p = prev_p = 0.0
+        else:
+            curr_p = prev_p = 0.0
+        ticker_px[t] = (curr_p, prev_p)
 
     total_equity = sum(
-        _safe(curr.get(t, 0)) * _safe(info["q"])
-        for t, info in holdings.items() if t != "CASH" and t in close_df.columns
+        ticker_px.get(t, (0.0, 0.0))[0] * _safe(info.get("q", 0))
+        for t, info in holdings.items() if t != "CASH"
     ) + _safe(holdings.get("CASH", {}).get("q", 0))
     total_equity = _safe(total_equity)
 
@@ -426,8 +441,7 @@ def get_holdings_detail(holdings: dict, close_df: pd.DataFrame) -> list[dict]:
             chg_pct = 0.0
             pnl_pct = 0.0
         else:
-            price   = _safe(curr.get(t, 0)) if t in close_df.columns else 0.0
-            p_price = _safe(prev.get(t, price)) if t in prev.index else price
+            price, p_price = ticker_px.get(t, (0.0, 0.0))
             chg_pct = _safe((price / p_price - 1) * 100) if p_price else 0.0
             avg     = _safe(info.get("avg", 0))
             pnl_pct = _safe((price / avg - 1) * 100) if avg > 0 else 0.0

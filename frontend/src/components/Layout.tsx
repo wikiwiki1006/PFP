@@ -1,10 +1,9 @@
 import { NavLink, Outlet } from 'react-router-dom'
-import { Home, Monitor, Globe, Dice5, TrendingUp, Zap, BookOpen } from 'lucide-react'
+import { Monitor, Globe, Dice5, TrendingUp, Zap, BookOpen } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 const navItems = [
-  { to: '/',            icon: Home,       label: '홈',          sub: 'Dashboard Hub' },
-  { to: '/terminal',    icon: Monitor,    label: '포토폴리오',sub: 'Portfolio HQ + Brief' },
+  { to: '/terminal',    icon: Monitor,    label: '포토폴리오', sub: 'Portfolio HQ + Brief' },
   { to: '/macro',       icon: Globe,      label: '시장 시나리오',sub: '9-Agent Pipeline' },
   { to: '/monte-carlo', icon: Dice5,      label: 'MONTE CARLO',   sub: 'Simulations' },
   { to: '/optimizer',   icon: TrendingUp, label: '포토폴리오 최적화',     sub: 'Portfolio Opt' },
