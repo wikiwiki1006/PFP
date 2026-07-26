@@ -6,6 +6,7 @@ routers/reports.py
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from typing import Optional
 
@@ -38,7 +39,9 @@ async def daily_brief(x_user_id: Optional[str] = Header(default=None)):
 
     logs: list[str] = []
     try:
-        report, price_data = generate_daily_report(holdings, log=logs.append)
+        report, price_data = await asyncio.to_thread(
+            generate_daily_report, holdings, logs.append
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -162,8 +162,14 @@ export const runMonteCarloMacro = async (body: object): Promise<MonteCarloMacroR
 export const getMacroModes = async (): Promise<MacroModes> =>
   (await api.get('/api/macro/modes')).data
 
-export const runMacroAnalysis = async (body: { event: string; model?: string; mode?: string }): Promise<MacroAnalysisResult> =>
+export const runMacroAnalysis = async (body: { event: string; model?: string; mode?: string; portfolio?: Record<string, unknown> }): Promise<MacroAnalysisResult> =>
   (await api.post('/api/macro/analyze', body)).data
+
+export const getMacroReportHistory = async (): Promise<{ name: string; event: string; mode: string; created_at: string }[]> =>
+  (await api.get('/api/macro/reports')).data
+
+export const getMacroReportFile = async (filename: string): Promise<MacroAnalysisResult> =>
+  (await api.get(`/api/macro/reports/${filename}`)).data
 
 export const getAnalystFeedback = async (metrics?: {
   vix?: number

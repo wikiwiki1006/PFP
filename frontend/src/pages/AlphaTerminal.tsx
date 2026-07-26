@@ -21,6 +21,7 @@ import {
 } from '@/api'
 import { cn } from '@/lib/utils'
 import TickerDetailModal from '@/components/TickerDetailModal'
+import { FinancialTips } from '@/components/FinancialTips'
 
 // null/NaN-safe 숫자 포맷터
 const fn = (v: number | null | undefined, d = 2) => ((v == null || isNaN(v as number)) ? 0 : v).toFixed(d)
@@ -1690,7 +1691,7 @@ function DailyBriefPanel() {
   useEffect(() => {
     if (!isActivelyGenerating) return
     const startMs = parseInt(sessionStorage.getItem(SK_START) || String(Date.now()), 10)
-    const MAX_MS  = 120_000  // 2분 기준
+    const MAX_MS  = 55_000   // 실측 평균 생성 시간 ~48s
     const tick = () => {
       const ms = Date.now() - startMs
       setElapsedMs(ms)
@@ -1782,6 +1783,8 @@ function DailyBriefPanel() {
               <span className="text-[10px] text-[#10b981] font-mono tabular-nums">{Math.round(progress)}%</span>
             </div>
           </div>
+          {/* 금융 용어 캐러셀 */}
+          <FinancialTips />
         </div>
       )}
 

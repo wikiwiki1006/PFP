@@ -6,11 +6,13 @@ routers/macro.py
 from __future__ import annotations
 
 import json
+import re
+from datetime import datetime
 from pathlib import Path
 
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -24,6 +26,7 @@ from backend.services.ai_analysis import (
     ANALYSIS_MODES,
     MODEL_OPTIONS,
 )
+from backend.db.reports_repo import save_report, list_reports, get_report_content
 from backend.services.market_data import (
     get_close_df,
     get_sector_changes,
@@ -58,7 +61,10 @@ def _load_trade_log() -> list:
 # ── 거시경제 분석 ─────────────────────────────────────────────────────────────
 
 @router.post("/analyze")
-def analyze_macro(req: MacroAnalysisRequest):
+def analyze_macro(
+    req: MacroAnalysisRequest,
+    x_user_id: Optional[str] = Header(default=None),
+):
     """
     9-에이전트 거시경제 이벤트 분석.
 
@@ -77,7 +83,7 @@ def analyze_macro(req: MacroAnalysisRequest):
         mode=req.mode,
     )
 
-    # Final Verdict (id=9) JSON 파싱
+    # Final Verdict (id=9) 파싱 (현재는 텍스트 → verdict_cards=None)
     verdict_cards = None
     portfolio_actions = None
     for ag in agent_results:
@@ -86,12 +92,57 @@ def analyze_macro(req: MacroAnalysisRequest):
         if ag["id"] == 8:
             portfolio_actions = parse_portfolio_actions(ag["text"])
 
-    return {
+    result = {
         "event":              req.event,
         "agents":             agent_results,
         "verdict_cards":      verdict_cards,
         "portfolio_actions":  portfolio_actions,
     }
+
+    # 분석 결과 DB 자동 저장
+    uid = (x_user_id or "default").strip() or "default"
+    date_str   = datetime.now().strftime("%Y%m%d_%H%M")
+    event_slug = re.sub(r"[^\w가-힣]", "_", req.event[:30]).strip("_")
+    filename   = f"macro_{date_str}_{event_slug}.json"
+    save_report(
+        filename,
+        json.dumps(result, ensure_ascii=False),
+        report_type="macro_scenario",
+        metadata={"event": req.event[:200], "mode": req.mode, "model": req.model},
+        user_id=uid,
+    )
+
+    return result
+
+
+@router.get("/reports")
+def list_macro_reports(x_user_id: Optional[str] = Header(default=None)):
+    """저장된 시나리오 레포트 목록 반환."""
+    uid = (x_user_id or "default").strip() or "default"
+    rows = list_reports(uid, report_type="macro_scenario", limit=30)
+    return [
+        {
+            "name":       r["name"],
+            "event":      r["metadata"].get("event", ""),
+            "mode":       r["metadata"].get("mode", ""),
+            "created_at": r["created_at"],
+        }
+        for r in rows
+    ]
+
+
+@router.get("/reports/{filename}")
+def get_macro_report(filename: str):
+    """특정 시나리오 레포트 내용 반환."""
+    if not filename.startswith("macro_"):
+        raise HTTPException(status_code=400, detail="잘못된 파일명")
+    content = get_report_content(filename)
+    if content is None:
+        raise HTTPException(status_code=404, detail="레포트를 찾을 수 없습니다.")
+    try:
+        return json.loads(content)
+    except Exception:
+        raise HTTPException(status_code=500, detail="레포트 파싱 실패")
 
 
 @router.get("/modes")

@@ -1,92 +1,552 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
-import { Globe, Play, ChevronDown, ChevronRight } from 'lucide-react'
-import LoadingSpinner, { ErrorMessage } from '@/components/LoadingSpinner'
-import { getMacroModes, runMacroAnalysis } from '@/api'
-import type { MacroAnalysisResult, MacroAgent, VerdictCard } from '@/types'
+import { Globe, Play, ChevronDown, ChevronRight, Download, History, X } from 'lucide-react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import { ErrorMessage } from '@/components/LoadingSpinner'
+import { FinancialTips } from '@/components/FinancialTips'
+import { getMacroModes, runMacroAnalysis, getHoldings, getMacroReportHistory, getMacroReportFile } from '@/api'
+import type { MacroAnalysisResult, MacroAgent } from '@/types'
 import { cn } from '@/lib/utils'
 
-// 백엔드의 color 값("danger","warning","success","info")을 CSS 색상으로 변환
-function verdictColor(card: VerdictCard): string {
-  const c = (card.color ?? '').toLowerCase()
-  if (c === 'danger')  return '#ef4444'
-  if (c === 'warning') return '#f59e0b'
-  if (c === 'success') return '#10b981'
-  if (c === 'info')    return '#3b82f6'
-  // 구버전 rating 필드 fallback
-  const r = (card.rating ?? '').toLowerCase()
-  if (r.includes('bull') || r.includes('positive') || r.includes('buy')) return '#10b981'
-  if (r.includes('bear') || r.includes('negative') || r.includes('sell')) return '#ef4444'
-  if (r.includes('neutral') || r.includes('hold')) return '#f59e0b'
-  return '#64748b'
+// ── sessionStorage 키 ──────────────────────────────────────────────────────────
+const SK_PENDING = 'macro_pending'
+const SK_START   = 'macro_start'
+const SK_RESULT  = 'macro_result'
+const SK_EVENT   = 'macro_event'
+const SK_MODEL   = 'macro_model'
+const SK_MODE    = 'macro_mode'
+
+// 모드별 예상 소요 시간 (ms)
+const MODE_MAX_MS: Record<string, number> = {
+  fast: 30_000, standard: 65_000, full: 130_000,
+}
+
+// 경과 시간별 진행 단계 메시지
+function stageLabel(elapsedMs: number, mode: string): string {
+  if (mode === 'fast') {
+    return elapsedMs < 8_000  ? '이벤트 데이터 수집 중...'
+         : elapsedMs < 20_000 ? '에이전트 분석 중...'
+         : '최종 판정 생성 중...'
+  }
+  return elapsedMs < 10_000 ? '이벤트·시장 데이터 수집 중...'
+       : elapsedMs < 40_000 ? '에이전트 병렬 분석 중...'
+       : '결과 종합 및 최종 판정 생성 중...'
+}
+
+// ── 상수 ──────────────────────────────────────────────────────────────────────
+const MODE_LABELS: Record<string, string> = {
+  fast: '빠름', standard: '표준', full: '전체',
+}
+
+const MODE_DESCRIPTIONS: Record<string, string> = {
+  fast:     '이벤트분석·시장반응·최종판정 3개 에이전트',
+  standard: '5개 에이전트 · 포트폴리오 액션 포함',
+  full:     '9개 에이전트 · 전체 심층 분석',
 }
 
 const PRESETS = [
-  { label: 'Fed Shock', icon: '🏦', event: 'Federal Reserve raises interest rates by 75bp, signals further hikes ahead amid persistent inflation. 10Y Treasury yield surges past 5%, mortgage rates hit 8%.' },
-  { label: 'Taiwan Blockade', icon: '🚢', event: "China imposes naval blockade on Taiwan Strait, halting 40% of global container shipping. TSMC semiconductor supply disrupted, tech supply chains at risk." },
-  { label: 'Bank Crisis', icon: '🏧', event: '3 major US regional banks collapse amid commercial real estate losses. FDIC intervenes, interbank lending freezes, credit spreads spike 400bps.' },
-  { label: 'OPEC+ Cut', icon: '🛢️', event: 'OPEC+ announces surprise 2M barrels/day production cut. WTI crude surges to $120/barrel. Energy inflation reignites, stagflation fears return.' },
-  { label: 'Trade War 2.0', icon: '⚔️', event: 'US imposes 60% blanket tariffs on all Chinese imports. China retaliates with rare earth export ban. Global trade volumes expected to fall 15%.' },
-  { label: 'AI Bubble Burst', icon: '💥', event: 'Major AI company reports hyperscaler capex cuts; NVIDIA warns of demand slowdown. AI-related stocks drop 40% in one week. Margin calls sweep hedge funds.' },
-  { label: 'Debt Ceiling Crisis', icon: '💰', event: 'US Congress fails to raise debt ceiling, technical default on T-bills triggers global dollar selloff. DXY falls 12%, gold surges to $3,000/oz.' },
-  { label: 'Soft Landing', icon: '🛬', event: 'Fed pivots to 50bp rate cuts as CPI hits 2.1%, unemployment stays at 4.2%. GDP growth accelerates to 2.8%. Risk-on rally across all asset classes.' },
+  { label: 'Fed 긴축 충격',   icon: '🏦', event: '미국 연방준비제도(Fed)가 기준금리를 75bp 인상하고 지속적인 인플레이션에 대응해 추가 인상을 시사했습니다. 미국 10년물 국채 금리가 5%를 돌파하고 모기지 금리는 8%에 달했습니다.' },
+  { label: '대만 해협 봉쇄',  icon: '🚢', event: '중국이 대만 해협에 해군 봉쇄를 단행해 전 세계 컨테이너 물동량의 40%가 차단됐습니다. TSMC 반도체 공급망이 위협받고 글로벌 기술 산업 전반에 걸쳐 공급망 리스크가 급부상했습니다.' },
+  { label: '은행 위기',       icon: '🏧', event: '상업용 부동산 손실로 인해 미국 주요 지역 은행 3곳이 연쇄 붕괴했습니다. FDIC가 긴급 개입하고 은행 간 대출이 사실상 중단되었으며 신용 스프레드가 400bp 급등했습니다.' },
+  { label: 'OPEC+ 감산',     icon: '🛢️', event: 'OPEC+가 기습적으로 하루 200만 배럴 감산을 발표했습니다. WTI 원유가 배럴당 120달러로 급등하고 에너지 인플레이션이 재점화되면서 스태그플레이션 우려가 다시 고개를 들었습니다.' },
+  { label: '무역 전쟁 2.0',  icon: '⚔️', event: '미국이 중국산 전 품목에 60% 일괄 관세를 부과하자 중국이 희토류 수출 금지로 보복했습니다. 글로벌 교역량이 15% 급감할 것으로 예상됩니다.' },
+  { label: 'AI 버블 붕괴',   icon: '💥', event: '주요 AI 기업이 하이퍼스케일러 설비투자(CAPEX) 축소를 발표하고 엔비디아가 수요 둔화를 경고했습니다. AI 관련 주가가 일주일 만에 40% 폭락하고 헤지펀드의 마진콜이 연쇄적으로 터졌습니다.' },
+  { label: '부채 한도 위기', icon: '💰', event: '미국 의회가 부채 한도 상향에 실패해 단기 국채(T-bill)에 대한 기술적 채무불이행이 발생했습니다. 글로벌 달러 매도세가 확산되어 달러인덱스(DXY)가 12% 급락하고 금값이 온스당 3,000달러까지 폭등했습니다.' },
+  { label: '연착륙',         icon: '🛬', event: '연준이 CPI가 2.1%까지 내려오고 실업률이 4.2%를 유지하는 가운데 기준금리를 50bp 인하하는 피벗을 단행했습니다. GDP 성장률이 2.8%로 가속화되면서 모든 자산군에 걸쳐 위험선호(Risk-on) 랠리가 펼쳐졌습니다.' },
 ]
 
-function AgentCard({ agent, index }: { agent: MacroAgent; index: number }) {
+// Agent 8 은 JSON 원문 대신 ActionTable 표로 렌더링
+const ACTION_AGENT_ID = 8
+
+// ── 진행 바 ──────────────────────────────────────────────────────────────────
+
+function ProgressBar({ progress, elapsedMs, mode }: { progress: number; elapsedMs: number; mode: string }) {
+  const elapsed = elapsedMs < 1000
+    ? `${elapsedMs}ms`
+    : `${(elapsedMs / 1000).toFixed(0)}초`
+
+  return (
+    <div className="bg-[#060b14] border border-[#1e2d40] rounded-lg px-4 py-3 space-y-2">
+      <div className="flex items-center justify-between text-[11px]">
+        <span className="text-[#10b981] font-mono flex items-center gap-1.5">
+          <span className="w-1.5 h-1.5 rounded-full bg-[#10b981] animate-pulse inline-block" />
+          {stageLabel(elapsedMs, mode)}
+        </span>
+        <span className="text-[#475569] font-mono">{elapsed} 경과</span>
+      </div>
+      <div className="w-full bg-[#0f172a] rounded-full h-2 overflow-hidden">
+        <div
+          className="h-full rounded-full transition-all duration-500"
+          style={{
+            width: `${progress}%`,
+            background: 'linear-gradient(90deg, #7c3aed, #3b82f6)',
+          }}
+        />
+      </div>
+      <div className="text-right text-[10px] text-[#475569] font-mono">{Math.round(progress)}%</div>
+    </div>
+  )
+}
+
+// ── AgentCard ─────────────────────────────────────────────────────────────────
+
+function AgentCard({
+  agent, index, portfolioActions,
+}: {
+  agent: MacroAgent
+  index: number
+  portfolioActions?: Array<Record<string, unknown>>
+}) {
   const [expanded, setExpanded] = useState(false)
+  const isActionAgent = Number(agent.id) === ACTION_AGENT_ID
+
   return (
     <div className="border border-[#1e2d40] rounded overflow-hidden">
-      <button onClick={() => setExpanded(e => !e)} className="w-full flex items-center justify-between px-3 py-2.5 hover:bg-[#0a1628] transition-colors">
-        <div className="flex items-center gap-2">
-          <div className="w-5 h-5 rounded-full bg-[#9b59b6]/20 border border-[#9b59b6]/30 flex items-center justify-center text-[10px] font-mono text-[#9b59b6]">{index + 1}</div>
-          <span className="text-xs font-medium text-[#e2e8f0]">{agent.name}</span>
+      <button
+        onClick={() => setExpanded(e => !e)}
+        className="w-full flex items-center justify-between px-4 py-3 hover:bg-[#0a1628] transition-colors"
+      >
+        <div className="flex items-center gap-2.5">
+          <div className="w-5 h-5 rounded-full bg-[#9b59b6]/20 border border-[#9b59b6]/30 flex items-center justify-center text-[10px] font-mono text-[#9b59b6]">
+            {index + 1}
+          </div>
+          <span className="text-sm font-semibold text-[#f1f5f9]">{agent.name}</span>
         </div>
         <div className="flex items-center gap-2">
-          {agent.elapsed != null && <span className="text-[10px] text-[#374151] font-mono">{agent.elapsed.toFixed(1)}s</span>}
-          {expanded ? <ChevronDown className="w-3 h-3 text-[#4a5568]" /> : <ChevronRight className="w-3 h-3 text-[#4a5568]" />}
+          {agent.elapsed != null && (
+            <span className="text-[11px] text-[#475569] font-mono">{agent.elapsed.toFixed(1)}s</span>
+          )}
+          {expanded
+            ? <ChevronDown className="w-4 h-4 text-[#64748b]" />
+            : <ChevronRight className="w-4 h-4 text-[#64748b]" />
+          }
         </div>
       </button>
+
       {expanded && (
-        <div className="px-3 pb-3 border-t border-[#1e2d40]">
-          <p className="text-xs text-[#94a3b8] leading-relaxed whitespace-pre-wrap mt-2">{agent.text}</p>
+        <div className="px-4 pb-5 border-t border-[#1e2d40] pt-3">
+          {isActionAgent && portfolioActions && portfolioActions.length > 0 ? (
+            <ActionTable actions={portfolioActions} />
+          ) : (
+            <div className="macro-md">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{agent.text}</ReactMarkdown>
+            </div>
+          )}
         </div>
       )}
     </div>
   )
 }
 
+// ── 포트폴리오 액션 테이블 ────────────────────────────────────────────────────
+
+const URGENCY_COLOR: Record<string, string> = {
+  '즉시': '#ef4444', '1개월 내': '#f59e0b', '3개월 내': '#10b981',
+}
+
+function ActionTable({ actions }: { actions: Array<Record<string, unknown>> }) {
+  if (!actions.length) return null
+  return (
+    <div className="bg-[#060b14] border border-[#1e2d40] rounded-lg overflow-hidden">
+      <div className="px-4 py-2.5 border-b border-[#1e2d40]">
+        <span className="text-[11px] text-[#64748b] font-bold tracking-wider">포트폴리오 액션 플랜</span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-[#1e2d40]">
+              {['티커', '액션', '시급도', '추천 이유'].map(h => (
+                <th key={h} className="py-2.5 px-4 text-left text-[11px] font-bold text-[#64748b] tracking-wider">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {actions.map((a, i) => {
+              const act    = String(a.action ?? '').toUpperCase()
+              const isBuy  = /BUY|INCREASE|ADD|매수/.test(act)
+              const isSell = /SELL|REDUCE|매도/.test(act)
+              const urgency = String(a.urgency ?? '—')
+              const urgColor = URGENCY_COLOR[urgency] ?? '#94a3b8'
+              return (
+                <tr key={i} className="border-b border-[#0f172a] hover:bg-[#0a1628]">
+                  <td className="py-3 px-4 font-mono font-bold text-[#f1f5f9]">{String(a.ticker ?? '—')}</td>
+                  <td className="py-3 px-4">
+                    <span className={cn(
+                      'text-xs px-2.5 py-1 rounded-full font-bold',
+                      isBuy  ? 'bg-[#10b981]/20 text-[#10b981]'
+                      : isSell ? 'bg-[#ef4444]/20 text-[#ef4444]'
+                      : 'bg-[#64748b]/20 text-[#94a3b8]'
+                    )}>
+                      {String(a.action ?? '—')}
+                    </span>
+                  </td>
+                  <td className="py-3 px-4 text-xs font-semibold" style={{ color: urgColor }}>{urgency}</td>
+                  <td className="py-3 px-4 text-sm text-[#cbd5e1] leading-relaxed">{String(a.reason ?? '—')}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+// ── PDF 빌더 ─────────────────────────────────────────────────────────────────
+
+function mdToHtml(raw: string): string {
+  if (!raw) return ''
+  let s = raw
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  // Tables
+  s = s.replace(/(\|[^\n]+\|\r?\n\|[-:| ]+\|\r?\n(?:\|[^\n]+\|\r?\n)*)/g, (block) => {
+    const lines = block.trim().split(/\r?\n/)
+    if (lines.length < 3) return block
+    const heads = lines[0].split('|').filter(c => c.trim()).map(h => `<th>${h.trim()}</th>`).join('')
+    const rows = lines.slice(2).map(row =>
+      `<tr>${row.split('|').filter(c => c.trim()).map(c => `<td>${c.trim()}</td>`).join('')}</tr>`
+    ).join('')
+    return `<table><thead><tr>${heads}</tr></thead><tbody>${rows}</tbody></table>`
+  })
+  s = s.replace(/^## (.+)$/gm, '<h2>$1</h2>')
+  s = s.replace(/^### (.+)$/gm, '<h3>$1</h3>')
+  s = s.replace(/^# (.+)$/gm, '<h1>$1</h1>')
+  s = s.replace(/^---+$/gm, '<hr>')
+  s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+  s = s.replace(/^[-*] (.+)$/gm, '<li>$1</li>')
+  s = s.replace(/^\d+\. (.+)$/gm, '<li>$1</li>')
+  s = s.replace(/((?:<li>[^\n]*\n?)+)/g, '<ul>$1</ul>')
+  s = s.replace(/\n{2,}/g, '</p><p class="p">')
+  return `<p class="p">${s}</p>`
+}
+
+function buildPdfHtml(result: MacroAnalysisResult, dateStr: string): string {
+  function actionTableHtml(actions: Array<Record<string, unknown>>): string {
+    if (!actions?.length) return ''
+    const rows = actions.map(a => {
+      const act = String(a.action ?? '').toUpperCase()
+      const isBuy  = /BUY|INCREASE|ADD|매수/.test(act)
+      const isSell = /SELL|REDUCE|매도/.test(act)
+      const color = isBuy ? '#16a34a' : isSell ? '#dc2626' : '#4b5563'
+      const urg = String(a.urgency ?? '—')
+      const urgColor = urg === '즉시' ? '#dc2626' : urg === '1개월 내' ? '#d97706' : '#16a34a'
+      return `<tr>
+        <td style="font-family:monospace;font-weight:700">${String(a.ticker ?? '—')}</td>
+        <td><span style="color:${color};font-weight:700;border:1px solid ${color};padding:2px 8px;border-radius:4px;font-size:11px">${String(a.action ?? '—')}</span></td>
+        <td style="color:${urgColor};font-weight:600">${urg}</td>
+        <td>${String(a.reason ?? '—')}</td>
+      </tr>`
+    }).join('')
+    return `<h3>포트폴리오 액션 플랜</h3>
+      <table><thead><tr><th>티커</th><th>액션</th><th>시급도</th><th>추천 이유</th></tr></thead>
+      <tbody>${rows}</tbody></table>`
+  }
+
+  const agentSections = result.agents?.map((agent, i) => {
+    const isAction = Number(agent.id) === 8
+    const body = isAction && result.portfolio_actions?.length
+      ? actionTableHtml(result.portfolio_actions)
+      : mdToHtml(agent.text ?? '')
+    return `<div class="agent-card">
+      <div class="agent-header">
+        <span class="agent-badge">${i + 1}</span>
+        <span class="agent-name">${agent.name}</span>
+        ${agent.elapsed != null ? `<span class="agent-elapsed">${agent.elapsed.toFixed(1)}s</span>` : ''}
+      </div>
+      <div class="agent-body">${body}</div>
+    </div>`
+  }).join('') ?? ''
+
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:-apple-system,'Segoe UI',sans-serif;font-size:13px;color:#1f2937;background:#fff;line-height:1.7}
+    .hdr{background:linear-gradient(135deg,#1e1b4b,#312e81);padding:24px 40px 20px;color:#fff}
+    .hdr .brand{font-size:9px;letter-spacing:4px;color:#c4b5fd;font-weight:700;margin-bottom:6px}
+    .hdr .title{font-size:20px;font-weight:900;line-height:1.3}
+    .hdr .ev{font-size:11px;color:#a5b4fc;margin-top:6px;line-height:1.5}
+    .body{padding:24px 40px}
+    .ev-box{background:#f9fafb;border:1px solid #e5e7eb;border-left:4px solid #7c3aed;padding:12px 16px;margin-bottom:20px;border-radius:4px}
+    .ev-box .lbl{font-size:10px;font-weight:700;color:#6b7280;letter-spacing:.1em;margin-bottom:4px}
+    .ev-box .txt{color:#374151;font-size:13px;line-height:1.6}
+    .sec-title{font-size:10px;font-weight:700;color:#6b7280;letter-spacing:.1em;margin-bottom:12px}
+    .agent-card{border:1px solid #e5e7eb;border-radius:8px;margin-bottom:14px;overflow:hidden;page-break-inside:avoid}
+    .agent-header{display:flex;align-items:center;gap:10px;padding:9px 16px;background:#f3f4f6;border-bottom:1px solid #e5e7eb}
+    .agent-badge{width:22px;height:22px;border-radius:50%;background:#7c3aed;color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+    .agent-name{font-weight:700;font-size:13px;color:#1f2937;flex:1}
+    .agent-elapsed{font-size:11px;color:#9ca3af;font-family:monospace}
+    .agent-body{padding:14px 18px;color:#374151}
+    h1{font-size:15px;font-weight:700;color:#1e1b4b;margin:14px 0 5px;border-bottom:1px solid #e5e7eb;padding-bottom:3px}
+    h2{font-size:14px;font-weight:700;color:#1e40af;margin:12px 0 5px;border-bottom:1px solid #f3f4f6;padding-bottom:2px}
+    h3{font-size:13px;font-weight:700;color:#374151;margin:10px 0 4px}
+    p.p{margin:5px 0;color:#374151}
+    strong{color:#111827;font-weight:700}
+    ul{padding-left:18px;margin:5px 0}
+    li{margin:2px 0;color:#4b5563}
+    hr{border:none;border-top:1px solid #e5e7eb;margin:10px 0}
+    table{width:100%;border-collapse:collapse;font-size:12px;margin:10px 0}
+    th{background:#f3f4f6;color:#374151;border:1px solid #e5e7eb;padding:7px 10px;font-weight:600;text-align:left}
+    td{color:#4b5563;border:1px solid #e5e7eb;padding:6px 10px}
+    tr:nth-child(even) td{background:#f9fafb}
+    .footer{margin-top:20px;padding-top:10px;border-top:1px solid #e5e7eb;font-size:10px;color:#9ca3af;text-align:center}
+  </style></head><body>
+  <div class="hdr">
+    <div class="brand">PERSONAL FINANCIAL PLATFORM</div>
+    <div class="title">매크로 시나리오 분석 · ${dateStr}</div>
+    <div class="ev">${(result.event ?? '').replace(/</g, '&lt;').replace(/>/g, '&gt;').slice(0, 200)}</div>
+  </div>
+  <div class="body">
+    <div class="ev-box">
+      <div class="lbl">분석 이벤트</div>
+      <div class="txt">${(result.event ?? '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
+    </div>
+    <div class="sec-title">에이전트 분석 (${result.agents?.length ?? 0}개)</div>
+    ${agentSections}
+    <div class="footer">본 레포트는 AI 자동 생성 참고용으로, 투자 조언이 아닙니다.</div>
+  </div>
+  </body></html>`
+}
+
+// ── 메인 페이지 ───────────────────────────────────────────────────────────────
+
 export default function MacroScenario() {
-  const [event, setEvent] = useState('')
-  const [model, setModel] = useState('haiku')
-  const [mode, setMode] = useState('standard')
-  const [result, setResult] = useState<MacroAnalysisResult | null>(null)
+  // sessionStorage 에서 이전 상태 복원
+  const [event, setEvent] = useState(() => sessionStorage.getItem(SK_EVENT) || '')
+  const model = 'sonnet'
+  const [mode,  setMode]  = useState(() => sessionStorage.getItem(SK_MODE)  || 'standard')
 
-  const modesQ = useQuery({ queryKey: ['macro-modes'], queryFn: getMacroModes })
-  const analyzeMut = useMutation({ mutationFn: () => runMacroAnalysis({ event, model, mode }), onSuccess: setResult })
+  const [result, setResult] = useState<MacroAnalysisResult | null>(() => {
+    try {
+      const s = sessionStorage.getItem(SK_RESULT)
+      return s ? JSON.parse(s) : null
+    } catch { return null }
+  })
+  const [wasPending] = useState(() => sessionStorage.getItem(SK_PENDING) === '1')
 
-  const models = modesQ.data?.models ?? ['sonnet', 'haiku']
-  const modes = Object.keys(modesQ.data?.modes ?? { fast: [], standard: [], full: [] })
+  // 진행 바 상태
+  const [progress,  setProgress]  = useState(0)
+  const [elapsedMs, setElapsedMs] = useState(0)
+
+  // PDF / 히스토리 상태
+  const [pdfBusy,    setPdfBusy]    = useState(false)
+  const [showHist,   setShowHist]   = useState(false)
+
+  const autoTriggered = useRef(false)
+
+  const modesQ    = useQuery({ queryKey: ['macro-modes'], queryFn: getMacroModes })
+  const holdingsQ = useQuery({ queryKey: ['holdings'],    queryFn: getHoldings, staleTime: 60_000 })
+  const histQ     = useQuery({
+    queryKey: ['macro-report-history'],
+    queryFn:  getMacroReportHistory,
+    staleTime: 60_000,
+    enabled:   showHist,
+  })
+
+  const loadHistMut = useMutation({
+    mutationFn: getMacroReportFile,
+    onSuccess: (data) => {
+      sessionStorage.setItem(SK_RESULT, JSON.stringify(data))
+      setResult(data)
+      setShowHist(false)
+    },
+  })
+
+  const analyzeMut = useMutation({
+    mutationFn: () => runMacroAnalysis({
+      event,
+      model,
+      mode,
+      portfolio: holdingsQ.data as Record<string, unknown> | undefined,
+    }),
+    onSuccess: (data) => {
+      sessionStorage.setItem(SK_RESULT, JSON.stringify(data))
+      sessionStorage.removeItem(SK_PENDING)
+      sessionStorage.removeItem(SK_START)
+      setResult(data)
+      setProgress(100)
+      histQ.refetch()
+    },
+    onError: () => {
+      sessionStorage.removeItem(SK_PENDING)
+      sessionStorage.removeItem(SK_START)
+      setProgress(0)
+    },
+  })
+
+  // 탭 이동 후 복귀 시 자동 재실행 (SK_START는 원래 시작 시각 유지)
+  useEffect(() => {
+    if (wasPending && !autoTriggered.current && event.trim()) {
+      autoTriggered.current = true
+      sessionStorage.setItem(SK_PENDING, '1')
+      analyzeMut.mutate()
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 진행 바 타이머
+  const isRunning = analyzeMut.isPending
+  useEffect(() => {
+    if (!isRunning) return
+    const startMs = parseInt(sessionStorage.getItem(SK_START) || String(Date.now()), 10)
+    const maxMs   = MODE_MAX_MS[mode] ?? 65_000
+    const tick = () => {
+      const ms = Date.now() - startMs
+      setElapsedMs(ms)
+      setProgress(Math.min(95, (ms / maxMs) * 100))
+    }
+    tick()
+    const id = setInterval(tick, 400)
+    return () => clearInterval(id)
+  }, [isRunning, mode])
+
+  // 분석 시작 핸들러
+  const startAnalysis = () => {
+    sessionStorage.setItem(SK_EVENT,   event)
+    sessionStorage.setItem(SK_MODEL,   model)
+    sessionStorage.setItem(SK_MODE,    mode)
+    sessionStorage.setItem(SK_PENDING, '1')
+    sessionStorage.setItem(SK_START,   String(Date.now()))
+    sessionStorage.removeItem(SK_RESULT)
+    setResult(null)
+    setProgress(0)
+    setElapsedMs(0)
+    analyzeMut.mutate()
+  }
+
+  // PDF 다운로드 — 결과 데이터로 라이트모드 HTML을 직접 빌드 후 캡처
+  const downloadPDF = async () => {
+    if (!result) return
+    setPdfBusy(true)
+    try {
+      const [jspdfMod, h2cMod] = await Promise.all([import('jspdf'), import('html2canvas')])
+      const JsPDF       = (jspdfMod as any).jsPDF ?? (jspdfMod as any).default
+      const html2canvas = (h2cMod as any).default ?? h2cMod
+
+      const dateStr = new Date().toLocaleDateString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric' })
+      const htmlContent = buildPdfHtml(result, dateStr)
+
+      const container = document.createElement('div')
+      container.style.cssText = 'position:fixed;top:0;left:-9999px;width:900px;background:#fff;z-index:-9999;pointer-events:none'
+      container.innerHTML = htmlContent
+      document.body.appendChild(container)
+
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))
+
+      const canvas = await html2canvas(container, {
+        scale: 2, backgroundColor: '#ffffff', useCORS: true, logging: false, windowWidth: 900,
+      })
+      document.body.removeChild(container)
+
+      const pdf     = new JsPDF('p', 'mm', 'a4')
+      const pageW   = pdf.internal.pageSize.getWidth()
+      const pageH   = pdf.internal.pageSize.getHeight()
+      const pxPerMm = canvas.width / pageW
+      const slicePx = pageH * pxPerMm
+
+      let srcY = 0, page = 0
+      while (srcY < canvas.height) {
+        const rowH  = Math.min(slicePx, canvas.height - srcY)
+        const slice = document.createElement('canvas')
+        slice.width  = canvas.width
+        slice.height = rowH
+        slice.getContext('2d')!.drawImage(canvas, 0, srcY, canvas.width, rowH, 0, 0, canvas.width, rowH)
+        if (page > 0) pdf.addPage()
+        pdf.addImage(slice.toDataURL('image/jpeg', 0.92), 'JPEG', 0, 0, pageW, rowH / pxPerMm)
+        srcY += rowH
+        page++
+      }
+      pdf.save(`macro_scenario_${new Date().toISOString().slice(0, 10)}.pdf`)
+    } catch (e) {
+      console.error('PDF 생성 실패:', e)
+    } finally {
+      setPdfBusy(false)
+    }
+  }
+
+  const modes  = Object.keys(modesQ.data?.modes ?? { fast: [], standard: [], full: [] })
 
   return (
     <div className="p-5 space-y-4 max-w-full">
-      {/* Header */}
-      <div className="flex items-center gap-2">
-        <Globe className="w-4 h-4 text-[#9b59b6]" />
-        <div>
-          <h1 className="text-base font-bold text-[#e2e8f0]">MACRO SCENARIO ANALYSIS</h1>
-          <p className="text-[11px] text-[#4a5568]">9-에이전트 병렬 멀티 파이프라인 · 이벤트 충격 → 포트폴리오 액션 플랜</p>
+
+      {/* 히스토리 모달 */}
+      {showHist && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setShowHist(false)}>
+          <div className="bg-[#0a1628] border border-[#1e2d40] rounded-xl w-full max-w-lg max-h-[70vh] flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 py-3 border-b border-[#1e2d40]">
+              <span className="text-sm font-bold text-[#e2e8f0]">저장된 레포트</span>
+              <button onClick={() => setShowHist(false)} className="text-[#64748b] hover:text-[#e2e8f0]">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="overflow-y-auto flex-1 divide-y divide-[#1e2d40]">
+              {histQ.isLoading && <p className="text-center text-[#64748b] py-8 text-sm">로딩 중...</p>}
+              {histQ.data?.length === 0 && <p className="text-center text-[#64748b] py-8 text-sm">저장된 레포트 없음</p>}
+              {histQ.data?.map(r => (
+                <button
+                  key={r.name}
+                  onClick={() => loadHistMut.mutate(r.name)}
+                  disabled={loadHistMut.isPending}
+                  className="w-full text-left px-4 py-3 hover:bg-[#0f172a] transition-colors"
+                >
+                  <div className="text-xs font-medium text-[#e2e8f0] truncate">{r.event || r.name}</div>
+                  <div className="text-[10px] text-[#475569] mt-0.5">
+                    {r.created_at ? new Date(r.created_at).toLocaleString('ko-KR') : ''} · {r.mode}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 헤더 */}
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Globe className="w-4 h-4 text-[#9b59b6]" />
+          <div>
+            <h1 className="text-base font-bold text-[#e2e8f0]">매크로 시나리오 분석</h1>
+            <p className="text-[11px] text-[#4a5568]">9-에이전트 병렬 분석 · 이벤트 충격 → 보유 포트폴리오 대응 플랜</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowHist(true)}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0] hover:border-[#9b59b6]/40 rounded transition-colors"
+          >
+            <History className="w-3.5 h-3.5" />
+            과거 레포트
+          </button>
+          {result && !analyzeMut.isPending && (
+            <button
+              onClick={downloadPDF}
+              disabled={pdfBusy}
+              className={cn(
+                'flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] rounded font-bold transition-colors',
+                pdfBusy
+                  ? 'border border-[#1e2d40] text-[#64748b] opacity-50 cursor-not-allowed'
+                  : 'border border-[#7c3aed]/50 bg-[#7c3aed]/10 text-[#c084fc] hover:bg-[#7c3aed]/20'
+              )}
+            >
+              {pdfBusy
+                ? <span className="w-3.5 h-3.5 border-2 border-[#7c3aed] border-t-transparent rounded-full animate-spin" />
+                : <Download className="w-3.5 h-3.5" />
+              }
+              PDF
+            </button>
+          )}
         </div>
       </div>
 
-      {/* Preset Scenarios */}
+      {/* 프리셋 시나리오 */}
       <div className="bg-[#060b14] border border-[#1e2d40] rounded-lg p-3">
-        <div className="text-[10px] text-[#4a5568] font-bold tracking-wider mb-2">PRESET SCENARIOS</div>
+        <div className="text-[10px] text-[#4a5568] font-bold tracking-wider mb-2">프리셋 시나리오</div>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
           {PRESETS.map(p => (
             <button key={p.label} onClick={() => setEvent(p.event)}
               className={cn(
                 'text-left p-2 rounded border transition-all text-xs',
-                event === p.event ? 'border-[#9b59b6]/50 bg-[#9b59b6]/10 text-[#c084fc]' : 'border-[#1e2d40] text-[#64748b] hover:border-[#1e2d40]/80 hover:text-[#94a3b8] hover:bg-[#0a1628]'
+                event === p.event
+                  ? 'border-[#9b59b6]/50 bg-[#9b59b6]/10 text-[#c084fc]'
+                  : 'border-[#1e2d40] text-[#64748b] hover:border-[#9b59b6]/30 hover:text-[#94a3b8] hover:bg-[#0a1628]'
               )}>
               <span className="mr-1">{p.icon}</span>
               <span className="font-medium">{p.label}</span>
@@ -95,140 +555,106 @@ export default function MacroScenario() {
         </div>
       </div>
 
-      {/* Event Input */}
+      {/* 이벤트 입력 */}
       <div className="bg-[#060b14] border border-[#1e2d40] rounded-lg p-3 space-y-3">
-        <textarea value={event} onChange={e => setEvent(e.target.value)} rows={3}
+        <textarea
+          value={event} onChange={e => setEvent(e.target.value)} rows={3}
           placeholder="매크로 이벤트를 직접 입력하거나 위 프리셋을 선택하세요..."
-          className="w-full bg-[#0b0f1a] border border-[#1e2d40] rounded px-3 py-2 text-xs text-[#e2e8f0] focus:outline-none focus:border-[#9b59b6] resize-none placeholder-[#374151]" />
-
+          className="w-full bg-[#0b0f1a] border border-[#1e2d40] rounded px-3 py-2 text-sm text-[#e2e8f0] focus:outline-none focus:border-[#9b59b6] resize-none placeholder-[#374151]"
+        />
         <div className="flex flex-wrap gap-4 items-end">
           <div>
-            <div className="text-[10px] text-[#4a5568] font-bold tracking-wider mb-1.5">MODEL</div>
-            <div className="flex gap-1.5">
-              {models.map(m => (
-                <button key={m} onClick={() => setModel(m)}
-                  className={cn('px-2.5 py-1 text-[10px] rounded capitalize font-medium transition-colors',
-                    model === m ? 'bg-[#9b59b6] text-white' : 'bg-[#0b0f1a] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0]'
-                  )}>{m}</button>
-              ))}
-            </div>
-          </div>
-          <div>
-            <div className="text-[10px] text-[#4a5568] font-bold tracking-wider mb-1.5">ANALYSIS MODE</div>
-            <div className="flex gap-1.5">
+            <div className="text-[10px] text-[#4a5568] font-bold tracking-wider mb-1.5">분석 모드</div>
+            <div className="flex gap-2">
               {modes.map(m => (
                 <button key={m} onClick={() => setMode(m)}
-                  className={cn('px-2.5 py-1 text-[10px] rounded capitalize font-medium transition-colors',
+                  className={cn(
+                    'px-3 py-1.5 text-left rounded font-medium transition-colors min-w-[90px]',
                     mode === m ? 'bg-[#3b82f6] text-white' : 'bg-[#0b0f1a] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0]'
-                  )}>{m}</button>
+                  )}>
+                  <div className="text-[11px] font-bold">{MODE_LABELS[m] ?? m}</div>
+                  <div className={cn('text-[9px] mt-0.5 leading-tight', mode === m ? 'text-blue-200' : 'text-[#475569]')}>
+                    {MODE_DESCRIPTIONS[m]}
+                  </div>
+                </button>
               ))}
             </div>
           </div>
-          <button onClick={() => analyzeMut.mutate()} disabled={analyzeMut.isPending || !event.trim()}
-            className="flex items-center gap-1.5 px-4 py-2 bg-[#9b59b6] hover:bg-[#7c3aed] disabled:opacity-50 text-white text-xs font-bold rounded transition-colors ml-auto">
-            <Play className="w-3 h-3" />
-            {analyzeMut.isPending ? 'ANALYZING...' : 'RUN ANALYSIS'}
+          <button
+            onClick={startAnalysis}
+            disabled={analyzeMut.isPending || !event.trim()}
+            className="flex items-center gap-1.5 px-4 py-2 bg-[#9b59b6] hover:bg-[#7c3aed] disabled:opacity-50 text-white text-sm font-bold rounded transition-colors ml-auto"
+          >
+            <Play className="w-3.5 h-3.5" />
+            {analyzeMut.isPending ? '분석 중...' : '분석 실행'}
           </button>
         </div>
-        {analyzeMut.isError && <ErrorMessage message="분석 실패. 다시 시도해주세요." retry={() => analyzeMut.mutate()} />}
+        {analyzeMut.isError && <ErrorMessage message="분석 실패. 다시 시도해주세요." retry={startAnalysis} />}
       </div>
 
-      {/* Loading */}
+      {/* 진행 바 + 금융 용어 캐러셀 (분석 중일 때만) */}
       {analyzeMut.isPending && (
-        <div className="bg-[#060b14] border border-[#1e2d40] rounded-lg p-6 flex flex-col items-center gap-3">
-          <div className="relative">
-            <div className="w-12 h-12 rounded-full border-2 border-[#9b59b6]/20 border-t-[#9b59b6] animate-spin" />
-            <Globe className="absolute inset-0 m-auto w-4 h-4 text-[#9b59b6]" />
-          </div>
-          <p className="text-xs text-[#64748b]">9-에이전트 병렬 분석 중... ({mode} mode, {model} model)</p>
+        <div className="space-y-2">
+          <ProgressBar progress={progress} elapsedMs={elapsedMs} mode={mode} />
+          <FinancialTips />
         </div>
       )}
 
-      {/* Results */}
+      {/* 결과 */}
       {result && !analyzeMut.isPending && (
-        <div className="space-y-3">
-          {/* Event Summary */}
+        <div className="space-y-4">
+
           <div className="bg-[#060b14] border border-[#1e2d40] rounded-lg p-3">
-            <div className="text-[10px] text-[#4a5568] font-bold tracking-wider mb-1">ANALYZED EVENT</div>
-            <p className="text-xs text-[#94a3b8] leading-relaxed">{result.event}</p>
+            <div className="text-[10px] text-[#4a5568] font-bold tracking-wider mb-1.5">분석 이벤트</div>
+            <p className="text-sm text-[#cbd5e1] leading-relaxed">{result.event}</p>
           </div>
 
-          {/* Verdict Cards Grid */}
-          {result.verdict_cards && result.verdict_cards.length > 0 && (
-            <div>
-              <div className="text-[10px] text-[#4a5568] font-bold tracking-wider mb-2">VERDICT CARDS</div>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                {result.verdict_cards.map((card, i) => {
-                  const color = verdictColor(card)
-                  const label = card.title ?? card.category ?? '—'
-                  const sub   = card.headline ?? card.rating ?? ''
-                  const body  = card.summary ?? card.rationale ?? ''
-                  const detail = card.details ?? ''
-                  return (
-                    <div key={i} className="bg-[#060b14] border rounded-lg p-3 flex flex-col gap-1.5" style={{ borderColor: `${color}30` }}>
-                      <div className="flex items-center gap-1.5">
-                        {card.icon && <span className="text-base leading-none">{card.icon}</span>}
-                        <span className="text-xs font-bold text-[#e2e8f0] leading-tight">{label}</span>
-                      </div>
-                      {sub && (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold self-start" style={{ backgroundColor: `${color}20`, color }}>
-                          {sub}
-                        </span>
-                      )}
-                      {body && <p className="text-[10px] text-[#94a3b8] leading-relaxed">{body}</p>}
-                      {detail && <p className="text-[9px] text-[#64748b] leading-relaxed border-t border-[#1e2d40] pt-1.5 mt-0.5">{detail}</p>}
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-          )}
-
-          {/* Agent Results */}
           {result.agents && result.agents.length > 0 && (
             <div>
-              <div className="text-[10px] text-[#4a5568] font-bold tracking-wider mb-2">AGENT ANALYSES ({result.agents.length})</div>
-              <div className="space-y-1">
-                {result.agents.map((agent, i) => <AgentCard key={agent.id ?? i} agent={agent} index={i} />)}
+              <div className="text-[10px] text-[#4a5568] font-bold tracking-wider mb-2">
+                에이전트 분석 ({result.agents.length}개)
               </div>
-            </div>
-          )}
-
-          {/* Portfolio Actions */}
-          {result.portfolio_actions && result.portfolio_actions.length > 0 && (
-            <div className="bg-[#060b14] border border-[#1e2d40] rounded-lg overflow-hidden">
-              <div className="px-3 py-2 border-b border-[#1e2d40]">
-                <div className="text-[10px] text-[#4a5568] font-bold tracking-wider">PORTFOLIO ACTION PLAN</div>
+              <div className="space-y-1.5">
+                {result.agents.map((agent, i) => (
+                  <AgentCard
+                    key={agent.id ?? i}
+                    agent={agent}
+                    index={i}
+                    portfolioActions={result.portfolio_actions}
+                  />
+                ))}
               </div>
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="border-b border-[#1e2d40]">
-                    {['ACTION', 'TICKER', 'REASON'].map(h => <th key={h} className="py-2 px-3 text-left text-[10px] font-bold text-[#4a5568] tracking-wider">{h}</th>)}
-                  </tr>
-                </thead>
-                <tbody>
-                  {result.portfolio_actions.map((a, i) => {
-                    const act = String(a.action).toUpperCase()
-                    const isBuy = act.includes('BUY') || act.includes('INCREASE')
-                    const isSell = act.includes('SELL') || act.includes('REDUCE')
-                    return (
-                      <tr key={i} className="border-b border-[#0f172a] hover:bg-[#0a1628]">
-                        <td className="py-2 px-3">
-                          <span className={cn('text-[10px] px-2 py-0.5 rounded font-bold',
-                            isBuy ? 'bg-[#10b981]/20 text-[#10b981]' : isSell ? 'bg-[#ef4444]/20 text-[#ef4444]' : 'bg-[#64748b]/20 text-[#64748b]'
-                          )}>{String(a.action)}</span>
-                        </td>
-                        <td className="py-2 px-3 font-mono font-bold text-[#e2e8f0]">{String(a.ticker ?? '—')}</td>
-                        <td className="py-2 px-3 text-[#64748b]">{String(a.reason ?? '—')}</td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
             </div>
           )}
         </div>
       )}
+
+      <style>{`
+        .macro-md { color: #cbd5e1; font-size: 14px; line-height: 1.75; }
+        .macro-md h1, .macro-md h2 {
+          color: #f1f5f9; font-size: 15px; font-weight: 700;
+          margin: 14px 0 6px; border-bottom: 1px solid #1e2d40; padding-bottom: 4px;
+        }
+        .macro-md h3 { color: #e2e8f0; font-size: 14px; font-weight: 600; margin: 10px 0 4px; }
+        .macro-md strong, .macro-md b { color: #f1f5f9; font-weight: 700; }
+        .macro-md p { margin: 6px 0; }
+        .macro-md ul, .macro-md ol { padding-left: 20px; margin: 6px 0; }
+        .macro-md li { margin: 3px 0; color: #cbd5e1; }
+        .macro-md table {
+          width: 100%; border-collapse: collapse; font-size: 13px; margin: 10px 0;
+          display: block; overflow-x: auto;
+        }
+        .macro-md thead { background: #0a1628; }
+        .macro-md th {
+          color: #94a3b8; border-bottom: 1px solid #1e2d40; padding: 8px 10px;
+          text-align: left; font-weight: 700; white-space: nowrap;
+        }
+        .macro-md td { color: #e2e8f0; padding: 7px 10px; border-bottom: 1px solid #0f172a; font-size: 13px; }
+        .macro-md tr:hover td { background: #0a1628; }
+        .macro-md code { background: #0f172a; color: #10b981; padding: 2px 5px; border-radius: 3px; font-size: 12px; }
+        .macro-md blockquote { border-left: 3px solid #9b59b6; padding-left: 10px; color: #94a3b8; margin: 6px 0; }
+        .macro-md hr { border-color: #1e2d40; margin: 12px 0; }
+      `}</style>
     </div>
   )
 }

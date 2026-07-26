@@ -187,6 +187,32 @@ def _build_prompt(holdings: dict, price_data: dict, news: dict) -> str:
 """
 
 
+PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "")
+
+
+def _perplexity_search(query: str) -> str:
+    """Perplexity sonar로 실시간 웹 검색. API 키 없거나 오류 시 빈 문자열 반환."""
+    if not PERPLEXITY_API_KEY:
+        return ""
+    try:
+        import requests as _req
+        resp = _req.post(
+            "https://api.perplexity.ai/chat/completions",
+            headers={"Authorization": f"Bearer {PERPLEXITY_API_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": "sonar",
+                "messages": [{"role": "user", "content": query}],
+                "max_tokens": 1500,
+                "temperature": 0.0,
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
+    except Exception:
+        return ""
+
+
 def generate_daily_report(
     holdings: dict,
     log: Callable[[str], None] | None = None,
@@ -196,7 +222,6 @@ def generate_daily_report(
     Returns: (markdown_report, price_data_dict)
     """
     anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
-    gemini_key    = os.getenv("GEMINI_API_KEY", "")
     _log = log or (lambda m: print(f"  {m}"))
 
     _log("1/3 가격 데이터 수집 중...")
@@ -208,13 +233,10 @@ def generate_daily_report(
     news = _collect_news(price_data)
 
     _log("3/3  AI 브리프 생성 중 (약 30~60초)...")
-    if anthropic_key:
-        report = _generate_with_claude(holdings, price_data, news, anthropic_key, _log)
-    elif gemini_key:
-        report = _generate_with_gemini(holdings, price_data, news, gemini_key, _log)
-    else:
-        raise RuntimeError("ANTHROPIC_API_KEY 또는 GEMINI_API_KEY가 없습니다.")
+    if not anthropic_key:
+        raise RuntimeError("ANTHROPIC_API_KEY가 설정되지 않았습니다.")
 
+    report = _generate_with_claude(holdings, price_data, news, anthropic_key, _log)
     return report, price_data
 
 
@@ -225,19 +247,25 @@ def _generate_with_claude(holdings, price_data, news, api_key, log) -> str:
     big_movers = [t for t in price_data if not t.startswith("__") and abs(price_data[t]["chg_pct"]) >= 3.0]
     web_ctx = ""
     if big_movers:
-        log(f"웹서치: {', '.join(big_movers)} 최신 뉴스 수집 중...")
-        try:
-            sr = client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=3000,
-                tools=[{"type": "web_search_20250305", "name": "web_search"}],
-                messages=[{"role": "user", "content":
-                    f"다음 주식들의 {price_data.get('__date', '전일')} 주가 급등락 원인: "
-                    f"{', '.join(big_movers)}. 각 종목 핵심 뉴스 헤드라인과 원인 2~3줄 요약."}],
-            )
-            web_ctx = "\n".join(b.text for b in sr.content if hasattr(b, "text"))
-        except Exception as e:
-            log(f"웹서치 오류 (계속 진행): {e}")
+        log(f"Perplexity 웹서치: {', '.join(big_movers)} 최신 뉴스 수집 중...")
+        query = (
+            f"다음 주식들의 {price_data.get('__date', '전일')} 주가 급등락 원인: "
+            f"{', '.join(big_movers)}. 각 종목 핵심 뉴스 헤드라인과 원인 2~3줄 요약."
+        )
+        web_ctx = _perplexity_search(query)
+
+        if not web_ctx:
+            log("Perplexity 미설정 — Claude 웹서치로 대체 중...")
+            try:
+                sr = client.messages.create(
+                    model="claude-sonnet-4-6",
+                    max_tokens=3000,
+                    tools=[{"type": "web_search_20250305", "name": "web_search"}],
+                    messages=[{"role": "user", "content": query}],
+                )
+                web_ctx = "\n".join(b.text for b in sr.content if hasattr(b, "text"))
+            except Exception as e:
+                log(f"웹서치 오류 (계속 진행): {e}")
 
     base_prompt = _build_prompt(holdings, price_data, news)
     full_prompt = base_prompt + (f"\n\n=== 웹서치 추가 컨텍스트 ===\n{web_ctx}" if web_ctx else "")
@@ -253,17 +281,3 @@ def _generate_with_claude(holdings, price_data, news, api_key, log) -> str:
         messages=[{"role": "user", "content": full_prompt}],
     )
     return resp.content[0].text
-
-
-def _generate_with_gemini(holdings, price_data, news, api_key, log) -> str:
-    import requests
-    log("Gemini Flash로 브리프 생성 중...")
-    prompt = _build_prompt(holdings, price_data, news)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
-    body = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"maxOutputTokens": 3000, "temperature": 0.3},
-    }
-    resp = requests.post(url, json=body, timeout=120)
-    resp.raise_for_status()
-    return resp.json()["candidates"][0]["content"]["parts"][0]["text"]

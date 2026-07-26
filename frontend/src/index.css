@@ -9,12 +9,17 @@
     box-sizing: border-box;
   }
 
+  html {
+    /* 전체 글씨 크기 20% 증가 (rem 단위 기반 텍스트) */
+    font-size: 19.2px;
+  }
+
   html,
   body,
   #root {
     height: 100%;
     background-color: #0b0f1a;
-    color: #e2e8f0;
+    color: #f1f5f9;
     margin: 0;
     padding: 0;
     width: 100%;
@@ -97,3 +102,19 @@
   background: #1e2d40;
   border-radius: 4px;
 }
+
+/* ── 픽셀 고정 글씨 크기 20% 증가 ───────────────────────────────────────────── */
+.text-\[10px\]  { font-size: 12px !important; }
+.text-\[11px\]  { font-size: 13px !important; }
+.text-\[12px\]  { font-size: 14px !important; }
+.text-\[13px\]  { font-size: 16px !important; }
+.text-\[14px\]  { font-size: 17px !important; }
+
+/* ── 어두운 텍스트 색상 명도 향상 ────────────────────────────────────────────── */
+.text-\[#4a5568\]  { color: #94a3b8 !important; }
+.text-\[#475569\]  { color: #94a3b8 !important; }
+.text-\[#64748b\]  { color: #cbd5e1 !important; }
+.text-\[#94a3b8\]  { color: #e2e8f0 !important; }
+.text-\[#cbd5e1\]  { color: #f1f5f9 !important; }
+.text-\[#e2e8f0\]  { color: #ffffff  !important; }
+.text-\[#f1f5f9\]  { color: #ffffff  !important; }
