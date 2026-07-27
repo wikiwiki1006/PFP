@@ -2,15 +2,18 @@
 routers/macro.py
 ─────────────────
 9-에이전트 거시경제 분석 + 데일리 브리프 API
+분석은 백그라운드 스레드에서 실행되어 프론트엔드 새로고침에도 중단되지 않는다.
 """
 from __future__ import annotations
 
 import json
 import re
+import threading
+import time
+import uuid
 from datetime import datetime
 from pathlib import Path
-
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import StreamingResponse
@@ -38,12 +41,39 @@ from backend.services.portfolio_calculator import calculate_metrics, build_equit
 
 router = APIRouter(prefix="/api/macro", tags=["macro"])
 
+# ── 백그라운드 분석 잡 스토어 ─────────────────────────────────────────────────
+# { job_id: { "status": "pending"|"done"|"error", "result"?: dict, "message"?: str, "_ts": float } }
+_jobs: dict[str, dict[str, Any]] = {}
+_jobs_lock = threading.Lock()
+_MAX_JOBS = 50  # 오래된 잡 자동 정리
+
+
+def _job_set(job_id: str, data: dict) -> None:
+    with _jobs_lock:
+        _jobs[job_id] = {**data, "_ts": time.time()}
+        if len(_jobs) > _MAX_JOBS:
+            oldest = min(_jobs, key=lambda k: _jobs[k]["_ts"])
+            del _jobs[oldest]
+
+
+def _job_get(job_id: str) -> dict | None:
+    with _jobs_lock:
+        j = _jobs.get(job_id)
+        return {k: v for k, v in j.items() if k != "_ts"} if j else None
+
+
 _DATA_DIR = Path(__file__).parent.parent.parent / "pfp" / "data"
 _DB_FILE  = _DATA_DIR / "holdings.json"
 _LOG_FILE = _DATA_DIR / "trade_log.json"
 
 
 def _load_holdings() -> dict:
+    from backend.db.portfolio_repo import get_holdings as _db_get_holdings
+    from backend.db import is_available as _db_ok
+    if _db_ok():
+        holdings = _db_get_holdings("default")
+        if holdings:
+            return holdings
     if not _DB_FILE.exists():
         return {}
     with open(_DB_FILE) as f:
@@ -66,53 +96,91 @@ def analyze_macro(
     x_user_id: Optional[str] = Header(default=None),
 ):
     """
-    9-에이전트 거시경제 이벤트 분석.
-
-    mode: "fast" (3 agents) | "standard" (5) | "full" (9)
-    model_key: "sonnet" | "haiku"
+    9-에이전트 거시경제 이벤트 분석 (백그라운드 잡).
+    즉시 { job_id } 를 반환하고, 분석은 백그라운드 스레드에서 계속 실행된다.
+    GET /api/macro/job/{job_id} 로 완료 여부를 폴링하면 된다.
     """
     if not req.event.strip():
         raise HTTPException(status_code=400, detail="이벤트를 입력하세요.")
 
-    portfolio = req.portfolio or _load_holdings()
+    job_id = str(uuid.uuid4())
+    _job_set(job_id, {"status": "pending"})
 
-    agent_results = run_macro_agents(
-        event=req.event,
-        portfolio=portfolio,
-        model_key="sonnet" if "sonnet" in req.model else "haiku",
-        mode=req.mode,
-    )
+    # 스레드에 전달할 값을 미리 캡처 (req 객체가 스레드 내에서 변경될 수 있으므로)
+    ev         = req.event
+    req_model  = req.model
+    req_mode   = req.mode
+    req_port   = req.portfolio
+    uid        = (x_user_id or "default").strip() or "default"
 
-    # Final Verdict (id=9) 파싱 (현재는 텍스트 → verdict_cards=None)
-    verdict_cards = None
-    portfolio_actions = None
-    for ag in agent_results:
-        if ag["id"] == 9:
-            verdict_cards = parse_verdict_cards(ag["text"])
-        if ag["id"] == 8:
-            portfolio_actions = parse_portfolio_actions(ag["text"])
+    def _run() -> None:
+        try:
+            portfolio = req_port or _load_holdings()
+            agent_results = run_macro_agents(
+                event=ev,
+                portfolio=portfolio,
+                model_key="sonnet" if "sonnet" in req_model else "haiku",
+                mode=req_mode,
+            )
 
-    result = {
-        "event":              req.event,
-        "agents":             agent_results,
-        "verdict_cards":      verdict_cards,
-        "portfolio_actions":  portfolio_actions,
-    }
+            verdict_cards = None
+            portfolio_actions = None
+            for ag in agent_results:
+                if ag["id"] == 9:
+                    verdict_cards = parse_verdict_cards(ag["text"])
+                if ag["id"] == 8:
+                    portfolio_actions = parse_portfolio_actions(ag["text"])
 
-    # 분석 결과 DB 자동 저장
-    uid = (x_user_id or "default").strip() or "default"
-    date_str   = datetime.now().strftime("%Y%m%d_%H%M")
-    event_slug = re.sub(r"[^\w가-힣]", "_", req.event[:30]).strip("_")
-    filename   = f"macro_{date_str}_{event_slug}.json"
-    save_report(
-        filename,
-        json.dumps(result, ensure_ascii=False),
-        report_type="macro_scenario",
-        metadata={"event": req.event[:200], "mode": req.mode, "model": req.model},
-        user_id=uid,
-    )
+            result = {
+                "event":             ev,
+                "agents":            agent_results,
+                "verdict_cards":     verdict_cards,
+                "portfolio_actions": portfolio_actions,
+            }
 
-    return result
+            date_str   = datetime.now().strftime("%Y%m%d_%H%M")
+            event_slug = re.sub(r"[^\w가-힣]", "_", ev[:30]).strip("_")
+            filename   = f"macro_{date_str}_{event_slug}.json"
+            save_report(
+                filename,
+                json.dumps(result, ensure_ascii=False),
+                report_type="macro_scenario",
+                metadata={"event": ev[:200], "mode": req_mode, "model": req_model},
+                user_id=uid,
+            )
+
+            current = _job_get(job_id)
+            if current and current.get("status") == "cancelled":
+                return
+            _job_set(job_id, {"status": "done", "result": result})
+        except Exception as exc:
+            current = _job_get(job_id)
+            if current and current.get("status") == "cancelled":
+                return
+            _job_set(job_id, {"status": "error", "message": str(exc)})
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"job_id": job_id}
+
+
+@router.get("/job/{job_id}")
+def get_job_status(job_id: str):
+    """분석 잡 상태 조회. status: pending | done | error | cancelled"""
+    job = _job_get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="잡을 찾을 수 없습니다. 서버가 재시작됐을 수 있습니다.")
+    return job
+
+
+@router.delete("/job/{job_id}")
+def cancel_job(job_id: str):
+    """실행 중인 분석 잡 취소."""
+    job = _job_get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="잡을 찾을 수 없습니다.")
+    if job["status"] == "pending":
+        _job_set(job_id, {"status": "cancelled"})
+    return {"ok": True, "status": job.get("status")}
 
 
 @router.get("/reports")

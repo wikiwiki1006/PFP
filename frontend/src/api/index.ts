@@ -162,8 +162,38 @@ export const runMonteCarloMacro = async (body: object): Promise<MonteCarloMacroR
 export const getMacroModes = async (): Promise<MacroModes> =>
   (await api.get('/api/macro/modes')).data
 
-export const runMacroAnalysis = async (body: { event: string; model?: string; mode?: string; portfolio?: Record<string, unknown> }): Promise<MacroAnalysisResult> =>
+export const startMacroAnalysis = async (body: {
+  event: string; model?: string; mode?: string; portfolio?: Record<string, unknown>
+}): Promise<{ job_id: string }> =>
   (await api.post('/api/macro/analyze', body)).data
+
+export const getMacroJob = async (jobId: string): Promise<{
+  status: 'pending' | 'done' | 'error' | 'cancelled'
+  result?: MacroAnalysisResult
+  message?: string
+}> => (await api.get(`/api/macro/job/${jobId}`)).data
+
+export const cancelMacroJob = async (jobId: string): Promise<{ ok: boolean }> =>
+  (await api.delete(`/api/macro/job/${jobId}`)).data
+
+export const startEquityReport = async (body: {
+  ticker: string; model_tier?: string; send_telegram?: boolean
+}): Promise<{ job_id: string }> =>
+  (await api.post('/api/reports/equity-research/start', body)).data
+
+export const startIndustryReport = async (body: {
+  industry_id: string; model_tier?: string; send_telegram?: boolean
+}): Promise<{ job_id: string }> =>
+  (await api.post('/api/reports/industry-research/start', body)).data
+
+export const getReportJob = async (jobId: string): Promise<{
+  status: 'pending' | 'done' | 'error' | 'cancelled'
+  result?: Record<string, unknown>
+  message?: string
+}> => (await api.get(`/api/reports/job/${jobId}`)).data
+
+export const cancelReportJob = async (jobId: string): Promise<{ ok: boolean }> =>
+  (await api.delete(`/api/reports/job/${jobId}`)).data
 
 export const getMacroReportHistory = async (): Promise<{ name: string; event: string; mode: string; created_at: string }[]> =>
   (await api.get('/api/macro/reports')).data
@@ -197,7 +227,7 @@ export const generateEquityReport = async (ticker: string, company_name: string,
 export const generateIndustryReport = async (industry_id: string, send_telegram = false): Promise<IndustryReportResult> =>
   (await api.post('/api/reports/industry-research', { industry_id, send_telegram })).data
 
-export const getReportHistory = async (): Promise<ReportFile[]> =>
+export const getReportHistory = async (): Promise<(ReportFile & { created_at?: string })[]> =>
   (await api.get('/api/reports/history')).data
 
 export const getReportFile = async (filename: string): Promise<{ content: string; name: string }> =>

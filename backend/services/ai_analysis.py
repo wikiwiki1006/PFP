@@ -1,28 +1,32 @@
 """
 services/ai_analysis.py
 ────────────────────────
-Claude API 호출 로직. macro_scenario.py + alpha_terminal.py에서 추출.
-Streamlit 의존 없음.
+시장 지표 수집: yfinance + FRED (신뢰성 있는 실제 수치)
+뉴스·서사 수집: Perplexity sonar (최신 뉴스·전문가 코멘트)
+단순 분류·사실 나열: Claude Haiku (에이전트 1·2·4·5)
+심층 분석·종합 판단: Claude Sonnet (에이전트 3·6·7·8·9)
 """
 from __future__ import annotations
 
 import json
 import os
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from typing import AsyncIterator
-
-from dotenv import load_dotenv
 from pathlib import Path
 
-load_dotenv(Path(__file__).parent.parent.parent / "pfp" / ".env")
+import anthropic
+import requests
+from dotenv import load_dotenv
 
-ANTHROPIC_API_KEY   = os.getenv("ANTHROPIC_API_KEY", "")
-PERPLEXITY_API_KEY  = os.getenv("PERPLEXITY_API_KEY", "")
+load_dotenv(Path(__file__).parent.parent / ".env")
+
+ANTHROPIC_API_KEY  = os.getenv("ANTHROPIC_API_KEY", "")
+PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "")
 TODAY = datetime.now().strftime("%Y년 %m월 %d일")
-CONTEXT_CHAR_LIMIT = 4000    # Phase 1 에이전트 컨텍스트 한도
-PHASE2_CONTEXT_LIMIT = 10000  # Phase 2 에이전트(8, 9)는 더 많은 컨텍스트 허용
+CONTEXT_CHAR_LIMIT   = 3200   # 20% 절감
+PHASE2_CONTEXT_LIMIT = 8000   # 20% 절감
 
 ANALYSIS_MODES = {
     "fast":     [1, 6, 9],
@@ -35,35 +39,310 @@ MODEL_OPTIONS = {
     "haiku":  "claude-haiku-4-5-20251001",
 }
 
+# 에이전트별 기본 모델 티어
+# "haiku": 단순 분류·사실 나열 / "sonnet": 심층 분석·전략·종합
+# user가 "haiku"를 선택하면 전체 haiku로 오버라이드됨
+_AGENT_MODEL_TIER: dict[int, str] = {
+    1: "haiku",   # 이벤트 분석 — 사실 정리
+    2: "haiku",   # 역사적 유사 사례 — 단순 검색
+    3: "sonnet",  # 시장 반응 전망 — 복합 예측
+    4: "haiku",   # 섹터 영향 분석 — 분류 작업
+    5: "haiku",   # 현재 vs 과거 비교 — 단순 비교
+    6: "sonnet",  # 투자 전략 — 핵심 전략 판단
+    7: "sonnet",  # 리스크 관리 — 시나리오 분석
+    8: "sonnet",  # 포트폴리오 액션 — 개인화 판단
+    9: "sonnet",  # 최종 판정 — 종합 결론
+}
 
-# ── 에이전트 정의 ───────────────────────────────────────────────────────────────
+
+# ── yfinance + FRED: 시장 지표 수집 ──────────────────────────────────────────
+
+def gather_yfinance_market_data() -> str:
+    """DB 캐시 우선, 핵심 지수 누락 시 직접 yfinance 다운로드로 시장 지표 수집.
+    배경 스레드에서 실행되므로 블로킹 다운로드 가능."""
+    try:
+        import pandas as pd
+        from backend.services.market_data import get_fred_macro
+
+        PRICE_TICKERS: list[tuple[str, str, str, str]] = [
+            ("^GSPC",    "S&P 500",          ",.0f",  ""),
+            ("^DJI",     "다우존스",           ",.0f",  ""),
+            ("^IXIC",    "Nasdaq",            ",.0f",  ""),
+            ("^RUT",     "Russell 2000",      ",.0f",  ""),
+            ("^KS11",    "KOSPI",             ",.0f",  ""),
+            ("^N225",    "Nikkei 225",        ",.0f",  ""),
+            ("^VIX",     "VIX 공포지수",      ".2f",   ""),
+            ("^TNX",     "미국 10년물 금리",   ".3f",   "%"),
+            ("^IRX",     "미국 3개월물 금리",  ".3f",   "%"),
+            ("DX-Y.NYB", "달러인덱스(DXY)",   ".2f",   ""),
+            ("USDKRW=X", "USD/KRW",           ",.0f",  "원"),
+            ("USDJPY=X", "USD/JPY",           ".2f",   "엔"),
+            ("CL=F",     "WTI 원유",          ".2f",   "$/bbl"),
+            ("GC=F",     "금(Gold)",          ",.0f",  "$/oz"),
+            ("BTC-USD",  "Bitcoin",           ",.0f",  "$"),
+        ]
+        SECTOR_TICKERS: list[tuple[str, str]] = [
+            ("XLK", "기술(XLK)"),
+            ("XLF", "금융(XLF)"),
+            ("XLE", "에너지(XLE)"),
+            ("XLV", "헬스케어(XLV)"),
+            ("XLI", "산업재(XLI)"),
+            ("XLU", "유틸리티(XLU)"),
+        ]
+        all_price_tickers  = [t for t, *_ in PRICE_TICKERS]
+        all_sector_tickers = [t for t, _ in SECTOR_TICKERS]
+        all_tickers = all_price_tickers + all_sector_tickers
+
+        lines = [f"【현재 시장 지표 — yfinance】  기준: {TODAY}"]
+        cur_price:  dict[str, float] = {}
+        prev_price: dict[str, float] = {}
+        data_source = ""
+
+        # 1) DB 캐시 시도
+        try:
+            from backend.db import is_available
+            from backend.db.market_cache import get_prices_from_db
+            from backend.services.market_data import ALWAYS_FETCH
+            if is_available():
+                df_cache = get_prices_from_db(ALWAYS_FETCH, "5d")
+                if df_cache is not None and not df_cache.empty:
+                    # 주말 행 제거: 장이 열리지 않는 날은 ffill 값과 동일해 0% 변동률 오류 발생
+                    df_cache = df_cache[df_cache.index.dayofweek < 5]
+                if df_cache is not None and not df_cache.empty and len(df_cache) >= 2:
+                    cur_row  = df_cache.iloc[-1]
+                    prev_row = df_cache.iloc[-2]
+                    for t in all_tickers:
+                        if t in cur_row.index:
+                            c = cur_row.get(t)
+                            p = prev_row.get(t)
+                            if c is not None and not pd.isna(c):
+                                cur_price[t] = float(c)
+                            if p is not None and not pd.isna(p):
+                                prev_price[t] = float(p)
+                    if cur_price:
+                        data_source = "DB 캐시"
+        except Exception:
+            pass
+
+        # 2) 직접 yfinance 다운로드 (핵심 지수 누락 시)
+        core_ok = all(t in cur_price for t in ("^GSPC", "^IXIC", "^KS11"))
+        if not core_ok:
+            try:
+                import yfinance as yf
+                raw = yf.download(
+                    all_tickers, period="5d", auto_adjust=True,
+                    progress=False, threads=True,
+                )
+                if raw is not None and not raw.empty and "Close" in raw.columns:
+                    closes = raw["Close"]
+                    # 주말(토·일) 행 제거 — yfinance가 NaN 행을 반환하거나 ffill 시 0% 변동률 오류 방지
+                    closes = closes[closes.index.dayofweek < 5]
+                    if len(closes) >= 2:
+                        cur_row  = closes.iloc[-1]
+                        prev_row = closes.iloc[-2]
+                        for t in all_tickers:
+                            if t in closes.columns:
+                                c = cur_row.get(t)
+                                p = prev_row.get(t)
+                                if c is not None and not pd.isna(c):
+                                    cur_price[t] = float(c)
+                                if p is not None and not pd.isna(p):
+                                    prev_price[t] = float(p)
+                        if cur_price:
+                            data_source = "yfinance 직접"
+            except Exception:
+                pass
+
+        if not cur_price:
+            lines.append("  ⚠️ 시장 가격 데이터 수집 실패 — 네트워크 오류 또는 DB 미초기화")
+        else:
+            lines.append(f"  (데이터 출처: {data_source})")
+            lines.append("")
+            lines.append("  [주요 지수 및 자산]")
+            for t, name, fmt, unit in PRICE_TICKERS:
+                c = cur_price.get(t)
+                p = prev_price.get(t)
+                if c is None:
+                    continue
+                try:
+                    chg = (c / p - 1) * 100 if p else 0.0
+                    lines.append(f"  {name}: {c:{fmt}}{unit} (전일비 {chg:+.2f}%)")
+                except Exception:
+                    lines.append(f"  {name}: {c:{fmt}}{unit}")
+
+            lines.append("")
+            lines.append("  [섹터 ETF 전일 등락률]")
+            for t, name in SECTOR_TICKERS:
+                c = cur_price.get(t)
+                p = prev_price.get(t)
+                if c is None or p is None:
+                    continue
+                try:
+                    chg = (c / p - 1) * 100
+                    lines.append(f"  {name}: {chg:+.2f}%")
+                except Exception:
+                    pass
+
+        # FRED 거시 지표
+        try:
+            fred = get_fred_macro(ttl=3600)
+            if fred.get("source") != "fallback":
+                lines.append("")
+                lines.append("【FRED 거시경제 지표】")
+                lines.append(f"  연방기금금리: {fred['fed_rate']:.2f}%")
+                lines.append(f"  실업률: {fred['unemployment']:.1f}%")
+                lines.append(f"  CPI(전년비): {fred['cpi']:.1f}%")
+                lines.append(f"  GDP 성장률(최근분기): {fred['gdp']:.1f}%")
+                lines.append(f"  10Y-2Y 금리차: {fred['t10y2y']:+.3f}%p")
+                lines.append(f"  HY 스프레드: {fred['bamlh0a0hym2']:.0f}bp")
+        except Exception:
+            pass
+
+        return "\n".join(lines)
+
+    except Exception as exc:
+        return f"(시장 데이터 수집 오류: {exc})"
+
+
+# ── Perplexity: 뉴스·서사 수집 전담 ─────────────────────────────────────────
+
+def _call_perplexity(prompt: str, max_tokens: int = 1200) -> str:
+    """Perplexity sonar로 실시간 웹 검색. 실패 시 빈 문자열 반환."""
+    if not PERPLEXITY_API_KEY:
+        return ""
+    try:
+        resp = requests.post(
+            "https://api.perplexity.ai/chat/completions",
+            headers={
+                "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "sonar",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+                "temperature": 0.0,
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
+    except Exception:
+        return ""
+
+
+def gather_perplexity_context(ev: str) -> str:
+    """Perplexity로 이벤트 관련 최신 뉴스·전문가 코멘트만 수집.
+    시장 수치는 yfinance에서 별도로 가져오므로 여기서는 서사·뉴스만 요청한다."""
+    prompt = f"""오늘 날짜: {TODAY}
+분석 이벤트: {ev}
+
+아래 정보를 한국어로 수집해주세요. 수치(지수 레벨·금리)는 적지 말고 뉴스와 코멘트 위주로 작성하세요.
+
+【이벤트 관련 최신 뉴스 (최근 48시간)】
+- 주요 언론 보도 3~5건 (제목·출처·날짜·핵심 요약 각 1문장)
+- 골드만삭스·모건스탠리 등 투자은행·분석가 코멘트 (있을 경우)
+- 이 이벤트로 직접 영향을 받은 자산·국가·기업 (시장 서사 위주)"""
+    return _call_perplexity(prompt, max_tokens=1200)
+
+
+def gather_context(ev: str) -> str:
+    """yfinance(시장 지표) + Perplexity(뉴스)를 합쳐 에이전트 컨텍스트 반환."""
+    market_data = gather_yfinance_market_data()
+    news_data   = gather_perplexity_context(ev)
+
+    parts = [market_data]
+    if news_data.strip():
+        parts.append("")
+        parts.append("【이벤트 관련 최신 뉴스·전문가 코멘트 (Perplexity)】")
+        parts.append(news_data)
+
+    return "\n".join(parts)
+
+
+# ── Claude: 분석·출력 전담 ────────────────────────────────────────────────────
+
+_CLAUDE_SYSTEM = (
+    "각 섹션을 완전하게 작성하되 토큰 한도 내에서 자연스럽게 마무리하세요. "
+    "전체 분량을 섹션별로 고르게 배분해 마지막 섹션도 완결된 문장으로 끝내세요. "
+    "⚠️ 사용자가 입력한 이벤트는 실제로 발생한 사실이 아닌 가상 시나리오(Virtual Scenario)입니다. "
+    "'만약 이러한 상황이 발생한다면'의 조건부 관점에서 분석하고, "
+    "실제 시장 수치(지수·금리 등)는 제공된 yfinance 데이터를 사용하세요."
+)
+
+
+def call_claude(prompt: str, model: str, max_tokens: int, perplexity_ctx: str = "") -> str:
+    """Claude 호출. 토큰 한도로 잘린 경우 후속 호출로 마무리 문장을 복구한다."""
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    full_prompt = (
+        f"[시장 데이터·뉴스 — 분석에 활용하세요]\n{perplexity_ctx}\n\n---\n\n{prompt}"
+        if perplexity_ctx else prompt
+    )
+    msg = client.messages.create(
+        model=model,
+        max_tokens=max_tokens,
+        system=_CLAUDE_SYSTEM,
+        messages=[{"role": "user", "content": full_prompt}],
+    )
+    text = "".join(
+        block.text for block in msg.content
+        if getattr(block, "type", None) == "text"
+    )
+
+    # 토큰 한도로 잘린 경우: 끊긴 마지막 문장만 완성
+    if msg.stop_reason == "max_tokens" and text.strip():
+        try:
+            fix = client.messages.create(
+                model=model,
+                max_tokens=200,
+                system=_CLAUDE_SYSTEM,
+                messages=[
+                    {"role": "user",      "content": full_prompt},
+                    {"role": "assistant", "content": text},
+                    {"role": "user",      "content": (
+                        "위 텍스트가 토큰 한도로 중간에 끊겼습니다. "
+                        "끊긴 마지막 문장만 한두 문장으로 자연스럽게 완성해 주세요. "
+                        "새 섹션이나 추가 내용은 쓰지 마세요."
+                    )},
+                ],
+            )
+            tail = "".join(
+                block.text for block in fix.content
+                if getattr(block, "type", None) == "text"
+            )
+            if tail.strip():
+                text += tail
+        except Exception:
+            pass  # 복구 실패 시 원본 텍스트 반환
+
+    return text
+
+
+# ── 에이전트 프롬프트 정의 ────────────────────────────────────────────────────
 
 def _build_agents(
     ev: str,
     portfolio_str: str,
     prev_results: list[str] | None = None,
     context_limit: int = CONTEXT_CHAR_LIMIT,
-    market_snapshot: str = "",
 ) -> list[dict]:
     prev = "\n\n---\n\n".join([r for r in (prev_results or []) if r])[-context_limit:]
-    mkt = market_snapshot if market_snapshot else "yfinance 데이터 수집 실패 — 웹 검색으로 보완 필요"
+    ev = f"[가상 시나리오] {ev}"  # 사용자 입력은 가상 시나리오임을 명시
     return [
         {
-            "id": 1, "label": "이벤트 분석", "max_tokens": 1200, "use_search": True,
-            "search_prompt": f"""오늘({TODAY}) 다음 이벤트에 관한 최신 뉴스 3~5건을 검색해 요약해주세요: {ev}
-각 뉴스의 출처·날짜·핵심 내용을 포함하세요.""",
+            "id": 1, "label": "이벤트 분석", "max_tokens": 1200, "inject_perplexity": True,
             "prompt": f"""당신은 거시경제 분석 전문가입니다. 오늘 날짜: {TODAY}
 
 분석할 이벤트: {ev}
 
-아래 형식으로 한국어로 작성하세요. 전문 용어는 반드시 괄호 안에 쉬운 설명을 추가하세요.
-일반 투자자도 이해할 수 있는 쉬운 말을 사용하세요.
+위에 제공된 시장 지표와 뉴스 데이터를 바탕으로 아래 형식으로 한국어 분석을 작성하세요.
+전문 용어는 반드시 괄호 안에 용어 설명을 추가하세요.
 
 ## 🔍 이벤트 성격
 어떤 종류의 충격인지 한 줄로 설명 (예: 중앙은행 정책 변화, 지정학적 위기, 원자재 공급 충격 등)
 
-## 📊 현재 시장 상황 (실시간 데이터)
-{mkt}
+## 📊 현재 시장 상황
+제공된 시장 지표(S&P500·KOSPI·VIX·금리·환율 등)의 현재 레벨 정리
 
 ## 🌐 영향을 받는 나라/지역
 어느 나라와 산업이 가장 먼저 타격을 받는지
@@ -74,11 +353,11 @@ def _build_agents(
 ## 🚨 긴급도
 높음 / 보통 / 낮음 — 이유를 한 문장으로
 
-## 🔗 어떻게 시장에 영향이 전달되나
-쉬운 말로 2~3문장: 이 이벤트 → 어떤 경로로 → 주가/금리/환율에 영향"""
+## 🔗 시장 전달 경로
+이 이벤트가 어떤 경로로 주가/금리/환율에 영향을 미치는지 2~3문장으로""",
         },
         {
-            "id": 2, "label": "역사적 유사 사례", "max_tokens": 1450, "use_search": False,
+            "id": 2, "label": "역사적 유사 사례", "max_tokens": 1150, "inject_perplexity": False,
             "prompt": f"""당신은 금융 역사 전문가입니다. 오늘: {TODAY}
 이벤트: {ev}
 앞선 분석: {prev}
@@ -102,26 +381,23 @@ def _build_agents(
 ---
 
 ## 결론: 가장 비슷한 사례
-1~2문장으로, 지금 상황에 어떻게 적용할 수 있는지"""
+1~2문장으로, 지금 상황에 어떻게 적용할 수 있는지""",
         },
         {
-            "id": 3, "label": "시장 반응", "max_tokens": 1200, "use_search": True,
-            "search_prompt": f"""오늘({TODAY}) 이벤트({ev}) 관련 시장 반응과 전문가 전망을 검색해주세요:
-1. 주요 투자은행(골드만삭스, 모건스탠리 등)의 이 이벤트에 대한 최신 코멘트
-2. 이 이벤트로 인한 최근 시장 변동 뉴스 2~3건""",
+            "id": 3, "label": "시장 반응 전망", "max_tokens": 950, "inject_perplexity": True,
             "prompt": f"""당신은 시장 분석가입니다. 오늘: {TODAY}
 이벤트: {ev}
 앞선 분석: {prev}
 
-한국어로 작성하세요. 어려운 용어는 쉽게 풀어서 쓰세요.
+위에 제공된 시장 지표와 뉴스 데이터를 바탕으로 한국어로 분석하세요.
 
-## 📈 현재 시장 출발점 (실시간 데이터)
-{mkt}
+## 📈 현재 시장 출발점
+제공된 데이터에서 S&P500, KOSPI, VIX, 금리, 환율 현재값 정리
 
 ## ⏱️ 단기 반응 (지금~4주)
 - 주식시장이 어느 범위에서 움직일지
 - 달러, 금, 금리 방향
-- "공포지수(VIX)"가 얼마나 오를지 (높을수록 시장 불안)
+- VIX(공포지수)가 얼마나 오를지
 
 ## 📅 중기 흐름 (1~3개월)
 반등 가능성과 조건, 계속 하락하는 시나리오
@@ -130,10 +406,10 @@ def _build_agents(
 구조적으로 어느 방향으로 가는지
 
 ## 🔄 이런 이벤트 때 반복되는 패턴 2가지
-과거에 이런 상황에서 항상 나타났던 현상을 쉽게 설명"""
+과거에 이런 상황에서 항상 나타났던 현상을 쉽게 설명""",
         },
         {
-            "id": 4, "label": "섹터 영향 분석", "max_tokens": 1450, "use_search": False,
+            "id": 4, "label": "섹터 영향 분석", "max_tokens": 1150, "inject_perplexity": False,
             "prompt": f"""당신은 산업 분석가입니다. 오늘: {TODAY}
 이벤트: {ev}
 앞선 분석: {prev}
@@ -157,10 +433,10 @@ def _build_agents(
 | 3 | ... | ... | ... | ... | ... |
 
 ## 투자자들이 자주 저지르는 실수
-이런 이벤트 때 본능적으로 하지만 틀린 판단 한 가지를 쉽게 설명"""
+이런 이벤트 때 본능적으로 하지만 틀린 판단 한 가지를 쉽게 설명""",
         },
         {
-            "id": 5, "label": "현재 vs 과거 비교", "max_tokens": 1200, "use_search": False,
+            "id": 5, "label": "현재 vs 과거 비교", "max_tokens": 950, "inject_perplexity": False,
             "prompt": f"""당신은 거시경제 전략가입니다. 오늘: {TODAY}
 이벤트: {ev}
 앞선 분석: {prev}
@@ -182,43 +458,43 @@ def _build_agents(
 AI와 반도체가 새로운 변수로 등장한 점이 어떻게 다른지
 
 ## 결론
-과거 데이터를 그대로 적용할 수 없는 이유를 쉽게 1~2문장으로"""
+과거 데이터를 그대로 적용할 수 없는 이유를 1~2문장으로""",
         },
         {
-            "id": 6, "label": "투자 전략", "max_tokens": 1850, "use_search": False,
+            "id": 6, "label": "투자 전략", "max_tokens": 2000, "inject_perplexity": False,
             "prompt": f"""당신은 헤지펀드 최고투자책임자(CIO)입니다. 오늘: {TODAY}
 이벤트: {ev}
 앞선 분석: {prev}
 
-한국어로 작성하세요. 투자 초보자도 이해할 수 있게 쉽게 설명하세요.
+한국어로 작성하세요. 일반 투자자가 이해할 수 있도록 명확하게 설명하세요. 2000토큰 내에서 글이 잘리지 않도록 작성하세요.
 
 ## 지금 당장 (0~1개월)
-**사야 할 것:** 종목/ETF, 매수 시점 조건, 포트폴리오 비중 몇 %
+**사야 할 것:** 종목/ETF, 매수 시점 조건, 포트폴리오 비중 전체 100%대비 각각 몇 %
 **줄이거나 팔아야 할 것:** 종목, 매도 시점 조건
 
 ## 단기 전략 (1~3개월)
-핵심 포지션 2개, 왜 유리한지 쉬운 말로, 언제 청산할지
+핵심 포지션 2개, 왜 유리한지, 언제 청산할지
 
 ## 중장기 테마 (3~12개월)
 앞으로 뜰 구조적 테마, 관련 종목, 목표 수익률 범위
 
 ## 사고 파는 페어 전략
-**살 것 2개:** 종목 + 이유 (왜 이 이벤트에서 유리한지)
-**팔 것 2개:** 종목 + 이유 (왜 이 이벤트에서 불리한지)
+**살 것 2개:** 종목 + 이유
+**팔 것 2개:** 종목 + 이유
 
 ## 자산 배분 제안
 현금 / 채권 / 주식 / 원자재 / 금 = 합계 100%로 숫자 제시, 이유 한 줄씩
 
 ## 아이디어별 확신도
-0~100점으로 각 아이디어에 점수를 매기고 이유 한 줄"""
+0~100점으로 각 아이디어에 점수를 매기고 이유 한 줄""",
         },
         {
-            "id": 7, "label": "리스크 관리", "max_tokens": 1450, "use_search": False,
+            "id": 7, "label": "리스크 관리", "max_tokens": 1150, "inject_perplexity": False,
             "prompt": f"""당신은 최고리스크관리책임자(CRO)입니다. 오늘: {TODAY}
 이벤트: {ev}
 앞선 전략 분석: {prev}
 
-한국어로 작성하세요. 위험 요소를 쉬운 말로 설명하세요.
+한국어로 작성하세요. 위험 요소를 설명하세요.
 
 ## 전략이 틀릴 수 있는 상황 (2~3가지)
 이 분석이 완전히 빗나가는 구체적인 조건을 하나씩 설명
@@ -232,13 +508,13 @@ AI와 반도체가 새로운 변수로 등장한 점이 어떻게 다른지
 | 비관 (하락) | ?% | 악재가 겹치면 | S&P -?% 예상 | 방어 전략 |
 
 ## 손절 기준
-구체적인 가격이나 지표 수준을 명시 (예: S&P500이 X 아래로 내려가면)
+구체적인 가격이나 지표 수준을 명시
 
 ## 극단적 위험 대비 방법 (테일리스크 헤지)
-최악의 상황에 대비해 1~2가지 구체적인 보험 수단을 쉽게 설명"""
+최악의 상황에 대비해 1~2가지 구체적인 보험 수단을 명확하게 설명""",
         },
         {
-            "id": 8, "label": "포트폴리오 액션", "max_tokens": 1850, "use_search": False,
+            "id": 8, "label": "포트폴리오 액션", "max_tokens": 1500, "inject_perplexity": False,
             "prompt": f"""당신은 개인 투자 자문가입니다. 오늘: {TODAY}
 매크로 이벤트: {ev}
 전체 분석 내용: {prev}
@@ -250,64 +526,48 @@ AI와 반도체가 새로운 변수로 등장한 점이 어떻게 다른지
 각 종목마다 구체적인 행동 제안을 아래 JSON 배열로만 반환하세요.
 (마크다운, 설명 텍스트 없이 JSON만)
 
-reason 필드는 반드시 한국어 1문장으로, 쉬운 말로 이유를 설명하세요.
-action: "매수" / "매도" / "유지" / "일부 매도" 중 하나로 작성하세요.
+action: "매수" / "매도" / "유지" / "일부 매도" 중 하나.
 urgency: "즉시" / "1개월 내" / "3개월 내" 중 하나.
+reason: 한국어 1문장.
 
 [
   {{
     "ticker": "AAPL",
     "action": "유지",
-    "reason": "이 이벤트의 영향이 크지 않아 현 포지션 유지가 적절합니다.",
+    "reason": "이 이벤트의 영향이 제한적이므로 현 포지션 유지가 적절합니다.",
     "urgency": "3개월 내"
   }}
-]"""
+]""",
         },
         {
-            "id": 9, "label": "최종 판정", "max_tokens": 2600, "use_search": False,
+            "id": 9, "label": "최종 판정", "max_tokens": 2100, "inject_perplexity": False,
             "prompt": f"""당신은 거시경제 종합 분석 전문가입니다. 오늘: {TODAY}
 분석 이벤트: {ev}
 전체 분석 요약: {prev}
 
-아래 형식으로 한국어 마크다운으로 최종 판정을 작성하세요.
-일반 투자자가 이해하기 쉽게, 전문 용어는 반드시 풀어서 설명하세요.
-각 시나리오는 구체적인 수치·조건을 포함해 실질적으로 도움이 되도록 작성하세요.
+아래 형식의 JSON만 반환하세요. 마크다운, 설명 텍스트 없이 JSON만.
+한국어로 작성하되, 일반 투자자가 이해하기 쉽게 쓰세요.
 
-## ⚖️ 기준 시나리오 (가장 가능성 높은 전망)
-**발생 가능성:** 약 XX%
+각 카드는 서로 다른 시나리오를 다뤄야 합니다 (기본·낙관·비관·테일리스크).
+"details"는 2~3문장(120자 이내)으로 간결하게.
 
-**핵심 내용:** 가장 일어날 법한 전개를 2~3문장으로 쉽게 설명하세요.
+{{
+  "cards": [
+    {{
+      "title": "시나리오 제목 (짧게, 예: 기본 시나리오)",
+      "icon": "이모지 1개 (예: ⚖️, 📉, 🟢, ⚡)",
+      "color": "danger 또는 warning 또는 success 또는 info 중 하나",
+      "headline": "핵심 한 줄 (30자 이내)",
+      "summary": "1줄 요약 (40자 이내)",
+      "details": "2~3문장, 120자 이내. 포트폴리오에 미치는 구체적 영향 포함."
+    }}
+  ]
+}}
 
-**포트폴리오 영향:** 보유 종목에 미치는 구체적 영향을 1~2문장으로 설명하세요.
-
-**대응 전략:** 지금 당장 또는 단기적으로 취해야 할 행동을 1~2문장으로 제안하세요.
-
----
-
-## 🔴 위험 시나리오 (하락 위험)
-**발생 가능성:** 약 XX%
-
-**핵심 내용:** 최악의 경우 어떤 일이 발생할 수 있는지 2~3문장으로 설명하세요.
-
-**포트폴리오 영향:** 손실 규모와 가장 타격 받는 종목을 1~2문장으로 설명하세요.
-
-**대응 전략:** 손실을 줄이기 위한 리스크 관리 방법을 1~2문장으로 제안하세요.
-
----
-
-## 🟢 낙관 시나리오 (상승 기회)
-**발생 가능성:** 약 XX%
-
-**핵심 내용:** 시장이 예상보다 잘 흘러갈 경우의 전개를 2~3문장으로 설명하세요.
-
-**포트폴리오 영향:** 수혜 받는 종목과 기대할 수 있는 상승 폭을 1~2문장으로 설명하세요.
-
-**대응 전략:** 이 기회를 잡기 위해 취할 수 있는 행동을 1~2문장으로 제안하세요.
-
----
-
-## 📌 최종 결론
-지금 이 이벤트에서 투자자가 가장 중요하게 챙겨야 할 한 가지 메시지를 2~3문장으로 작성하세요."""
+규칙:
+- "cards"는 정확히 4개.
+- "color"는 danger / warning / success / info 중 하나 (소문자).
+- JSON은 반드시 {{ 로 시작하고 }} 로 끝나야 합니다. 중간에 끊기면 안 됩니다.""",
         },
     ]
 
@@ -324,130 +584,38 @@ def _format_portfolio(holdings: dict) -> str:
     return "\n".join(lines)
 
 
-# ── Claude 단건 호출 ─────────────────────────────────────────────────────────────
+# ── 2단계 파이프라인 실행 ─────────────────────────────────────────────────────
 
-def _fetch_market_snapshot() -> str:
-    """yfinance로 현재 시장 지표를 실시간 수집. 실패 시 빈 문자열 반환."""
-    try:
-        import yfinance as yf
-        import pandas as pd
-        symbols = {
-            "S&P500":          "^GSPC",
-            "KOSPI":           "^KS11",
-            "USD/KRW 환율":    "USDKRW=X",
-            "WTI 원유":        "CL=F",
-            "10년물 국채금리": "^TNX",
-            "VIX 공포지수":    "^VIX",
-            "달러인덱스(DXY)": "DX-Y.NYB",
-            "금(Gold)":        "GC=F",
-        }
-        tickers = list(symbols.values())
-        df = yf.download(tickers, period="2d", auto_adjust=True, progress=False)
-        if df.empty:
-            return ""
-        close = (df["Close"] if isinstance(df.columns, pd.MultiIndex) else df).ffill()
-        latest = close.iloc[-1]
-        lines = []
-        for label, sym in symbols.items():
-            if sym not in latest.index:
-                continue
-            val = latest[sym]
-            if pd.isna(val):
-                continue
-            if "국채금리" in label or "VIX" in label or "DXY" in label:
-                lines.append(f"- {label}: {val:.2f}")
-            elif "환율" in label:
-                lines.append(f"- {label}: {val:,.0f}원")
-            elif "원유" in label or "Gold" in label:
-                lines.append(f"- {label}: ${val:.1f}")
-            else:
-                lines.append(f"- {label}: {val:,.0f}")
-        return "\n".join(lines) if lines else ""
-    except Exception:
-        return ""
+def _resolve_model(ag_id: int, user_model_key: str) -> str:
+    """에이전트 ID와 사용자 선택 모델로 실제 모델 ID 결정.
+    user_model_key == "haiku" → 전체 haiku (비용 절감 오버라이드)
+    user_model_key == "sonnet" → 에이전트 티어에 따라 haiku/sonnet 분기
+    """
+    if user_model_key == "haiku":
+        return MODEL_OPTIONS["haiku"]
+    tier = _AGENT_MODEL_TIER.get(ag_id, "sonnet")
+    return MODEL_OPTIONS[tier]
 
-
-def _call_perplexity_search(prompt: str) -> str:
-    """Perplexity sonar로 실시간 웹 검색 전담. PERPLEXITY_API_KEY 없으면 빈 문자열 반환."""
-    if not PERPLEXITY_API_KEY:
-        return ""
-    try:
-        import requests as _req
-        resp = _req.post(
-            "https://api.perplexity.ai/chat/completions",
-            headers={
-                "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "sonar",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 1200,
-                "temperature": 0.0,
-            },
-            timeout=30,
-        )
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
-    except Exception:
-        return ""
-
-
-def call_claude(prompt: str, model: str, max_tokens: int,
-                use_search: bool = False, web_context: str = "") -> str:
-    import anthropic
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    full_prompt = (
-        f"[Perplexity 실시간 웹 검색 결과]\n{web_context}\n\n---\n\n{prompt}"
-        if web_context else prompt
-    )
-    kwargs = dict(
-        model=model,
-        max_tokens=max_tokens,
-        system=(
-            "각 섹션을 완전하게 작성하되, 토큰 한도 내에서 자연스럽게 마무리하세요. "
-            "글이 도중에 끊기지 않도록 마지막 섹션은 간결하게 압축해서라도 완결된 문장으로 끝내세요."
-        ),
-        messages=[{"role": "user", "content": full_prompt}],
-    )
-    # Perplexity가 웹 데이터를 제공했으면 Claude 검색 툴 불필요 (비용 절감)
-    if use_search and not web_context:
-        kwargs["tools"] = [{"type": "web_search_20250305", "name": "web_search"}]
-
-    msg = client.messages.create(**kwargs)
-    return "".join(
-        block.text for block in msg.content
-        if getattr(block, "type", None) == "text"
-    )
-
-
-# ── 병렬 에이전트 실행 (Phase 1) ─────────────────────────────────────────────────
 
 def _run_parallel_agents(
     selected_ids: list[int],
     ev: str,
     portfolio_str: str,
-    model: str,
-    market_snapshot: str = "",
+    model_key: str,
+    perplexity_ctx: str,
 ) -> dict[int, tuple[str, float]]:
     """Phase 1: 선택된 에이전트를 컨텍스트 없이 병렬 실행."""
-    all_agents = _build_agents(ev, portfolio_str, prev_results=[], market_snapshot=market_snapshot)
+    all_agents = _build_agents(ev, portfolio_str, prev_results=[])
     agent_map = {a["id"]: a for a in all_agents if a["id"] in selected_ids}
 
     results: dict[int, tuple[str, float]] = {}
 
     def _call(ag: dict):
-        import time
         t0 = time.time()
         try:
-            web_ctx = ""
-            if ag.get("use_search") and ag.get("search_prompt"):
-                web_ctx = _call_perplexity_search(ag["search_prompt"])
-            text = call_claude(
-                ag["prompt"], model, ag["max_tokens"],
-                use_search=ag.get("use_search", False) and not web_ctx,
-                web_context=web_ctx,
-            )
+            model = _resolve_model(ag["id"], model_key)
+            ctx = perplexity_ctx if ag.get("inject_perplexity") else ""
+            text = call_claude(ag["prompt"], model, ag["max_tokens"], perplexity_ctx=ctx)
             return ag["id"], text, time.time() - t0
         except Exception as exc:
             return ag["id"], f"[오류: {exc}]", time.time() - t0
@@ -465,13 +633,13 @@ def _run_contextual_agents(
     selected_ids: list[int],
     ev: str,
     portfolio_str: str,
-    model: str,
+    model_key: str,
     context_texts: list[str],
-    market_snapshot: str = "",
+    perplexity_ctx: str,
 ) -> dict[int, tuple[str, float]]:
-    """Phase 2: Phase 1 결과를 컨텍스트로 받아 에이전트를 순차 실행 (agents 8, 9)."""
+    """Phase 2: Phase 1 결과를 컨텍스트로 받아 순차 실행 (agents 8, 9)."""
     all_agents = _build_agents(ev, portfolio_str, prev_results=context_texts,
-                               context_limit=PHASE2_CONTEXT_LIMIT, market_snapshot=market_snapshot)
+                               context_limit=PHASE2_CONTEXT_LIMIT)
     agent_map = {a["id"]: a for a in all_agents if a["id"] in selected_ids}
 
     results: dict[int, tuple[str, float]] = {}
@@ -479,17 +647,11 @@ def _run_contextual_agents(
         if ag_id not in agent_map:
             continue
         ag = agent_map[ag_id]
-        import time
         t0 = time.time()
         try:
-            web_ctx = ""
-            if ag.get("use_search") and ag.get("search_prompt"):
-                web_ctx = _call_perplexity_search(ag["search_prompt"])
-            text = call_claude(
-                ag["prompt"], model, ag["max_tokens"],
-                use_search=ag.get("use_search", False) and not web_ctx,
-                web_context=web_ctx,
-            )
+            model = _resolve_model(ag_id, model_key)
+            ctx = perplexity_ctx if ag.get("inject_perplexity") else ""
+            text = call_claude(ag["prompt"], model, ag["max_tokens"], perplexity_ctx=ctx)
         except Exception as exc:
             text = f"[오류: {exc}]"
         results[ag_id] = (text, round(time.time() - t0, 2))
@@ -504,37 +666,35 @@ def run_macro_agents(
     mode: str = "fast",
 ) -> list[dict]:
     """
-    2단계 파이프라인으로 에이전트 실행.
+    Perplexity로 실시간 정보 수집 → Claude로 2단계 분석.
     Phase 1 (id ≤ 7): 병렬 독립 분석
-    Phase 2 (id > 7): Phase 1 전체 결과를 컨텍스트로 받아 순차 종합
-    반환: [{ id, name, text, elapsed, ok }, ...]
+    Phase 2 (id > 7): Phase 1 전체 결과를 컨텍스트로 순차 종합
     """
-    model = MODEL_OPTIONS.get(model_key, MODEL_OPTIONS["sonnet"])
     selected_ids = ANALYSIS_MODES.get(mode, ANALYSIS_MODES["fast"])
     portfolio_str = _format_portfolio(portfolio)
 
-    # yfinance 실시간 시장 데이터 사전 수집 (에이전트 1·3에 주입)
-    market_snapshot = _fetch_market_snapshot()
+    # Pre-phase: yfinance로 시장 지표 + Perplexity로 뉴스 수집
+    perplexity_ctx = gather_context(event)
 
     phase1_ids = [i for i in selected_ids if i <= 7]
     phase2_ids = [i for i in selected_ids if i > 7]
-
     all_results: dict[int, tuple[str, float]] = {}
 
-    # Phase 1: 병렬 독립 실행
     if phase1_ids:
-        all_results.update(_run_parallel_agents(phase1_ids, event, portfolio_str, model, market_snapshot))
+        all_results.update(
+            _run_parallel_agents(phase1_ids, event, portfolio_str, model_key, perplexity_ctx)
+        )
 
-    # Phase 2: Phase 1 컨텍스트 기반 순차 실행
     if phase2_ids:
         p1_texts = [
             all_results[i][0] for i in sorted(phase1_ids)
             if i in all_results and not all_results[i][0].startswith("[오류")
         ]
-        all_results.update(_run_contextual_agents(phase2_ids, event, portfolio_str, model, p1_texts, market_snapshot))
+        all_results.update(
+            _run_contextual_agents(phase2_ids, event, portfolio_str, model_key, p1_texts, perplexity_ctx)
+        )
 
-    # 정의된 에이전트 순서 기준으로 반환 목록 구성
-    all_agents = _build_agents(event, portfolio_str, market_snapshot=market_snapshot)
+    all_agents = _build_agents(event, portfolio_str)
     return [
         {
             "id":      ag["id"],
@@ -547,7 +707,7 @@ def run_macro_agents(
     ]
 
 
-# ── Final Verdict JSON 파싱 ──────────────────────────────────────────────────────
+# ── Final Verdict JSON 파싱 ───────────────────────────────────────────────────
 
 def parse_verdict_cards(raw_text: str) -> list[dict] | None:
     VALID_COLORS = {"danger", "warning", "success", "info"}
@@ -558,7 +718,6 @@ def parse_verdict_cards(raw_text: str) -> list[dict] | None:
                 c["color"] = "info"
         return cards
 
-    # 1차: 표준 JSON 파싱
     try:
         match = re.search(r"\{.*\}", raw_text, re.DOTALL)
         if match:
@@ -569,7 +728,7 @@ def parse_verdict_cards(raw_text: str) -> list[dict] | None:
     except Exception:
         pass
 
-    # 2차: 잘린 JSON 부분 복구
+    # 잘린 JSON 부분 복구
     try:
         recovered = []
         depth, start = 0, None
@@ -610,7 +769,7 @@ def parse_portfolio_actions(raw_text: str) -> list[dict] | None:
     return None
 
 
-# ── AI Analyst 실시간 피드백 (alpha_terminal에서 추출) ─────────────────────────────
+# ── AI Analyst 실시간 피드백 ──────────────────────────────────────────────────
 
 def get_ai_analyst_feedback(
     vix: float,
@@ -648,7 +807,7 @@ def get_ai_analyst_feedback(
     return call_claude(prompt, "claude-haiku-4-5-20251001", 200)
 
 
-# ── 데일리 브리프 생성 ───────────────────────────────────────────────────────────
+# ── 데일리 브리프 생성 ────────────────────────────────────────────────────────
 
 def generate_daily_brief(
     holdings: dict,
@@ -707,4 +866,4 @@ def generate_daily_brief(
 ---
 *본 브리프는 AI 자동 생성 참고용으로, 투자 조언이 아닙니다.*"""
 
-    return call_claude(prompt, "claude-sonnet-4-6", 1200)
+    return call_claude(prompt, "claude-haiku-4-5-20251001", 1200)

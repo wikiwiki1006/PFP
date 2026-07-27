@@ -104,9 +104,11 @@ def build_equity_curve(
     if close_df.empty:
         return pd.Series(dtype=float)
 
-    # 오늘 날짜가 인덱스에 없으면(주말·공휴일) 마지막 가격을 ffill로 연장
+    # 오늘 날짜가 인덱스에 없으면 마지막 가격을 ffill로 연장.
+    # 단, 주말(토·일)에는 연장하지 않는다 — 주말 행이 추가되면
+    # iloc[-1] == iloc[-2](금요일 값)이 되어 당일 수익률이 0%로 표시되기 때문.
     today = pd.Timestamp.today().normalize()
-    if close_df.index[-1] < today:
+    if close_df.index[-1] < today and today.dayofweek < 5:
         extended_idx = pd.DatetimeIndex(list(close_df.index) + [today])
         close_df = close_df.reindex(extended_idx).ffill()
 
@@ -220,6 +222,10 @@ def equity_curve_to_records(
     cash_event_amounts: {date_str: amount}  DEPOSIT(양수) / WITHDRAW(음수)
     trade_markers:      [{ticker,type,q,price,date}, ...]  주식 매매 이력
     """
+    # 주말(토·일) 행 제거: 장이 열리지 않는 날은 ffill로 값이 동일하므로
+    # 차트에서 수평 구간으로 나타나고 당일 수익률이 0%로 계산된다.
+    curve = curve[curve.index.dayofweek < 5]
+
     peak = float(curve.max()) if not curve.empty else 0.0
     threshold = peak * 0.001
     meaningful = curve[curve > threshold]
@@ -322,6 +328,12 @@ def calculate_metrics(
     if close_df.empty or len(close_df) < 2:
         return {}
 
+    # 주말(토·일) 행 제거 — ffill로 복사된 주말 데이터가 당일 변동률 0%를 만드는 버그 방지
+    close_df     = close_df[close_df.index.dayofweek < 5]
+    equity_curve = equity_curve[equity_curve.index.dayofweek < 5]
+    if close_df.empty or len(close_df) < 2:
+        return {}
+
     # 비거래일(주말·공휴일)에 NaN이 생기지 않도록 ffill 적용
     price_df = close_df.ffill()
     curr = price_df.iloc[-1]
@@ -410,6 +422,11 @@ def get_holdings_detail(holdings: dict, close_df: pd.DataFrame) -> list[dict]:
     if close_df.empty:
         return []
 
+    # 주말(토·일) 행 제거 — ffill로 복사된 주말 데이터가 변동률 0%를 만드는 버그 방지
+    close_df = close_df[close_df.index.dayofweek < 5]
+    if close_df.empty:
+        return []
+
     # 티커별로 마지막 유효(non-NaN) 가격 2개를 독립적으로 추출.
     # iloc[-1]/iloc[-2] 방식은 다른 티커 때문에 생긴 NaN 행이나
     # 장 중 ffill 저장된 행(= 전일 종가 복사)으로 chg_pct=0이 되는 버그를 방지한다.
@@ -490,9 +507,9 @@ def build_return_pct_curve(
     if close_df.empty:
         return pd.Series(dtype=float), {}, 0.0, {}, pd.Series(dtype=float)
 
-    # 오늘 날짜까지 인덱스 연장 (주말·공휴일이면 마지막 가격 ffill)
+    # 오늘 날짜까지 인덱스 연장 — 주말(토·일)에는 연장하지 않는다.
     today = pd.Timestamp.today().normalize()
-    if close_df.index[-1] < today:
+    if close_df.index[-1] < today and today.dayofweek < 5:
         extended_idx = pd.DatetimeIndex(list(close_df.index) + [today])
         close_df = close_df.reindex(extended_idx).ffill()
 
@@ -680,6 +697,8 @@ def return_pct_to_records(
 
     display_start = first_date - pd.DateOffset(months=1)
     curve = return_pct.loc[return_pct.index >= display_start]
+    # 주말(토·일) 포인트 제거 — ffill 연장으로 생긴 0% 변동 날짜를 그래프에서 제외
+    curve = curve[curve.index.dayofweek < 5]
     if curve.empty:
         return []
 

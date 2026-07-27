@@ -156,6 +156,8 @@ def get_close_df(tickers: list[str], period: str = "2y", ttl: int = 300, include
                         db_df = pd.concat([db_df, fresh], axis=1)
                 except Exception as e:
                     _logger.warning(f"신규 티커 즉시 수집 실패: {e}")
+            # 주말(토·일) 행 제거 — 장외 데이터가 ffill로 전일과 동일해져 0% 변동률 오류 방지
+            db_df = db_df[db_df.index.dayofweek < 5]
             _cache[mem_key] = (now, db_df)
             # stale 티커를 백그라운드에서 비동기 갱신 (max_age 22h: daily 업데이트 주기 기준)
             stale = get_stale_tickers(all_tickers, max_age_hours=22)
@@ -175,6 +177,7 @@ def get_close_df(tickers: list[str], period: str = "2y", ttl: int = 300, include
                 _logger.warning(f"최초 yfinance 수집 실패: {e}")
         db_df = get_prices_from_db(all_tickers, period)
         if db_df is not None and not db_df.empty:
+            db_df = db_df[db_df.index.dayofweek < 5]
             _cache[mem_key] = (now, db_df)
             return db_df
 
@@ -187,6 +190,7 @@ def get_close_df(tickers: list[str], period: str = "2y", ttl: int = 300, include
         return pd.DataFrame()
     if not result.empty and is_available():
         save_prices_to_db(result)
+    result = result[result.index.dayofweek < 5]
     _cache[mem_key] = (now, result)
     return result
 
@@ -199,9 +203,9 @@ def _get_sector_etf_df_1mo(ttl: int = 300) -> pd.DataFrame:
                 SECTOR_ETF_TICKERS, period="1mo", progress=False,
                 auto_adjust=True, threads=False
             )
-        if isinstance(data.columns, pd.MultiIndex):
-            return data["Close"].ffill()
-        return data.ffill()
+        df = data["Close"].ffill() if isinstance(data.columns, pd.MultiIndex) else data.ffill()
+        # 주말(토·일) 행 제거 — ffill로 채워진 주말 행이 0% 변동률을 만드는 버그 방지
+        return df[df.index.dayofweek < 5]
     return _cached("sector_etf_1mo", ttl, _fetch)
 
 
@@ -213,6 +217,9 @@ def get_sector_changes() -> dict[str, float]:
     """{ 'XLK': 1.23, 'XLF': -0.45, ... } 형태로 섹터 ETF 1일 등락률 반환."""
     try:
         df = _get_sector_etf_df_1mo()
+        if df.empty or len(df) < 2:
+            return {}
+        df = df[df.index.dayofweek < 5]  # 주말 행 제거
         if df.empty or len(df) < 2:
             return {}
         cur, prev = df.iloc[-1], df.iloc[-2]
@@ -238,9 +245,9 @@ def get_sector_table() -> list[dict]:
         if df_1mo.empty or len(df_1mo) < 2:
             return []
 
-        # 장 마감 후 yfinance가 당일 가격을 전일과 동일하게 반환하는 경우
-        # (ffill 아티팩트) — 마지막 두 행이 동일하면 오늘 행 제거
-        if (df_1mo.iloc[-1] == df_1mo.iloc[-2]).all():
+        # 주말 행 제거 후, 장 마감 후 ffill 아티팩트(마지막 두 행 동일) 제거
+        df_1mo = df_1mo[df_1mo.index.dayofweek < 5]
+        if len(df_1mo) >= 2 and (df_1mo.iloc[-1] == df_1mo.iloc[-2]).all():
             df_1mo = df_1mo.iloc[:-1]
         if len(df_1mo) < 2:
             return []
@@ -485,6 +492,10 @@ def get_market_snapshot(close_df: pd.DataFrame) -> dict:
     """WATCH_TICKERS 현재가/전일대비를 {prices: {ticker: {...}}, timestamp} 형태로 반환.
     장중: 마지막 행이 오늘 intraday면 현재가 사용. 장외: 전날 종가 기준.
     """
+    if close_df.empty or len(close_df) < 2:
+        return {"prices": {}, "timestamp": datetime.now().isoformat()}
+    # 주말 행 제거: 장이 열리지 않는 날은 ffill 값이 이전 행과 동일해 0% 변동률 오류 발생
+    close_df = close_df[close_df.index.dayofweek < 5]
     if close_df.empty or len(close_df) < 2:
         return {"prices": {}, "timestamp": datetime.now().isoformat()}
 
