@@ -6,13 +6,14 @@ routers/ticker.py
 from __future__ import annotations
 
 import math
-from datetime import datetime
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import Depends, APIRouter, Header, HTTPException, Query
+
+from backend.services.auth import optional_user
 
 router = APIRouter(prefix="/api/ticker", tags=["ticker"])
 
@@ -61,14 +62,137 @@ _PERIOD_MAP = {
 
 # ── 엔드포인트 ────────────────────────────────────────────────────────────────
 
+
+def _build_optimizer_block(sym: str, uid: str, closes=None) -> dict:
+    """포트폴리오 맥락 — 사용자 보유 종목에 의존하므로 공용 캐시에 넣지 않는다.
+
+    네트워크 호출은 get_close_df(대부분 캐시 적중) 뿐이라 매 요청 계산해도 가볍다.
+    closes=None 이면(공용 본문이 캐시 적중한 경로) 가격 캐시에서 종가를 얻는다.
+    """
+    optimizer = {"target_weight": None, "current_weight": None, "risk_contribution": None,
+                 "correlation": None, "correlation_label": None, "beta_exposure": None,
+                 "in_portfolio": False, "note": None}
+
+    # 보유 종목이 바뀌지 않는 한 결과가 같으므로 짧게 캐싱한다.
+    # (공용 본문이 DB 캐시에 적중해도 여기서 매번 공분산을 다시 계산하면
+    #  응답이 수 초대로 남는다 — 실측 2.8s → 0.3s)
+    from backend.services.market_data import _cache_get as _cg, _cache_put as _cp
+    _ok = f"opt_ctx_{sym}_{uid}"
+    _hit = _cg(_ok, 300)
+    if _hit is not None:
+        return _hit
+
+    try:
+        from backend.services.quant_metrics import compute_optimizer_context
+        from backend.db.portfolio_repo import get_holdings
+        from backend.services.market_data import get_close_df
+        holdings = get_holdings(uid)
+        stock = [t for t in holdings if t != "CASH"]
+        if not stock:
+            optimizer["note"] = "보유 종목이 없어 포트폴리오 맥락을 계산할 수 없습니다"
+            _cp(_ok, optimizer)
+            return optimizer
+        close_df = get_close_df(sorted(set(stock) | {sym}) + ["^GSPC"],
+                                period="1y", ttl=1800, include_market=False)
+        if closes is None:
+            if sym not in close_df.columns:
+                optimizer["note"] = "가격 이력이 없어 포트폴리오 맥락을 계산할 수 없습니다"
+                _cp(_ok, optimizer)
+                return optimizer
+            closes = close_df[sym].dropna()
+        res = compute_optimizer_context(sym, holdings, close_df, closes)
+        _cp(_ok, res)
+        return res
+    except Exception as e:
+        print(f"[quant] optimizer 실패 {sym}: {e}")
+        optimizer["note"] = "포트폴리오 맥락 계산 실패"
+        return optimizer
+
+
+def _build_quant_block(sym: str, uid: str, closes, hist, info: dict) -> dict:
+    """퀀트 스코어 · 시장국면 · 패닉 점수 · 포트폴리오 최적화 맥락.
+
+    예전에는 전부 하드코딩된 자리표시자였다. 실제 계산으로 대체하되,
+    일부가 실패해도 나머지는 표시되도록 각 블록을 독립적으로 방어한다.
+    """
+    from backend.services.quant_metrics import compute_quant_score, compute_panic_score
+    from backend.services.trading_signals import detect_regime_er, REGIME_SIDEWAYS
+
+    # ── 시장 국면 (ER, 소급 보정 적용) ────────────────────────────────
+    regime, regime_er = REGIME_SIDEWAYS, None
+    try:
+        r = detect_regime_er(closes)
+        regime, regime_er = r["current_regime"], r["current_er"]
+    except Exception as e:
+        print(f"[quant] regime 실패 {sym}: {e}")
+
+    _KO = {"Bull": "상승 추세", "Bear": "하락 추세", "Sideways": "횡보"}
+
+    quant = {"score": None, "label": "계산 불가", "factors": {}}
+    try:
+        quant = compute_quant_score(closes, info or {}, er=regime_er)
+    except Exception as e:
+        print(f"[quant] score 실패 {sym}: {e}")
+
+    panic = {"score": None, "status": "계산 불가", "components": {}}
+    try:
+        vol = hist["Volume"] if "Volume" in getattr(hist, "columns", []) else None
+        panic = compute_panic_score(closes, vol)
+    except Exception as e:
+        print(f"[quant] panic 실패 {sym}: {e}")
+
+    return {
+        "score":        quant.get("score"),
+        "score_label":  quant.get("label"),
+        "factors":      quant.get("factors", {}),
+        "regime":       _KO.get(regime, regime),
+        "regime_code":  regime,
+        "regime_er":    regime_er,
+        "panic_score":  panic.get("score"),
+        "panic_status": panic.get("status"),
+        "panic_components": panic.get("components", {}),
+    }
+
+
 @router.get("/{ticker}/detail")
 def get_ticker_detail(
     ticker: str,
     period: str = Query("1y", regex="^(1m|3m|6m|1y|2y|5y)$"),
+    _auth: Optional[dict] = Depends(optional_user),
 ):
-    """종목 상세: OHLCV + 이평선/BB/스토케스틱 + 펀더멘털 + 성과 + 리스크 + VaR"""
+    """종목 상세: OHLCV + 이평선/BB/스토케스틱 + 펀더멘털 + 성과 + 리스크 + VaR
+
+    yfinance history + info 를 매 요청마다 받으면 1초 가까이 걸린다.
+    같은 종목·기간 요청은 대부분 반복 조회(모달 재오픈·탭 전환)이므로
+    결과 전체를 메모리 캐시에 올린다. 장중에는 짧게, 장외에는 길게 유지한다.
+    """
     sym = ticker.upper()
     yf_period = _PERIOD_MAP.get(period, "1y")
+
+    from backend.services.market_data import _cache_get, _cache_put
+
+    # 비로그인도 차트·지표는 볼 수 있다. optimizer 만 로그인 시 계산된다.
+    uid = _auth["uid"] if _auth else None
+
+    # ── 캐시 2단 구조 ────────────────────────────────────────────────────
+    # 공용 본문(차트·지표·퀀트·패닉·VaR)은 일봉 기반이라 하루 1회만 계산하면 된다.
+    #   1) 프로세스 메모리 — 같은 인스턴스 내 반복 조회
+    #   2) DB(ticker_analytics) — 인스턴스·사용자를 넘어 24시간 공유
+    # optimizer 는 사용자 보유 종목에 의존하므로 캐시하지 않고 매번 계산한다.
+    from backend.db import ticker_analytics_repo as ta_repo
+
+    mem_key = f"ticker_detail_{sym}_{period}"
+    shared = _cache_get(mem_key, 900)
+    if shared is None:
+        shared = ta_repo.get_cached(sym, period)
+        if shared is not None:
+            _cache_put(mem_key, shared)
+
+    if shared is not None:
+        out = dict(shared)
+        out["quant"] = {**out.get("quant", {}),
+                        "optimizer": _build_optimizer_block(sym, uid, None)}
+        return out
 
     try:
         t = yf.Ticker(sym)
@@ -171,7 +295,7 @@ def get_ticker_detail(
             for b, c in zip(bins[:-1], counts)
         ]
 
-    return {
+    result = {
         "ticker":  sym,
         "period":  period,
         "ohlcv":   ohlcv,
@@ -206,19 +330,15 @@ def get_ticker_detail(
             "return_dist": return_dist,
         },
         # ── 향후 개발 예정 (placeholder) ──────────────────────────────────
-        "quant": {
-            "score":        78,
-            "score_label":  "BULLISH / HIGH MOMENTUM",
-            "regime":       "Risk-On (Phase 2)",
-            "optimizer": {
-                "target_weight":     8.5,
-                "risk_contribution": 4.2,
-                "current_weight":    8.5,
-                "correlation":       0.65,
-                "correlation_label": "Moderate",
-                "beta_exposure":     1.2,
-            },
-            "panic_score":  25,
-            "panic_status": "Extreme Panic - Buy Opportunity",
-        },
+        "quant": _build_quant_block(sym, uid, closes, hist, info),
     }
+
+    # 공용 본문을 메모리 + DB 양쪽에 저장 (다음 호출자는 즉시 사용)
+    _cache_put(mem_key, result)
+    ta_repo.save(sym, period, result)
+
+    # 사용자별 optimizer 는 캐시에 넣지 않고 응답에만 덧붙인다
+    out = dict(result)
+    out["quant"] = {**out.get("quant", {}),
+                    "optimizer": _build_optimizer_block(sym, uid, closes)}
+    return out

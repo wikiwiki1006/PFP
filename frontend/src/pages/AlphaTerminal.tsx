@@ -8,7 +8,7 @@ import ReactMarkdown from 'react-markdown'
 import {
   MessageSquare, RefreshCw,
   Plus, Trash2, Edit3, Check, X, Play, FileText, ChevronRight,
-  Download, History, Search,
+  Download, History, Search, Briefcase,
 } from 'lucide-react'
 import {
   getPortfolioMetrics, getEquityCurve, getHoldingsDetail, getSectorWeights,
@@ -17,11 +17,20 @@ import {
   postTrade, addHolding, updateHolding, deleteHolding, getHoldings,
   generateDailyBrief, getDailyBriefHistory, getDailyBriefFile,
   getIndexPrices, getTrades, updateTrade, deleteTrade, getTickerPrice, searchTickers,
-  autoDetectSectors,
+  autoDetectSectors, isEmptyPortfolioError,
 } from '@/api'
 import { cn } from '@/lib/utils'
 import TickerDetailModal from '@/components/TickerDetailModal'
 import { FinancialTips } from '@/components/FinancialTips'
+import LockedPreview, { AuthOverlay } from '@/components/auth/LockedPreview'
+import SetupWizard from '@/components/portfolio/SetupWizard'
+import ConfirmDialog from '@/components/auth/ConfirmDialog'
+import { useDemoQuery } from '@/lib/useDemoQuery'
+import { useAuth } from '@/lib/AuthContext'
+import {
+  DEMO_METRICS, DEMO_EQUITY_CURVE, DEMO_HOLDINGS_DETAIL, DEMO_HOLDINGS_RAW,
+  DEMO_SECTOR_WEIGHTS, DEMO_ANALYST_FEEDBACK, DEMO_NEWS, DEMO_EARNINGS,
+} from '@/lib/demoData'
 
 // null/NaN-safe 숫자 포맷터
 const fn = (v: number | null | undefined, d = 2) => ((v == null || isNaN(v as number)) ? 0 : v).toFixed(d)
@@ -30,6 +39,15 @@ const fp = (v: number | null | undefined, d = 2, sign = true) => {
   return sign ? `${n >= 0 ? '+' : ''}${n.toFixed(d)}%` : `${n.toFixed(d)}%`
 }
 const fv = (v: number | null | undefined) => (v == null || isNaN(v as number)) ? 0 : (v as number)
+
+// 일변동률 전용: null(계산 불가)을 0%로 위장하지 않고 '—'로 표시한다.
+// null을 +0.00%로 렌더하면 '진짜 보합'과 '데이터 없음'이 구분되지 않는다.
+const fpNullable = (v: number | null | undefined, d = 2) =>
+  (v == null || isNaN(v as number)) ? '—' : `${v >= 0 ? '+' : ''}${(v as number).toFixed(d)}%`
+
+// 상승 녹색 / 하락 빨강 / 정확히 0 또는 없음 → 회색 (0%를 녹색으로 칠하지 않는다)
+const chgColor = (v: number | null | undefined) =>
+  (v == null || isNaN(v as number) || v === 0) ? '#64748b' : (v as number) > 0 ? '#10b981' : '#ef4444'
 
 const SECTORS = [
   'Technology','Healthcare','Financials','Consumer Discretionary',
@@ -102,15 +120,18 @@ function Marquee({ snapshot }: { snapshot: any }) {
     MARQUEE_CONFIG.map(({ ticker, label, fmt }) => {
       const v = prices[ticker]
       if (!v) return null
-      const p = fv(v?.change_1d_pct)
-      const col = p >= 0 ? '#ef4444' : '#3b82f6'
+      // 변동률이 없으면 0%로 위장하지 않고 '—' 로 표시 (마퀴는 한국식 색상: 상승 적색)
+      const p: number | null =
+        v?.change_1d_pct == null || !Number.isFinite(v.change_1d_pct)
+          ? null : Number(v.change_1d_pct)
+      const col = p == null || p === 0 ? '#64748b' : p > 0 ? '#ef4444' : '#3b82f6'
       const price = fv(v?.price)
       if (!price) return null
       return (
         <span key={ticker + suffix} className="inline-flex items-center gap-1 mr-6 font-mono text-[14px]">
           <span className="font-bold text-[#e2e8f0]">{label}</span>
           <span className="text-[#cbd5e1]">{fmtPrice(price, fmt)}</span>
-          <span style={{ color: col }}>{fp(p)}</span>
+          <span style={{ color: col }}>{p == null ? '—' : `${p >= 0 ? '+' : ''}${p.toFixed(2)}%`}</span>
         </span>
       )
     })
@@ -180,8 +201,31 @@ type CurvePoint = {
   holdings: { ticker: string; return_pct: number; price: number }[]
 }
 
+/**
+ * "보유 종목 없음" 안내.
+ * 조회 실패와 구분해서 쓴다 — 방금 가입한 사용자에게 "불러오지 못했습니다"가
+ * 뜨면 뭔가 고장난 것처럼 보인다.
+ */
+function EmptyHoldings({ compact, label = '보유 종목 없음' }: { compact?: boolean; label?: string }) {
+  return compact ? (
+    <div className="flex items-center gap-2 px-4 py-2 text-xs text-[#64748b]">
+      <Briefcase className="w-3.5 h-3.5" />
+      <span>{label}</span>
+      <span className="text-[#374151]">· 종목을 추가하면 지표가 계산됩니다</span>
+    </div>
+  ) : (
+    <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
+      <Briefcase className="w-8 h-8 text-[#1e2d40]" />
+      <p className="text-sm text-[#64748b]">{label}</p>
+      <p className="text-[11px] text-[#374151]">보유 종목을 추가하면 여기에 표시됩니다</p>
+    </div>
+  )
+}
+
 function EquityCurve({ curveQ }: { curveQ: any }) {
-  const [range, setRange] = useState<'1M' | '3M' | '1Y' | 'ALL'>('1Y')
+  // 기본값은 ALL — 백엔드는 첫 거래일부터 전 구간을 내려주는데 여기서 1년으로
+  // 잘라 버리면 "최초 입금일부터 보이지 않는" 문제가 그대로 남는다.
+  const [range, setRange] = useState<'1M' | '3M' | '1Y' | 'ALL'>('ALL')
   const [bm,    setBm]    = useState<BenchmarkMode>('sp500')
 
   // ── 줌 상태 ─────────────────────────────────────────────────────────────
@@ -198,7 +242,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
   const [crosshairX,  setCrosshairX]  = useState<string | null>(null)
   const [chartMouseY, setChartMouseY] = useState<number | null>(null)
 
-  const rangeToPeriod = { '1M': '3mo', '3M': '6mo', '1Y': '2y', 'ALL': '5y' } as const
+  const rangeToPeriod = { '1M': '3mo', '3M': '6mo', '1Y': '2y', 'ALL': 'max' } as const
 
   const nasdaqQ = useQuery({
     queryKey: ['nasdaq-prices', rangeToPeriod[range]],
@@ -591,7 +635,9 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
       )}
       {!curveQ.isLoading && !data.length && (
         <div className="flex items-center justify-center" style={{ height: 300 }}>
-          <span className="text-[13px] text-[#94a3b8] font-mono">데이터 없음</span>
+          {isEmptyPortfolioError(curveQ.error)
+            ? <EmptyHoldings />
+            : <span className="text-[13px] text-[#94a3b8] font-mono">데이터 없음</span>}
         </div>
       )}
 
@@ -697,7 +743,37 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
 // ── Holdings + History Panel ──────────────────────────────────────────────────
 function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawHoldings: Record<string, any>; onTickerClick?: (ticker: string) => void }) {
   const qc = useQueryClient()
+  const { isAuthed } = useAuth()
   const [view, setView] = useState<'holdings' | 'history'>('holdings')
+  // 등록 마법사 — 'new' 는 기존 포트폴리오를 지우고 새로 만드는 경우다.
+  const [wizard, setWizard] = useState<null | 'first' | 'new'>(null)
+
+  // '아직 아무것도 없음' 판정. 종목이 없고 현금도 0일 때만 최초 등록으로 본다 —
+  // 현금만 넣어 둔 사용자에게 "등록하기"를 띄우면 기존 입력을 지우라는 뜻이 된다.
+  const nonCash = Object.keys(rawHoldings || {}).filter(t => t !== 'CASH')
+  const cashQty = Number(rawHoldings?.CASH?.q ?? 0)
+  const isEmptyPortfolio = isAuthed && nonCash.length === 0 && cashQty === 0
+
+  // 잔고 부족 안내 — 조용히 0으로 깎지 않고 팝업으로 막는다.
+  const [cashAlert, setCashAlert] = useState('')
+
+  const afterSetup = () => {
+    setWizard(null)
+    // 보유·거래·지표·그래프가 전부 바뀌므로 관련 캐시를 통째로 무효화한다.
+    for (const k of ['holdings-detail', 'holdings-raw', 'trades', 'portfolio-metrics',
+                     'equity-curve', 'sector-weights', 'earnings', 'market-news']) {
+      qc.invalidateQueries({ queryKey: [k] })
+    }
+  }
+
+  // 일변동률 컬럼 헤더: 실시간인지 / 어느 거래일 종가 기준인지 표시.
+  // 각 행이 as_of·is_live 를 갖고 있으므로 여기서 파생한다 (metrics 를 prop 으로 받지 않음).
+  const chgHeader = (() => {
+    const rows: any[] = (holdQ.data || []).filter((h: any) => h.ticker !== 'CASH')
+    if (rows.some(r => r.is_live)) return '일변동률 · LIVE'
+    const asOf = rows.find(r => r.as_of)?.as_of as string | undefined
+    return asOf ? `일변동률 (${asOf.slice(5).replace('-', '/')} 종가)` : '일변동률'
+  })()
 
   // ── Holdings edit state ────────────────────────────────────────────────
   const [editTicker, setEditTicker] = useState<string | null>(null)
@@ -727,6 +803,9 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
         if (res.count > 0) {
           qc.invalidateQueries({ queryKey: ['holdings-detail'] })
           qc.invalidateQueries({ queryKey: ['sector-weights'] })
+          // holdings-raw 도 무효화 — staleTime 5분 + placeholderData 때문에
+          // 무효화하지 않으면 도넛의 섹터 범례와 종목 인덱스가 5분간 어긋난다
+          qc.invalidateQueries({ queryKey: ['holdings-raw'] })
         }
       }).catch(() => {})
     } else if (holdings.length > 0) {
@@ -746,9 +825,13 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
       if (!hasCash) {
         return addHolding('CASH', { q: cashAmt, avg: 1, sector: 'Cash', date: cashDate })
       }
-      const newQ = cashType === 'deposit'
-        ? cashBalance + cashAmt
-        : Math.max(0, cashBalance - cashAmt)
+      // 예전에는 Math.max(0, ...) 로 깎았다. 그러면 출금액이 조용히 줄어들어
+      // 사용자는 요청한 금액이 빠진 줄 알고 장부가 어긋난다.
+      if (cashType === 'withdraw' && cashAmt > cashBalance + 1e-6) {
+        return Promise.reject(new Error(
+          `현금이 부족합니다.\n출금 요청 $${cashAmt.toLocaleString()} · 보유 $${cashBalance.toLocaleString()}`))
+      }
+      const newQ = cashType === 'deposit' ? cashBalance + cashAmt : cashBalance - cashAmt
       return updateHolding('CASH', { q: newQ, avg: 1, date: cashDate })
     },
     onSuccess: () => {
@@ -758,7 +841,7 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
       qc.invalidateQueries({ queryKey: ['equity-curve'] })
       qc.invalidateQueries({ queryKey: ['portfolio-metrics'] })
     },
-    onError: (e: any) => alert(`현금 설정 실패: ${e?.response?.data?.detail || e.message}`),
+    onError: (e: any) => setCashAlert(e?.response?.data?.detail || e.message),
   })
 
   // ── Trade form state ───────────────────────────────────────────────────
@@ -813,13 +896,15 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
     },
     onError: (e: any) => {
       const msg = e?.response?.data?.detail || e.message
-      setTickerError(`거래 실패: ${msg}`)
+      // 잔고 부족은 입력 실수가 아니라 '지금은 불가능한 거래'다 — 눈에 띄게 알린다.
+      if (String(msg).includes('현금이 부족')) setCashAlert(msg)
+      else setTickerError(`거래 실패: ${msg}`)
     },
   })
   const sellMut = useMutation({
     mutationFn: ({ ticker, q, price, date }: any) => postTrade({ ticker, type: 'SELL', q, price, date }),
     onSuccess: () => { setSellTicker(null); _invalidateAll() },
-    onError: (e: any) => alert(`SELL 실패: ${e?.response?.data?.detail || e.message}`),
+    onError: (e: any) => setCashAlert(e?.response?.data?.detail || e.message),
   })
   const updateTradeMut = useMutation({
     mutationFn: ({ id, ticker, type, vals }: any) => updateTrade(id, {
@@ -936,17 +1021,80 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
             view === 'history' ? 'text-[#e2e8f0] border-b-2 border-[#3b82f6]' : 'text-[#94a3b8] hover:text-[#94a3b8]')}>
           <History className="w-3 h-3" />거래 내역
         </button>
+
+        {/* 이미 등록된 상태에서만 노출 — 비어 있으면 가운데 큰 버튼으로 유도한다 */}
+        {isAuthed && !isEmptyPortfolio && (
+          <button
+            onClick={() => setWizard('new')}
+            title="기존 포트폴리오를 지우고 새로 등록합니다"
+            className="ml-auto mr-2 flex items-center gap-1 rounded border border-[#1e2d40] px-2 py-1 text-[10px] text-[#4a5568] transition hover:border-[#3b82f6]/40 hover:text-[#94a3b8]">
+            <Plus className="w-2.5 h-2.5" />포트폴리오 새로 등록
+          </button>
+        )}
       </div>
 
+      <ConfirmDialog
+        open={!!cashAlert}
+        alert
+        tone="danger"
+        title="거래를 진행할 수 없습니다"
+        message={cashAlert}
+        confirmText="확인"
+        onConfirm={() => setCashAlert('')}
+        onCancel={() => setCashAlert('')}
+      />
+
+      {wizard && (
+        <SetupWizard
+          open
+          replace={wizard === 'new'}
+          onClose={() => setWizard(null)}
+          onDone={afterSetup}
+        />
+      )}
+
+      {/* 조회 실패를 '보유 없음'으로 보여주지 않는다 (그 반대도 마찬가지다) */}
+      {view === 'holdings' && holdQ.isError && isEmptyPortfolioError(holdQ.error) && (
+        <div className="flex-1"><EmptyHoldings /></div>
+      )}
+      {view === 'holdings' && holdQ.isError && !isEmptyPortfolioError(holdQ.error) && (
+        <div className="flex-1 flex flex-col items-center justify-center gap-2 text-xs text-[#ef4444]">
+          <span>보유 종목을 불러오지 못했습니다</span>
+          <button onClick={() => holdQ.refetch()}
+            className="px-3 py-1 rounded border border-[#ef4444]/40 hover:bg-[#ef4444]/10">
+            재시도
+          </button>
+        </div>
+      )}
+
+      {/* 아직 아무것도 등록하지 않은 상태 — 등록으로 유도한다 */}
+      {view === 'holdings' && !holdQ.isError && isEmptyPortfolio && (
+        <div className="flex-1 flex flex-col items-center justify-center gap-3 p-6 text-center">
+          <Briefcase className="w-9 h-9 text-[#1e2d40]" />
+          <div>
+            <p className="text-sm text-[#cbd5e1]">등록된 포트폴리오가 없습니다</p>
+            <p className="mt-1 text-[11px] text-[#4a5568]">
+              보유 종목과 현금을 등록하면 수익률과 그래프가 계산됩니다
+            </p>
+          </div>
+          <button
+            onClick={() => setWizard('first')}
+            className="mt-1 flex items-center gap-1.5 rounded-lg bg-[#3b82f6] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#2f6fe0]">
+            <Plus className="w-4 h-4" />포트폴리오 등록하기
+          </button>
+        </div>
+      )}
+
       {/* ── Holdings 뷰 ─────────────────────────────────────────────────── */}
-      {view === 'holdings' && (
+      {view === 'holdings' && !holdQ.isError && !isEmptyPortfolio && (
         <>
           <div className="flex-1 overflow-y-auto min-h-0">
             <table className="w-full">
               <thead className="sticky top-0 bg-[#07101c] z-10">
                 <tr className="text-[#94a3b8] border-b border-[#1e2d40]">
-                  {['티커','평단가','수량','현재가','일변동률','누적수익률','비중','',''].map((hd, i) => (
-                    <th key={i} className="text-left py-2.5 px-2.5 font-semibold text-[11px] tracking-wider">{hd}</th>
+                  {['티커','평단가','수량','현재가', chgHeader,
+                    '누적수익률','비중','',''].map((hd, i) => (
+                    <th key={i} className="text-left py-2.5 px-2.5 font-semibold text-[11px] tracking-wider whitespace-nowrap">{hd}</th>
                   ))}
                 </tr>
               </thead>
@@ -975,6 +1123,16 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
                               onPointerDown={e => {
                                 e.preventDefault()
                                 const v = editValsRef.current
+                                // 입력칸을 비우면 +'' === 0 이 되어 수량 0·평단 0 이 그대로 저장된다.
+                                // 저장 전에 막고 편집 상태를 유지해 값을 되찾을 수 있게 한다.
+                                if (!Number.isFinite(v.q) || v.q <= 0) {
+                                  alert('수량은 0보다 커야 합니다.')
+                                  return
+                                }
+                                if (!Number.isFinite(v.avg) || v.avg < 0) {
+                                  alert('평단가가 올바르지 않습니다.')
+                                  return
+                                }
                                 setEditTicker(null)
                                 updateMut.mutate({ ticker: h.ticker, q: v.q, avg: v.avg, sector: h.sector })
                               }}
@@ -1003,13 +1161,18 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
                         <td className="py-2 px-2.5 font-mono text-[12px] text-[#cbd5e1]">${fn(h.avg_cost, 2)}</td>
                         <td className="py-2 px-2.5 font-mono text-[12px] text-[#cbd5e1]">{fv(h.qty)}</td>
                         <td className="py-2 px-2.5 font-mono text-[12px] text-[#cbd5e1]">${fn(h.current_price, 2)}</td>
-                        <td className="py-2 px-2.5 font-mono text-[13px] font-bold" style={{ color: fv(h.chg_pct) >= 0 ? '#10b981' : '#ef4444' }}>
-                          {fp(h.chg_pct, 2)}
+                        <td className="py-2 px-2.5 font-mono text-[13px] font-bold" style={{ color: chgColor(h.chg_pct) }}
+                          title={h.as_of ? `${h.as_of} 기준${h.is_live ? ' (실시간)' : ' 종가'}` : '데이터 부족'}>
+                          {fpNullable(h.chg_pct, 2)}
                         </td>
                         <td className="py-2 px-2.5 font-mono text-[13px] font-bold" style={{ color: fv(h.pnl_pct) >= 0 ? '#10b981' : '#ef4444' }}>
                           {fp(h.pnl_pct, 2)}
                         </td>
-                        <td className="py-2 px-2.5 font-mono text-[12px] text-[#cbd5e1]">{fn(fv(h.weight) * 100, 0)}%</td>
+                        {/* 소수점 0자리로 반올림하면 1% 미만 포지션이 전부 "0%"가 되어
+                            실제 0과 구분되지 않는다 → 1% 미만은 소수 2자리로 표시 */}
+                        <td className="py-2 px-2.5 font-mono text-[12px] text-[#cbd5e1]">
+                          {fn(fv(h.weight) * 100, fv(h.weight) * 100 < 1 ? 2 : 1)}%
+                        </td>
                         {/* SELL 버튼 */}
                         <td className="py-2 px-1 opacity-0 group-hover:opacity-100 transition-opacity">
                           <button type="button"
@@ -1057,9 +1220,9 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
                             className="w-16 bg-[#1e2d40] border border-[#334155] text-sm text-[#e2e8f0] rounded px-2 py-1" />
                           <input type="number" value={sellVals.price || ''}
                             onChange={e => setSellVals(v => ({ ...v, price: +e.target.value }))}
-                            placeholder={sellPriceLoading ? '조회중…' : '가격'}
+                            placeholder={sellPriceLoading ? '조회중…' : '가격 (USD)'}
                             disabled={sellPriceLoading}
-                            className="w-20 bg-[#1e2d40] border border-[#334155] text-sm text-[#e2e8f0] rounded px-2 py-1" />
+                            className="w-28 bg-[#1e2d40] border border-[#334155] text-sm text-[#e2e8f0] rounded px-2 py-1" />
                           <input type="date" value={sellVals.date}
                             onChange={e => setSellVals(v => ({ ...v, date: e.target.value }))}
                             max={todayStr}
@@ -1104,7 +1267,7 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
                   onKeyDown={handleTickerKeyDown}
                   placeholder="티커"
                   autoComplete="off"
-                  className="w-24 bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#e2e8f0] rounded px-2 py-1.5 placeholder-[#334155] focus:outline-none focus:border-[#3b82f6]"
+                  className="w-32 bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#e2e8f0] rounded px-2 py-1.5 placeholder-[#334155] focus:outline-none focus:border-[#3b82f6]"
                 />
                 {showSug && suggestions.length > 0 && (
                   <div className="absolute bottom-full mb-1 left-0 z-50 bg-[#0b1220] border border-[#1e2d40] rounded shadow-xl min-w-[180px]">
@@ -1141,9 +1304,9 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
               {/* Price — 직접 입력만 (현재가 자동 조회 유지) */}
               <input type="number" value={form.price || ''}
                 onChange={e => setForm(f => ({ ...f, price: +e.target.value }))}
-                placeholder={priceLoading ? '조회중…' : '가격'}
+                placeholder={priceLoading ? '조회중…' : '가격 (USD)'}
                 disabled={priceLoading}
-                className="w-24 bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#e2e8f0] rounded px-2 py-1.5 placeholder-[#334155] focus:outline-none focus:border-[#3b82f6]"
+                className="w-32 bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#e2e8f0] rounded px-2 py-1.5 placeholder-[#334155] focus:outline-none focus:border-[#3b82f6]"
               />
 
               {/* Date — 매수/매도 날짜 */}
@@ -1199,9 +1362,9 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
               type="number"
               value={cashAmt || ''}
               onChange={e => setCashAmt(+e.target.value)}
-              placeholder="금액"
+              placeholder="금액 (USD)"
               min={0}
-              className="w-28 bg-[#0b1220] border border-[#1e2d40] text-[12px] font-mono text-[#e2e8f0] rounded px-2 py-1 focus:outline-none focus:border-[#3b82f6]"
+              className="w-32 bg-[#0b1220] border border-[#1e2d40] text-[12px] font-mono text-[#e2e8f0] rounded px-2 py-1 focus:outline-none focus:border-[#3b82f6]"
             />
             <input
               type="date"
@@ -1478,7 +1641,7 @@ function SectorPerfPanel({ sectorTableQ }: { sectorTableQ: any }) {
     <div className="flex flex-col h-full overflow-hidden">
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-2.5 border-b border-[#1e2d40] flex-shrink-0 bg-[#070d18]">
-        <span className="text-[11px] text-[#cbd5e1] font-bold tracking-[3px] uppercase">섹터 수익률</span>
+        <span className="text-[11px] text-[#cbd5e1] font-bold tracking-[3px] uppercase">섹터 변동율</span>
         <div className="flex gap-0.5">
           {PERF_PERIODS.map(p => (
             <button key={p.key} onClick={() => setPeriod(p.key)}
@@ -1546,6 +1709,7 @@ const SK_START    = 'pfp_brief_start'
 
 // ── Daily Brief (right panel) ─────────────────────────────────────────────────
 function DailyBriefPanel() {
+  const { isAuthed } = useAuth()
   const [file, setFile]         = useState<string | null>(() => sessionStorage.getItem(SK_FILE))
   const [content, setContent]   = useState<string | null>(() => sessionStorage.getItem(SK_CONTENT))
   const [logs, setLogs]         = useState<string[]>(() => {
@@ -1559,7 +1723,15 @@ function DailyBriefPanel() {
   const [elapsedMs,   setElapsedMs]   = useState(0)
   const contentRef                    = useRef<HTMLDivElement>(null)
 
-  const histQ   = useQuery({ queryKey: ['daily-brief-history'], queryFn: getDailyBriefHistory, staleTime: 60_000 })
+  // 과거 브리프는 개인 이력이다. 로그인 전에는 조회하지 않고 목록도 비운다.
+  const histQ   = useQuery({
+    queryKey: ['daily-brief-history'],
+    queryFn:  getDailyBriefHistory,
+    staleTime: 60_000,
+    enabled:  isAuthed,
+  })
+  // 예시 리포트는 만들지 않는다 — 로그인 전에는 생성 결과가 없다.
+  const shownContent = isAuthed ? content : null
   const fileMut = useMutation({
     mutationFn: getDailyBriefFile,
     onSuccess: d => {
@@ -1704,7 +1876,7 @@ function DailyBriefPanel() {
 
   // 경과 시간 기반 단계 표시 (백엔드 로그는 완료 시에만 도착하므로 프론트에서 시뮬레이션)
   const STAGE_LABELS = [
-    '1/3  yfinance 가격 데이터 수집 중...',
+    '1/3  가격 데이터 수집 중...',
     '2/3  뉴스 헤드라인 수집 중...',
     '3/3  AI 브리프 생성 중 (약 30~60초)...',
   ]
@@ -1720,9 +1892,9 @@ function DailyBriefPanel() {
           <Play className="w-3.5 h-3.5" />
           {isActivelyGenerating ? '생성 중…' : '브리핑 생성'}
         </button>
-        <button onClick={downloadPDF} disabled={!content || pdfBusy} title="PDF로 다운로드"
+        <button onClick={downloadPDF} disabled={!shownContent || pdfBusy} title="PDF로 다운로드"
           className={cn('px-3 py-2 rounded border text-[11px] font-bold transition-colors flex items-center gap-1.5',
-            content && !pdfBusy
+            shownContent && !pdfBusy
               ? 'border-[#3b82f6]/50 bg-[#3b82f6]/10 text-[#3b82f6] hover:bg-[#3b82f6]/20'
               : 'border-[#1e2d40] text-[#94a3b8] cursor-not-allowed opacity-40'
           )}>
@@ -1789,15 +1961,15 @@ function DailyBriefPanel() {
       )}
 
       <div className="flex-1 overflow-y-auto">
-        {!content && !isActivelyGenerating && (
+        {!shownContent && !isActivelyGenerating && (
           <div className="flex flex-col items-center justify-center h-full gap-3 p-5 text-center">
             <FileText className="w-12 h-12 text-[#10b981]/20" />
             <p className="text-sm text-[#94a3b8] leading-relaxed">브리핑 생성 버튼을 눌러<br/>AI 데일리 브리핑을 생성하세요</p>
           </div>
         )}
-        {content && !isActivelyGenerating && (
+        {shownContent && !isActivelyGenerating && (
           <div ref={contentRef} className="p-4 brief-md">
-            <ReactMarkdown>{content}</ReactMarkdown>
+            <ReactMarkdown>{shownContent}</ReactMarkdown>
           </div>
         )}
       </div>
@@ -1820,44 +1992,46 @@ export default function AlphaTerminal() {
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // 핵심 지표: 60초 주기 (30초는 너무 자주 백엔드 호출)
-  const metricsQ  = useQuery({ queryKey: ['portfolio-metrics'], queryFn: getPortfolioMetrics,   refetchInterval: 60_000,  staleTime: 55_000 })
+  // 개인 데이터 쿼리 — 비로그인이면 서버를 부르지 않고(어차피 401) 예시 데이터를
+  // 돌려준다. 화면은 정상적으로 그려지고 LockedPreview 가 그 위에 흐림을 씌운다.
+  const metricsQ  = useDemoQuery(['portfolio-metrics'], getPortfolioMetrics, DEMO_METRICS,       { refetchInterval: 60_000, staleTime: 55_000 })
   // 에쿼티 커브/섹터: 5분 캐시 (자주 변하지 않음)
-  const curveQ    = useQuery({ queryKey: ['equity-curve'],      queryFn: getEquityCurve,         staleTime: 300_000 })
+  const curveQ    = useDemoQuery(['equity-curve'],      getEquityCurve,      DEMO_EQUITY_CURVE,  { staleTime: 300_000 })
   // 보유 종목 상세: 60초 (현재가 업데이트용)
-  const holdQ     = useQuery({ queryKey: ['holdings-detail'],   queryFn: getHoldingsDetail,      refetchInterval: 60_000,  staleTime: 55_000 })
-  const rawHoldQ  = useQuery({ queryKey: ['holdings-raw'],      queryFn: getHoldings,            staleTime: 300_000, placeholderData: (prev: any) => prev })
-  const sectorQ      = useQuery({ queryKey: ['sector-weights'],  queryFn: getSectorWeights,   staleTime: 300_000 })
+  const holdQ     = useDemoQuery(['holdings-detail'],   getHoldingsDetail,   DEMO_HOLDINGS_DETAIL, { refetchInterval: 60_000, staleTime: 55_000 })
+  const rawHoldQ  = useDemoQuery(['holdings-raw'],      getHoldings,         DEMO_HOLDINGS_RAW,  { staleTime: 300_000, placeholderData: (prev: any) => prev })
+  const sectorQ   = useDemoQuery(['sector-weights'],    getSectorWeights,    DEMO_SECTOR_WEIGHTS, { staleTime: 300_000 })
   const sectorTableQ = useQuery({ queryKey: ['sector-table'],    queryFn: getMarketSectors,   staleTime: 300_000, refetchInterval: 300_000 })
   // 시장 스냅샷: 60초 주기 (마커 바 업데이트)
   const snapQ     = useQuery({ queryKey: ['market-snapshot'],   queryFn: getMarketSnapshot,      refetchInterval: 60_000,  staleTime: 55_000 })
   const macroQ    = useQuery({ queryKey: ['macro-data'],        queryFn: getMacroData,           staleTime: 600_000 })
   // analyst-feedback(LLM): AI Feed 탭 활성 시에만 요청 (느린 LLM 호출 — 페이지 로드에서 제외)
-  const feedbackQ = useQuery({
-    queryKey: ['analyst-feedback'],
-    queryFn: () => getAnalystFeedback(m ? {
+  const feedbackQ = useDemoQuery(
+    ['analyst-feedback'],
+    () => getAnalystFeedback(m ? {
       vix: m.vix,
       portfolio_beta: m.portfolio_beta,
       today_chg_pct: m.today_change_pct,
     } : undefined),
-    staleTime: 300_000,
-    enabled: rightTab === 1,
-  })
+    DEMO_ANALYST_FEEDBACK,
+    { staleTime: 300_000, enabled: rightTab === 1 },
+  )
 
   const holdTickers = Object.keys(rawHoldQ.data || {}).filter(t => t !== 'CASH').join(',')
   // 뉴스: News 탭 활성 시에만 요청
-  const newsQ = useQuery({
-    queryKey: ['market-news', holdTickers],
-    queryFn:  () => getMarketNews(holdTickers.split(',').filter(Boolean)),
-    enabled: !!holdTickers && rightTab === 2,
-    staleTime: 300_000,
-  })
+  const newsQ = useDemoQuery(
+    ['market-news', holdTickers],
+    () => getMarketNews(holdTickers.split(',').filter(Boolean)),
+    DEMO_NEWS,
+    { enabled: !!holdTickers && rightTab === 2, staleTime: 300_000 },
+  )
   // 실적/배당: Earnings 탭 활성 시에만 요청 (병렬화했지만 여전히 yfinance N개 호출)
-  const earningsQ = useQuery({
-    queryKey: ['earnings', holdTickers],
-    queryFn:  () => getEarnings(holdTickers.split(',').filter(Boolean)),
-    enabled: !!holdTickers && botTab === 0,
-    staleTime: 3600_000,
-  })
+  const earningsQ = useDemoQuery(
+    ['earnings', holdTickers],
+    () => getEarnings(holdTickers.split(',').filter(Boolean)),
+    DEMO_EARNINGS,
+    { enabled: !!holdTickers && botTab === 0, staleTime: 3600_000 },
+  )
 
   const m = metricsQ.data
 
@@ -1875,16 +2049,35 @@ export default function AlphaTerminal() {
       {/* ── Metrics bar ── */}
       <div className="flex-shrink-0 bg-[#060b14] border-b border-[#1e2d40] flex items-stretch">
         <div className="flex flex-1 min-w-0 overflow-x-auto">
-          {m && (
-            <>
+          {/* 실패를 '0원 포트폴리오'로 위장하지 않는다 — 조회 실패와 빈 포트폴리오는 다르다 */}
+          {metricsQ.isError && isEmptyPortfolioError(metricsQ.error) && <EmptyHoldings compact />}
+          {metricsQ.isError && !isEmptyPortfolioError(metricsQ.error) && (
+            <div className="flex items-center gap-2 px-4 py-2 text-xs text-[#ef4444]">
+              <span>지표를 불러오지 못했습니다</span>
+              <button onClick={() => metricsQ.refetch()}
+                className="px-2 py-0.5 rounded border border-[#ef4444]/40 hover:bg-[#ef4444]/10">
+                재시도
+              </button>
+            </div>
+          )}
+          {!metricsQ.isError && metricsQ.isLoading && (
+            <div className="px-4 py-2 text-xs text-[#64748b]">지표 불러오는 중...</div>
+          )}
+          {!metricsQ.isError && m && typeof m.total_equity === 'number' && (
+            <LockedPreview silent>
+            <div className="flex items-stretch">
               <Pill label="총 자산" value={`$${fn(fv(m.total_equity) / 1000, 2)}K`} />
-              <Pill label="1Day"       value={fp(m.today_change_pct)}  color={fv(m.today_change_pct) >= 0 ? '#10b981' : '#ef4444'} />
-              <Pill label="1Week"         value={fp(m.perf_1w)}           color={fv(m.perf_1w) >= 0 ? '#10b981' : '#ef4444'} />
-              <Pill label="1Month"         value={fp(m.perf_1m)}           color={fv(m.perf_1m) >= 0 ? '#10b981' : '#ef4444'} />
+              <Pill
+                label={m.market_open ? '1Day · LIVE' : m.as_of ? `1Day (${m.as_of.slice(5).replace('-', '/')})` : '1Day'}
+                value={fpNullable(m.today_change_pct)}
+                color={chgColor(m.today_change_pct)} />
+              <Pill label="1Week"        value={fpNullable(m.perf_1w)}   color={chgColor(m.perf_1w)} />
+              <Pill label="1Month"       value={fpNullable(m.perf_1m)}   color={chgColor(m.perf_1m)} />
               <Pill label="누적 수익"  value={fp(m.total_return_pct)}  color={fv(m.total_return_pct) >= 0 ? '#10b981' : '#ef4444'} />
               <Pill label="베타"       value={fn(m.portfolio_beta)} />
               <Pill label="변동성"        value={fn(m.vix)}               color={fv(m.vix) > 25 ? '#ef4444' : fv(m.vix) > 18 ? '#f59e0b' : '#10b981'} />
-            </>
+            </div>
+            </LockedPreview>
           )}
         </div>
         <Clock />
@@ -1949,29 +2142,40 @@ export default function AlphaTerminal() {
       </div>
 
       {/* ── Main layout ── */}
-      <div className="flex flex-1 min-h-0">
+      {/* relative: 로그인 안내를 이 영역 한가운데에 띄우기 위한 기준점 */}
+      <div className="relative flex flex-1 min-h-0">
+        <AuthOverlay />
 
         {/* ═══ LEFT PANEL ═══ */}
         <div className="overflow-y-auto border-r border-[#1e2d40] flex-1 min-w-0">
 
-          {/* A: Equity Curve */}
-          <EquityCurve curveQ={curveQ} />
+          {/* A: Equity Curve — 개인 자산 추이 */}
+          <LockedPreview silent>
+            <EquityCurve curveQ={curveQ} />
+          </LockedPreview>
 
           {/* B: Holdings */}
           <div className="border-b border-[#1e2d40]" style={{ height: '460px' }}>
-            <HoldingsPanel holdQ={holdQ} rawHoldings={rawHoldQ.data || {}} onTickerClick={t => setTickerModal(t)} />
+            <LockedPreview silent>
+              <HoldingsPanel holdQ={holdQ} rawHoldings={rawHoldQ.data || {}} onTickerClick={t => setTickerModal(t)} />
+            </LockedPreview>
           </div>
 
           {/* B2: Sectors + Sector Performance */}
           <div className="border-b border-[#1e2d40] flex" style={{ height: '300px' }}>
             <div className="border-r border-[#1e2d40]" style={{ width: '50%' }}>
-              <SectorsPanel
-                sectorData={sectorQ.data || {}}
-                rawHoldings={rawHoldQ.data || {}}
-              />
+              <LockedPreview silent>
+                <SectorsPanel
+                  sectorData={sectorQ.data || {}}
+                  rawHoldings={rawHoldQ.data || {}}
+                />
+              </LockedPreview>
             </div>
             <div style={{ width: '50%' }}>
-              <SectorPerfPanel sectorTableQ={sectorTableQ} />
+              {/* 공개 데이터지만, 옆 칸(보유 비중)과 한 행이라 함께 흐리게 처리한다 */}
+              <LockedPreview silent>
+                <SectorPerfPanel sectorTableQ={sectorTableQ} />
+              </LockedPreview>
             </div>
           </div>
 
@@ -1988,7 +2192,11 @@ export default function AlphaTerminal() {
               ))}
             </div>
             <div className="p-4">
-              {botTab === 0 && earningsQ.data && (
+              {botTab === 0 && !holdTickers && (
+                <div className="py-6"><EmptyHoldings label="보유 종목 없음" /></div>
+              )}
+              {botTab === 0 && !!holdTickers && earningsQ.data && (
+                <LockedPreview silent>
                 <table className="w-full">
                   <thead>
                     <tr className="text-[#94a3b8] border-b border-[#1e2d40]">
@@ -2008,6 +2216,7 @@ export default function AlphaTerminal() {
                     ))}
                   </tbody>
                 </table>
+                </LockedPreview>
               )}
               {botTab === 1 && macroQ.data && (
                 <div className="grid grid-cols-3 gap-3">
@@ -2045,9 +2254,14 @@ export default function AlphaTerminal() {
             </div>
 
             <div className="flex-1 min-h-0 overflow-hidden">
-            {rightTab === 0 && <DailyBriefPanel />}
+            {rightTab === 0 && (
+              <LockedPreview silent>
+                <DailyBriefPanel />
+              </LockedPreview>
+            )}
 
             {rightTab === 1 && (
+              <LockedPreview silent>
               <div className="h-full flex flex-col overflow-hidden">
                 <div className="flex-shrink-0 flex items-center justify-between px-4 py-2.5 border-b border-[#1e2d40] bg-[#060b14]">
                   <div className="flex items-center gap-2">
@@ -2077,9 +2291,12 @@ export default function AlphaTerminal() {
                   )}
                 </div>
               </div>
+              </LockedPreview>
             )}
 
-            {rightTab === 2 && (
+            {rightTab === 2 && !holdTickers && <EmptyHoldings label="보유 종목 없음" />}
+            {rightTab === 2 && !!holdTickers && (
+              <LockedPreview silent>
               <div className="h-full overflow-y-auto divide-y divide-[#0f172a]">
                 {(newsQ.data || []).map((n, i) => (
                   <a key={i} href={n.url} target="_blank" rel="noreferrer"
@@ -2097,6 +2314,7 @@ export default function AlphaTerminal() {
                   </a>
                 ))}
               </div>
+              </LockedPreview>
             )}
           </div>
           </div>

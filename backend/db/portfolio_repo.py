@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
 
 from backend.db import get_conn, is_available
 
@@ -70,6 +70,83 @@ def save_holding(
                 )
     except Exception as e:
         logger.error(f"DB save_holding({ticker}) 실패: {e}")
+        raise
+
+
+@contextmanager
+def user_write_lock(user_id: str = "default"):
+    """사용자별 쓰기 직렬화 (PostgreSQL advisory lock).
+
+    보유·거래 변경은 전부 read-modify-write 다 (읽어서 계산한 뒤 절대값으로 덮어씀).
+    save_holding 은 `SET qty=EXCLUDED.qty` 라 원자적이지 않으므로, 동시에 들어온
+    두 매수가 같은 수량을 읽고 같은 값을 써서 한 건이 통째로 사라진다
+    (제출 버튼 더블클릭만으로 재현). 핸들러 전체를 사용자 단위로 직렬화한다.
+
+    락은 세션 단위이므로 획득·해제를 같은 커넥션에서 해야 한다.
+    DB 미연결이면 아무것도 하지 않는다 (단일 프로세스 폴백).
+    """
+    if not is_available():
+        yield
+        return
+
+    key = f"pfp:{user_id}"
+    conn = None
+    try:
+        import backend.db as _db
+        conn = _db._pool.getconn()          # type: ignore[union-attr]
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_lock(hashtext(%s))", (key,))
+    except Exception as e:
+        # 락을 못 잡아도 요청 자체는 처리한다 (가용성 우선). 경쟁 위험만 남는다.
+        logger.warning(f"user_write_lock({user_id}) 획득 실패 — 락 없이 진행: {e}")
+        if conn is not None:
+            try:
+                import backend.db as _db
+                _db._pool.putconn(conn)     # type: ignore[union-attr]
+            except Exception:
+                pass
+            conn = None
+
+    try:
+        yield
+    finally:
+        if conn is not None:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT pg_advisory_unlock(hashtext(%s))", (key,))
+            except Exception:
+                pass
+            try:
+                import backend.db as _db
+                _db._pool.putconn(conn)     # type: ignore[union-attr]
+            except Exception:
+                pass
+
+
+def update_holding_sector(ticker: str, sector: str, user_id: str = "default") -> bool:
+    """섹터만 갱신. 수량·평단은 건드리지 않는다.
+
+    /auto-sector 와 백그라운드 섹터 조회는 yfinance 응답을 수 초간 기다리는데,
+    그동안 사용자가 매매하면 save_holding 으로 스냅샷 전체를 되쓰면서 그 매매가
+    되돌아간다. 섹터만 UPDATE 하면 동시에 기록된 수량·평단이 보존된다.
+    행이 없으면(그사이 삭제됨) False — 삭제된 종목을 되살리지 않는다.
+    """
+    if not is_available():
+        logger.error(f"DB 미연결 — {ticker} 섹터 갱신 실패")
+        return False
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE holdings SET sector=%s, updated_at=NOW() "
+                    "WHERE user_id=%s AND ticker=%s",
+                    (sector or "Other", user_id, ticker),
+                )
+                return cur.rowcount > 0
+    except Exception as e:
+        logger.error(f"DB update_holding_sector({ticker}) 실패: {e}")
+        return False
 
 
 def delete_holding(ticker: str, user_id: str = "default", with_trades: bool = False):
@@ -91,6 +168,7 @@ def delete_holding(ticker: str, user_id: str = "default", with_trades: bool = Fa
                     )
     except Exception as e:
         logger.error(f"DB delete_holding({ticker}) 실패: {e}")
+        raise
 
 
 # ── Trade Log ──────────────────────────────────────────────────────────────────
@@ -200,6 +278,7 @@ def add_trade(record: dict, user_id: str = "default"):
                 )
     except Exception as e:
         logger.error(f"DB add_trade({record.get('ticker')}) 실패: {e}")
+        raise
 
 
 # ── Users ──────────────────────────────────────────────────────────────────────
@@ -239,3 +318,23 @@ def create_user(user_id: str, name: str, email: str = "") -> bool:
     except Exception as e:
         logger.error(f"DB create_user 실패: {e}")
         return False
+
+
+def wipe_portfolio(user_id: str) -> dict:
+    """사용자의 보유 종목과 거래 이력을 전부 삭제한다.
+
+    '포트폴리오 새로 등록하기' 전용이다. 종목을 하나씩 지우면 그 사이 상태가
+    반쯤 남아 잔고 계산이 어긋나므로, 한 트랜잭션에서 통째로 비운다.
+    """
+    if not is_available() or not user_id:
+        return {"holdings": 0, "trades": 0}
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM trade_log WHERE user_id=%s", (user_id,))
+            trades = cur.rowcount
+            cur.execute("DELETE FROM holdings WHERE user_id=%s", (user_id,))
+            holdings = cur.rowcount
+        return {"holdings": holdings, "trades": trades}
+    except Exception as e:
+        logger.error(f"wipe_portfolio({user_id}) 실패: {e}")
+        raise

@@ -9,17 +9,16 @@ from __future__ import annotations
 import json
 import re
 import threading
-import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
-from fastapi import APIRouter, Header, HTTPException
-from fastapi.responses import StreamingResponse
+from backend.services.auth import current_user
+from fastapi import Depends, APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
-from backend.models.macro import MacroAnalysisRequest, MacroAnalysisResponse
+from backend.models.macro import MacroAnalysisRequest
 from backend.services.ai_analysis import (
     run_macro_agents,
     parse_verdict_cards,
@@ -29,6 +28,7 @@ from backend.services.ai_analysis import (
     ANALYSIS_MODES,
     MODEL_OPTIONS,
 )
+from backend.services.job_store import JobStore
 from backend.db.reports_repo import save_report, list_reports, get_report_content
 from backend.services.market_data import (
     get_close_df,
@@ -43,23 +43,15 @@ router = APIRouter(prefix="/api/macro", tags=["macro"])
 
 # ── 백그라운드 분석 잡 스토어 ─────────────────────────────────────────────────
 # { job_id: { "status": "pending"|"done"|"error", "result"?: dict, "message"?: str, "_ts": float } }
-_jobs: dict[str, dict[str, Any]] = {}
-_jobs_lock = threading.Lock()
-_MAX_JOBS = 50  # 오래된 잡 자동 정리
+_store = JobStore(max_jobs=50)
 
 
-def _job_set(job_id: str, data: dict) -> None:
-    with _jobs_lock:
-        _jobs[job_id] = {**data, "_ts": time.time()}
-        if len(_jobs) > _MAX_JOBS:
-            oldest = min(_jobs, key=lambda k: _jobs[k]["_ts"])
-            del _jobs[oldest]
+def _job_set(job_id: str, data: dict, owner: str | None = None) -> None:
+    _store.set(job_id, data, owner=owner)
 
 
-def _job_get(job_id: str) -> dict | None:
-    with _jobs_lock:
-        j = _jobs.get(job_id)
-        return {k: v for k, v in j.items() if k != "_ts"} if j else None
+def _job_get(job_id: str, owner: str | None = None) -> dict | None:
+    return _store.get(job_id, owner=owner)
 
 
 _DATA_DIR = Path(__file__).parent.parent.parent / "pfp" / "data"
@@ -67,11 +59,12 @@ _DB_FILE  = _DATA_DIR / "holdings.json"
 _LOG_FILE = _DATA_DIR / "trade_log.json"
 
 
-def _load_holdings() -> dict:
+def _load_holdings(uid: str) -> dict:
+    """호출자 본인의 보유 종목. uid 는 검증된 토큰에서만 나온다."""
     from backend.db.portfolio_repo import get_holdings as _db_get_holdings
     from backend.db import is_available as _db_ok
     if _db_ok():
-        holdings = _db_get_holdings("default")
+        holdings = _db_get_holdings(uid)
         if holdings:
             return holdings
     if not _DB_FILE.exists():
@@ -93,7 +86,7 @@ def _load_trade_log() -> list:
 @router.post("/analyze")
 def analyze_macro(
     req: MacroAnalysisRequest,
-    x_user_id: Optional[str] = Header(default=None),
+    _auth: dict = Depends(current_user),
 ):
     """
     9-에이전트 거시경제 이벤트 분석 (백그라운드 잡).
@@ -104,23 +97,25 @@ def analyze_macro(
         raise HTTPException(status_code=400, detail="이벤트를 입력하세요.")
 
     job_id = str(uuid.uuid4())
-    _job_set(job_id, {"status": "pending"})
+    _job_set(job_id, {"status": "pending"}, owner=_auth["uid"])
 
     # 스레드에 전달할 값을 미리 캡처 (req 객체가 스레드 내에서 변경될 수 있으므로)
-    ev         = req.event
-    req_model  = req.model
-    req_mode   = req.mode
-    req_port   = req.portfolio
-    uid        = (x_user_id or "default").strip() or "default"
+    ev           = req.event
+    req_model    = req.model
+    req_mode     = req.mode
+    req_port     = req.portfolio
+    req_provider = req.provider if hasattr(req, "provider") else "claude"
+    uid          = _auth["uid"]
 
     def _run() -> None:
         try:
-            portfolio = req_port or _load_holdings()
+            portfolio = req_port or _load_holdings(uid)
             agent_results = run_macro_agents(
                 event=ev,
                 portfolio=portfolio,
                 model_key="sonnet" if "sonnet" in req_model else "haiku",
                 mode=req_mode,
+                provider=req_provider,
             )
 
             verdict_cards = None
@@ -141,12 +136,16 @@ def analyze_macro(
             date_str   = datetime.now().strftime("%Y%m%d_%H%M")
             event_slug = re.sub(r"[^\w가-힣]", "_", ev[:30]).strip("_")
             filename   = f"macro_{date_str}_{event_slug}.json"
+            # 매크로 시나리오는 **개인 전용**이다.
+            # 사용자가 입력한 이벤트/프롬프트에 종속된 결과라 다른 사용자와 공유할 수 없고,
+            # 프롬프트 내용 자체가 사생활일 수 있으므로 scope='private' 를 명시한다.
             save_report(
                 filename,
                 json.dumps(result, ensure_ascii=False),
                 report_type="macro_scenario",
                 metadata={"event": ev[:200], "mode": req_mode, "model": req_model},
                 user_id=uid,
+                scope="private",
             )
 
             current = _job_get(job_id)
@@ -164,18 +163,18 @@ def analyze_macro(
 
 
 @router.get("/job/{job_id}")
-def get_job_status(job_id: str):
-    """분석 잡 상태 조회. status: pending | done | error | cancelled"""
-    job = _job_get(job_id)
+def get_job_status(job_id: str, _auth: dict = Depends(current_user)):
+    """분석 잡 상태 조회 (본인 잡만). status: pending | done | error | cancelled"""
+    job = _job_get(job_id, owner=_auth["uid"])
     if job is None:
         raise HTTPException(status_code=404, detail="잡을 찾을 수 없습니다. 서버가 재시작됐을 수 있습니다.")
     return job
 
 
 @router.delete("/job/{job_id}")
-def cancel_job(job_id: str):
-    """실행 중인 분석 잡 취소."""
-    job = _job_get(job_id)
+def cancel_job(job_id: str, _auth: dict = Depends(current_user)):
+    """실행 중인 분석 잡 취소 (본인 잡만)."""
+    job = _job_get(job_id, owner=_auth["uid"])
     if job is None:
         raise HTTPException(status_code=404, detail="잡을 찾을 수 없습니다.")
     if job["status"] == "pending":
@@ -184,9 +183,9 @@ def cancel_job(job_id: str):
 
 
 @router.get("/reports")
-def list_macro_reports(x_user_id: Optional[str] = Header(default=None)):
+def list_macro_reports(_auth: dict = Depends(current_user)):
     """저장된 시나리오 레포트 목록 반환."""
-    uid = (x_user_id or "default").strip() or "default"
+    uid = _auth["uid"]
     rows = list_reports(uid, report_type="macro_scenario", limit=30)
     return [
         {
@@ -200,11 +199,11 @@ def list_macro_reports(x_user_id: Optional[str] = Header(default=None)):
 
 
 @router.get("/reports/{filename}")
-def get_macro_report(filename: str):
-    """특정 시나리오 레포트 내용 반환."""
+def get_macro_report(filename: str, _auth: dict = Depends(current_user)):
+    """특정 시나리오 레포트 내용 반환 (본인 또는 공용 리포트만)."""
     if not filename.startswith("macro_"):
         raise HTTPException(status_code=400, detail="잘못된 파일명")
-    content = get_report_content(filename)
+    content = get_report_content(filename, _auth["uid"])
     if content is None:
         raise HTTPException(status_code=404, detail="레포트를 찾을 수 없습니다.")
     try:
@@ -231,8 +230,12 @@ class LiveMetrics(BaseModel):
 
 
 @router.post("/analyst-feedback/auto")
-def analyst_feedback_auto(live: LiveMetrics = LiveMetrics()):
+def analyst_feedback_auto(
+    live: LiveMetrics = LiveMetrics(),
+    _auth: dict = Depends(current_user),
+):
     """포트폴리오 섹터 기반 AI 피드백 생성."""
+    uid = _auth["uid"]
     from backend.db.portfolio_repo import (
         get_holdings as _db_get_holdings,
         get_trade_log as _db_get_trade_log,
@@ -240,10 +243,10 @@ def analyst_feedback_auto(live: LiveMetrics = LiveMetrics()):
     from backend.db import is_available as _db_ok
 
     if _db_ok():
-        holdings  = _db_get_holdings("default")
-        trade_log = _db_get_trade_log("default")
+        holdings  = _db_get_holdings(uid)
+        trade_log = _db_get_trade_log(uid)
     else:
-        holdings  = _load_holdings()
+        holdings  = _load_holdings(uid)
         trade_log = _load_trade_log()
 
     if not holdings:
@@ -253,7 +256,13 @@ def analyst_feedback_auto(live: LiveMetrics = LiveMetrics()):
     close_df = get_close_df(tickers, period="5d", ttl=60)
 
     equity_curve = build_equity_curve(holdings, trade_log, close_df)
-    metrics      = calculate_metrics(holdings, close_df, equity_curve)
+    # raw_df(fill=False): 일변동률을 '마지막 두 실제 관측치'로 계산하도록 전달.
+    # 넘기지 않으면 에쿼티 커브 위치 차분으로 폴백해 유령 행에서 0%가 나온다.
+    raw_df = (
+        get_close_df(tickers, period="1mo", ttl=1800, include_market=False, fill=False)
+        if tickers else None
+    )
+    metrics = calculate_metrics(holdings, close_df, equity_curve, raw_df=raw_df)
 
     # 포트폴리오 보유 종목 섹터 비중 계산
     sector_weights: dict[str, float] = {}
@@ -304,9 +313,12 @@ def analyst_feedback_auto(live: LiveMetrics = LiveMetrics()):
 # ── 데일리 브리프 ─────────────────────────────────────────────────────────────
 
 @router.post("/daily-brief")
-def daily_brief(portfolio: Optional[dict] = None):
+def daily_brief(
+    portfolio: Optional[dict] = None,
+    _auth: dict = Depends(current_user),
+):
     """오늘의 포트폴리오 브리프 마크다운 생성 (Claude Sonnet)."""
-    holdings  = portfolio or _load_holdings()
+    holdings  = portfolio or _load_holdings(_auth["uid"])
     trade_log = _load_trade_log()
 
     if not holdings:

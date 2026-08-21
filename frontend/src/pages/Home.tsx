@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
-import { Monitor, Globe, Dice5, TrendingUp, Zap, BookOpen, Activity } from 'lucide-react'
+import { Monitor, Globe, TrendingUp, Zap, BookOpen, Activity } from 'lucide-react'
 import { getPortfolioMetrics } from '@/api'
 import { formatCurrency } from '@/lib/utils'
 
@@ -10,7 +10,7 @@ const MODULES = [
     icon: Monitor,
     color: '#00e6ff',
     label: 'ALPHA TERMINAL',
-    desc: ['yfinance 실시간 포트폴리오', '에쿼티 커브(정규화) + 섹터 도넛', '상관관계 히트맵 · AI 피드 · 뉴스', 'Daily Brief (Claude 웹서치) 내장'],
+    desc: ['실시간 포트폴리오', '에쿼티 커브(정규화) + 섹터 도넛', '상관관계 히트맵 · AI 피드 · 뉴스', 'Daily Brief 내장'],
     cta: 'OPEN TERMINAL →',
   },
   {
@@ -18,16 +18,8 @@ const MODULES = [
     icon: Globe,
     color: '#9b59b6',
     label: 'MACRO SCENARIO',
-    desc: ['9-에이전트 멀티 파이프라인', '이벤트 분석 → 투자 전략', '포트폴리오 액션 플랜 (JSON)', 'Claude Sonnet / Haiku 선택'],
+    desc: ['9-에이전트 멀티 파이프라인', '이벤트 분석 → 투자 전략', '포트폴리오 액션 플랜 (JSON)', '기본/심층 분석 선택'],
     cta: 'RUN SCENARIO →',
-  },
-  {
-    to: '/monte-carlo',
-    icon: Dice5,
-    color: '#f59e0b',
-    label: 'MONTE CARLO',
-    desc: ['10,000회 시뮬레이션', '매크로 외생변수 충격 6개', '목표 달성 확률 수치화', 'Jump-Diffusion 패닉 클러스터링'],
-    cta: 'RUN SIMULATION →',
   },
   {
     to: '/optimizer',

@@ -1,0 +1,113 @@
+"""
+services/cash_ledger.py
+───────────────────────
+현금 잔고 조정 + 거래 이력 재생.
+
+매수·매도·입출금이 현금과 보유 수량에 미치는 영향을 한 곳에 모았다.
+규칙이 바뀌면 이 파일만 보면 된다.
+"""
+from __future__ import annotations
+
+from backend.db.portfolio_repo import (
+    get_holdings, save_holding, delete_holding, get_trade_log,
+)
+
+
+def _cash_event_delta(trade_type: str, q: float) -> float:
+    """CASH 입출금 이벤트의 잔고 변화량. DEPOSIT → +q, WITHDRAW → -q."""
+    t = str(trade_type).upper()
+    if t == "DEPOSIT":
+        return +abs(q)
+    if t == "WITHDRAW":
+        return -abs(q)
+    return 0.0
+
+
+
+def _revert_cash_event(uid: str, trade_type: str, q: float) -> None:
+    """삭제된 CASH 입출금 이벤트를 잔고에서 되돌린다."""
+    d = _cash_event_delta(trade_type, q)
+    if d:
+        _adjust_cash(uid, -d)
+
+
+
+def _cash_delta(trade_type: str, q: float, price: float) -> float:
+    """거래 유형에 따른 현금 변화량 반환. BUY → 음수(차감), SELL → 양수(증가)."""
+    t = trade_type.upper()
+    if t in ("ADD", "BUY"):
+        return -(q * price)
+    if t in ("SOLD", "SELL"):
+        return +(q * price)
+    return 0.0
+
+
+
+def _adjust_cash(uid: str, delta: float) -> None:
+    """CASH 잔고에 delta를 가감. 잔고가 없으면 delta > 0일 때만 생성.
+
+    max(0, ...) 로 클램프하지 않는다 — 잔고보다 큰 매수를 0으로 잘라내면
+    차감되지 못한 금액이 조용히 사라지고, 나중에 그 종목을 매도할 때는
+    전액이 다시 입금돼 없던 현금이 생긴다. 음수 잔고는 그대로 보여주는 편이
+    입력 오류를 드러내므로 안전하다.
+    """
+    if abs(delta) < 0.001:
+        return
+    holdings_ = get_holdings(uid)
+    cash_h = holdings_.get("CASH")
+    if cash_h is None:
+        if delta > 0:
+            save_holding("CASH", round(delta, 2), 1.0, "Cash", uid)
+        return
+    cur = float(cash_h.get("q", 0)) if isinstance(cash_h, dict) else float(cash_h or 0)
+    save_holding("CASH", round(cur + delta, 2), 1.0, "Cash", uid)
+
+
+
+def _recalculate_holding_from_trades(ticker: str, uid: str) -> None:
+    """거래 기록 전체를 재생해 보유 수량·단가를 재계산. 수량 0이면 삭제.
+    CASH는 _adjust_cash로 별도 처리."""
+    if ticker.upper() == "CASH":
+        return
+    ticker = ticker.upper()
+    # 티커 비교는 대소문자 무시 — 다른 경로가 소문자로 저장했더라도 재생에서 누락되면
+    # 수량이 0으로 계산돼 멀쩡한 보유 종목이 삭제된다.
+    trades = sorted(
+        [t for t in get_trade_log(uid) if str(t.get("ticker", "")).upper() == ticker],
+        key=lambda t: (t.get("date", ""), t.get("id", 0)),
+    )
+    # 거래 이력이 아예 없는 종목은 직접 등록된 보유분이다 (POST /holdings/{ticker}).
+    # 재생 결과 0 이라고 삭제해버리면 사용자가 입력한 보유가 사라진다.
+    if not trades:
+        return
+
+    qty        = 0.0
+    total_cost = 0.0
+
+    for tr in trades:
+        q     = float(tr.get("q") or 0)
+        price = float(tr.get("price") or 0)
+        ttype = tr.get("type", "")
+        if ttype in ("ADD", "BUY"):
+            total_cost += price * q
+            qty        += q
+        elif ttype in ("SOLD", "SELL"):
+            if qty > 0:
+                ratio      = min(q, qty) / qty
+                total_cost = total_cost * (1.0 - ratio)
+            qty = max(0.0, qty - q)
+        elif ttype == "UPDATE":
+            qty = q   # avg 는 그대로 유지
+
+    holdings = get_holdings(uid)
+    existing = holdings.get(ticker, {})
+    sector   = existing.get("sector", "Other")
+
+    qty = round(qty, 6)
+    if qty <= 0:
+        delete_holding(ticker, uid)
+    else:
+        avg = round(total_cost / qty, 4) if qty > 0 else 0.0
+        save_holding(ticker, qty, avg, sector, uid)
+
+

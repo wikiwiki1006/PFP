@@ -1,12 +1,13 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import Layout from './components/Layout'
+import { AuthProvider } from './lib/AuthContext'
 import AlphaTerminal from './pages/AlphaTerminal'
 import MacroScenario from './pages/MacroScenario'
-import MonteCarlo from './pages/MonteCarlo'
 import Optimizer from './pages/Optimizer'
 import TimingEngine from './pages/TimingEngine'
 import LensReport from './pages/LensReport'
+import KakaoCallback from './pages/KakaoCallback'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -21,19 +22,29 @@ const queryClient = new QueryClient({
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<Layout />}>
-            <Route index element={<Navigate to="/terminal" replace />} />
-            <Route path="terminal" element={<AlphaTerminal />} />
-            <Route path="macro" element={<MacroScenario />} />
-            <Route path="monte-carlo" element={<MonteCarlo />} />
-            <Route path="optimizer" element={<Optimizer />} />
-            <Route path="timing" element={<TimingEngine />} />
-            <Route path="lens" element={<LensReport />} />
-          </Route>
-        </Routes>
-      </BrowserRouter>
+      {/* AuthProvider 가 QueryClient 안쪽에 있어야 로그아웃 시 캐시를 비울 수 있다. */}
+      <AuthProvider>
+        <BrowserRouter>
+          <Routes>
+            {/* 카카오 OAuth 착지점 — 팝업 안에서만 열리므로 레이아웃 밖에 둔다 */}
+            <Route path="/auth/kakao/callback" element={<KakaoCallback />} />
+
+            <Route path="/" element={<Layout />}>
+              <Route index element={<Navigate to="/terminal" replace />} />
+
+              {/* 개인 데이터가 섞인 화면 — 페이지 전체를 막지 않고, 개인 패널만
+                  예시 데이터 + 흐림 처리로 미리보기를 제공한다 (LockedPreview). */}
+              <Route path="terminal" element={<AlphaTerminal />} />
+              <Route path="macro" element={<MacroScenario />} />
+              <Route path="optimizer" element={<Optimizer />} />
+              <Route path="lens" element={<LensReport />} />
+
+              {/* 공개 시장 데이터 */}
+              <Route path="timing" element={<TimingEngine />} />
+            </Route>
+          </Routes>
+        </BrowserRouter>
+      </AuthProvider>
     </QueryClientProvider>
   )
 }

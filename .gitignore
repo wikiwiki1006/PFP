@@ -60,3 +60,12 @@ frontend/.env.local
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# ── 일회성 DB 복구 백업 (repair_market_prices.py 생성) ─────────────────────────
+backend/scripts/backup_market_prices_*.csv
+
+# 서비스 계정 키 — 절대 커밋 금지
+secrets/
+
+# Firebase CLI 배포 캐시
+.firebase/

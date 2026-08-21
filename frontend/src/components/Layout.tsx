@@ -1,11 +1,11 @@
 import { NavLink, Outlet } from 'react-router-dom'
-import { Monitor, Globe, Dice5, TrendingUp, Zap, BookOpen } from 'lucide-react'
+import { Monitor, Globe, TrendingUp, Zap, BookOpen } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import UserMenu from './auth/UserMenu'
 
 const navItems = [
   { to: '/terminal',    icon: Monitor,    label: '포토폴리오', sub: 'Portfolio HQ + Brief' },
   { to: '/macro',       icon: Globe,      label: '시장 시나리오',sub: '9-Agent Pipeline' },
-  { to: '/monte-carlo', icon: Dice5,      label: 'MONTE CARLO',   sub: 'Simulations' },
   { to: '/optimizer',   icon: TrendingUp, label: '포토폴리오 최적화',     sub: 'Portfolio Opt' },
   { to: '/timing',      icon: Zap,        label: '트레이딩 신호', sub: 'Trade Signals' },
   { to: '/lens',        icon: BookOpen,   label: 'LENS REPORT',   sub: 'AI Research' },
@@ -67,9 +67,15 @@ export default function Layout() {
       </aside>
 
       {/* Main Content */}
-      <main className="flex-1 overflow-y-auto">
-        <Outlet />
-      </main>
+      <div className="flex-1 flex flex-col min-w-0">
+        {/* Top bar — 계정 영역 */}
+        <header className="h-12 flex-shrink-0 flex items-center justify-end gap-3 px-4 border-b border-[#1e2d40] bg-[#060b14]">
+          <UserMenu />
+        </header>
+        <main className="flex-1 overflow-y-auto">
+          <Outlet />
+        </main>
+      </div>
     </div>
   )
 }

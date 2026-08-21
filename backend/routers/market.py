@@ -17,8 +17,7 @@ from backend.services.market_data import (
     get_portfolio_news,
     get_earnings_dividends,
     get_market_snapshot,
-    ALWAYS_FETCH,
-)
+    )
 
 router = APIRouter(prefix="/api/market", tags=["market"])
 

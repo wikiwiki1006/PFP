@@ -24,6 +24,7 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 
 ANTHROPIC_API_KEY  = os.getenv("ANTHROPIC_API_KEY", "")
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "")
+GPT_API_KEY        = os.getenv("GPT_API_KEY", "")
 TODAY = datetime.now().strftime("%Y년 %m월 %d일")
 CONTEXT_CHAR_LIMIT   = 3200   # 20% 절감
 PHASE2_CONTEXT_LIMIT = 8000   # 20% 절감
@@ -66,18 +67,18 @@ def gather_yfinance_market_data() -> str:
 
         PRICE_TICKERS: list[tuple[str, str, str, str]] = [
             ("^GSPC",    "S&P 500",          ",.0f",  ""),
-            ("^DJI",     "다우존스",           ",.0f",  ""),
+            ("^DJI",     "Dow Jones",        ",.0f",  ""),
             ("^IXIC",    "Nasdaq",            ",.0f",  ""),
             ("^RUT",     "Russell 2000",      ",.0f",  ""),
             ("^KS11",    "KOSPI",             ",.0f",  ""),
             ("^N225",    "Nikkei 225",        ",.0f",  ""),
-            ("^VIX",     "VIX 공포지수",      ".2f",   ""),
+            ("^VIX",     "VIX",              ".2f",   ""),
             ("^TNX",     "미국 10년물 금리",   ".3f",   "%"),
             ("^IRX",     "미국 3개월물 금리",  ".3f",   "%"),
-            ("DX-Y.NYB", "달러인덱스(DXY)",   ".2f",   ""),
+            ("DX-Y.NYB", "DXY",              ".2f",   ""),
             ("USDKRW=X", "USD/KRW",           ",.0f",  "원"),
             ("USDJPY=X", "USD/JPY",           ".2f",   "엔"),
-            ("CL=F",     "WTI 원유",          ".2f",   "$/bbl"),
+            ("CL=F",     "WTI Crude",        ".2f",   "$/bbl"),
             ("GC=F",     "금(Gold)",          ",.0f",  "$/oz"),
             ("BTC-USD",  "Bitcoin",           ",.0f",  "$"),
         ]
@@ -93,7 +94,7 @@ def gather_yfinance_market_data() -> str:
         all_sector_tickers = [t for t, _ in SECTOR_TICKERS]
         all_tickers = all_price_tickers + all_sector_tickers
 
-        lines = [f"【현재 시장 지표 — yfinance】  기준: {TODAY}"]
+        lines = [f"[Current market data — yfinance] as of {TODAY}"]
         cur_price:  dict[str, float] = {}
         prev_price: dict[str, float] = {}
         data_source = ""
@@ -154,11 +155,11 @@ def gather_yfinance_market_data() -> str:
                 pass
 
         if not cur_price:
-            lines.append("  ⚠️ 시장 가격 데이터 수집 실패 — 네트워크 오류 또는 DB 미초기화")
+            lines.append("  (market price data unavailable — network error or DB not ready)")
         else:
-            lines.append(f"  (데이터 출처: {data_source})")
+            lines.append(f"  (source: {data_source})")
             lines.append("")
-            lines.append("  [주요 지수 및 자산]")
+            lines.append("  [Indices & assets]")
             for t, name, fmt, unit in PRICE_TICKERS:
                 c = cur_price.get(t)
                 p = prev_price.get(t)
@@ -166,12 +167,12 @@ def gather_yfinance_market_data() -> str:
                     continue
                 try:
                     chg = (c / p - 1) * 100 if p else 0.0
-                    lines.append(f"  {name}: {c:{fmt}}{unit} (전일비 {chg:+.2f}%)")
+                    lines.append(f"  {name}: {c:{fmt}}{unit} ({chg:+.2f}% d/d)")
                 except Exception:
                     lines.append(f"  {name}: {c:{fmt}}{unit}")
 
             lines.append("")
-            lines.append("  [섹터 ETF 전일 등락률]")
+            lines.append("  [Sector ETF 1d change]")
             for t, name in SECTOR_TICKERS:
                 c = cur_price.get(t)
                 p = prev_price.get(t)
@@ -188,13 +189,13 @@ def gather_yfinance_market_data() -> str:
             fred = get_fred_macro(ttl=3600)
             if fred.get("source") != "fallback":
                 lines.append("")
-                lines.append("【FRED 거시경제 지표】")
-                lines.append(f"  연방기금금리: {fred['fed_rate']:.2f}%")
-                lines.append(f"  실업률: {fred['unemployment']:.1f}%")
-                lines.append(f"  CPI(전년비): {fred['cpi']:.1f}%")
-                lines.append(f"  GDP 성장률(최근분기): {fred['gdp']:.1f}%")
-                lines.append(f"  10Y-2Y 금리차: {fred['t10y2y']:+.3f}%p")
-                lines.append(f"  HY 스프레드: {fred['bamlh0a0hym2']:.0f}bp")
+                lines.append("[FRED macro indicators]")
+                lines.append(f"  Fed funds: {fred['fed_rate']:.2f}%")
+                lines.append(f"  Unemployment: {fred['unemployment']:.1f}%")
+                lines.append(f"  CPI YoY: {fred['cpi']:.1f}%")
+                lines.append(f"  GDP growth (latest qtr): {fred['gdp']:.1f}%")
+                lines.append(f"  10Y-2Y spread: {fred['t10y2y']:+.3f}pp")
+                lines.append(f"  HY spread: {fred['bamlh0a0hym2']:.0f}bp")
         except Exception:
             pass
 
@@ -234,15 +235,18 @@ def _call_perplexity(prompt: str, max_tokens: int = 1200) -> str:
 def gather_perplexity_context(ev: str) -> str:
     """Perplexity로 이벤트 관련 최신 뉴스·전문가 코멘트만 수집.
     시장 수치는 yfinance에서 별도로 가져오므로 여기서는 서사·뉴스만 요청한다."""
-    prompt = f"""오늘 날짜: {TODAY}
-분석 이벤트: {ev}
+    # 영어로 수집 — 이 텍스트는 그대로 Claude 입력이 되며, 같은 내용도
+    # 한국어는 영어의 약 3배 토큰을 쓴다 (실측 2,308 → 791).
+    prompt = f"""Today: {TODAY}
+Event to analyze: {ev}
 
-아래 정보를 한국어로 수집해주세요. 수치(지수 레벨·금리)는 적지 말고 뉴스와 코멘트 위주로 작성하세요.
+Collect the following **in English**, concise bullet points.
+Do NOT quote index levels or rates — narrative and commentary only.
 
-【이벤트 관련 최신 뉴스 (최근 48시간)】
-- 주요 언론 보도 3~5건 (제목·출처·날짜·핵심 요약 각 1문장)
-- 골드만삭스·모건스탠리 등 투자은행·분석가 코멘트 (있을 경우)
-- 이 이벤트로 직접 영향을 받은 자산·국가·기업 (시장 서사 위주)"""
+[Latest news on this event, last 48 hours]
+- 3-5 major press items (title, source, date, one-sentence summary each)
+- Sell-side commentary (Goldman, Morgan Stanley, etc.) if available
+- Assets, countries and companies directly affected (market narrative)"""
     return _call_perplexity(prompt, max_tokens=1200)
 
 
@@ -254,7 +258,7 @@ def gather_context(ev: str) -> str:
     parts = [market_data]
     if news_data.strip():
         parts.append("")
-        parts.append("【이벤트 관련 최신 뉴스·전문가 코멘트 (Perplexity)】")
+        parts.append("[Latest news & expert commentary — Perplexity]")
         parts.append(news_data)
 
     return "\n".join(parts)
@@ -262,13 +266,85 @@ def gather_context(ev: str) -> str:
 
 # ── Claude: 분석·출력 전담 ────────────────────────────────────────────────────
 
+# 지시는 영어, 출력은 한국어 — 토큰을 아끼면서 사용자 화면은 그대로 유지한다.
 _CLAUDE_SYSTEM = (
-    "각 섹션을 완전하게 작성하되 토큰 한도 내에서 자연스럽게 마무리하세요. "
-    "전체 분량을 섹션별로 고르게 배분해 마지막 섹션도 완결된 문장으로 끝내세요. "
-    "⚠️ 사용자가 입력한 이벤트는 실제로 발생한 사실이 아닌 가상 시나리오(Virtual Scenario)입니다. "
-    "'만약 이러한 상황이 발생한다면'의 조건부 관점에서 분석하고, "
-    "실제 시장 수치(지수·금리 등)는 제공된 yfinance 데이터를 사용하세요."
+    "**Write your entire answer in Korean.** These instructions are in English only.\n"
+    "Complete every section, finishing naturally within the token limit. "
+    "Spread the length evenly across sections so the last one also ends in a complete sentence.\n"
+    "IMPORTANT: the user's event is a HYPOTHETICAL scenario, not a reported fact. "
+    "Analyze it conditionally (\"if this were to happen\"). "
+    "For real market figures (index levels, rates), use the provided yfinance data."
 )
+
+
+_GPT_URL = "https://api.openai.com/v1/chat/completions"
+_GPT_HEADERS = lambda: {
+    "Authorization": f"Bearer {GPT_API_KEY}",
+    "Content-Type": "application/json",
+}
+
+
+def call_gpt(prompt: str, max_tokens: int, perplexity_ctx: str = "") -> str:
+    """OpenAI GPT REST API 호출. openai 패키지 불필요."""
+    if not GPT_API_KEY:
+        return "[GPT API 키 없음 — .env에 GPT_API_KEY 추가 필요]"
+    full_prompt = (
+        f"[시장 데이터·뉴스 — 분석에 활용하세요]\n{perplexity_ctx}\n\n---\n\n{prompt}"
+        if perplexity_ctx else prompt
+    )
+    messages = [
+        {"role": "system", "content": _CLAUDE_SYSTEM},
+        {"role": "user",   "content": full_prompt},
+    ]
+    payload = {
+        "model": "gpt-5-mini",
+        "messages": messages,
+        "max_completion_tokens": max_tokens,
+        "temperature": 1,
+    }
+    try:
+        resp = requests.post(_GPT_URL, json=payload, headers=_GPT_HEADERS(), timeout=180)
+        if not resp.ok:
+            return f"[GPT 오류: {resp.status_code} — {resp.text[:300]}]"
+        data = resp.json()
+        choices = data.get("choices", [])
+        if not choices:
+            return "[GPT 응답 없음]"
+        msg_obj = choices[0].get("message", {})
+        text = msg_obj.get("content", "") or ""
+        if not text:
+            import json as _json
+            fr = choices[0].get("finish_reason", "unknown")
+            refusal = msg_obj.get("refusal") or ""
+            print(f"[GPT DEBUG] content empty. finish_reason={fr} "
+                  f"refusal={refusal[:200]} message_keys={list(msg_obj.keys())} "
+                  f"usage={data.get('usage')} raw={_json.dumps(choices[0], ensure_ascii=False)[:600]}")
+            if refusal:
+                return f"[GPT 거부 응답: {refusal[:300]}]"
+            return f"[GPT 빈 응답 — finish_reason: {fr}]"
+        # 토큰 한도로 잘린 경우: 끊긴 마지막 문장만 완성
+        if choices[0].get("finish_reason") == "length" and text.strip():
+            try:
+                fix_payload = {**payload, "messages": messages + [
+                    {"role": "assistant", "content": text},
+                    {"role": "user", "content": (
+                        "위 텍스트가 토큰 한도로 중간에 끊겼습니다. "
+                        "끊긴 마지막 문장만 한두 문장으로 자연스럽게 완성해 주세요. "
+                        "새 섹션이나 추가 내용은 쓰지 마세요."
+                    )},
+                ], "max_completion_tokens": 200}
+                fix_resp = requests.post(_GPT_URL, json=fix_payload, headers=_GPT_HEADERS(), timeout=60)
+                if fix_resp.ok:
+                    fix_choices = fix_resp.json().get("choices", [])
+                    if fix_choices:
+                        tail = fix_choices[0].get("message", {}).get("content", "") or ""
+                        if tail.strip():
+                            text += tail
+            except Exception:
+                pass
+        return text
+    except Exception as exc:
+        return f"[GPT 오류: {exc}]"
 
 
 def call_claude(prompt: str, model: str, max_tokens: int, perplexity_ctx: str = "") -> str:
@@ -291,18 +367,19 @@ def call_claude(prompt: str, model: str, max_tokens: int, perplexity_ctx: str = 
 
     # 토큰 한도로 잘린 경우: 끊긴 마지막 문장만 완성
     if msg.stop_reason == "max_tokens" and text.strip():
+        # 끊긴 문장을 잇는 데 원본 프롬프트 전체를 되보낼 이유가 없다.
+        # 예전 방식은 출력 80~200 토큰을 얻으려고 입력 3~4천 토큰을 썼다.
         try:
             fix = client.messages.create(
                 model=model,
                 max_tokens=200,
-                system=_CLAUDE_SYSTEM,
                 messages=[
-                    {"role": "user",      "content": full_prompt},
-                    {"role": "assistant", "content": text},
-                    {"role": "user",      "content": (
-                        "위 텍스트가 토큰 한도로 중간에 끊겼습니다. "
-                        "끊긴 마지막 문장만 한두 문장으로 자연스럽게 완성해 주세요. "
-                        "새 섹션이나 추가 내용은 쓰지 마세요."
+                    {"role": "user", "content": (
+                        "Below is the tail of a Korean analysis that was cut off mid-sentence "
+                        "by a token limit. Write ONLY the few words or one sentence needed to "
+                        "finish that last incomplete sentence naturally, in Korean. "
+                        "Do not repeat the text, do not add new sections or headings.\n\n"
+                        f"---\n{text[-600:]}"
                     )},
                 ],
             )
@@ -384,29 +461,29 @@ def _build_agents(
 1~2문장으로, 지금 상황에 어떻게 적용할 수 있는지""",
         },
         {
-            "id": 3, "label": "시장 반응 전망", "max_tokens": 950, "inject_perplexity": True,
-            "prompt": f"""당신은 시장 분석가입니다. 오늘: {TODAY}
+            "id": 3, "label": "시장 반응 전망", "max_tokens": 1500, "inject_perplexity": True,
+            "prompt": f"""당신은 거시경제 리서치 전문가입니다. 오늘: {TODAY}
 이벤트: {ev}
 앞선 분석: {prev}
 
-위에 제공된 시장 지표와 뉴스 데이터를 바탕으로 한국어로 분석하세요.
+제공된 시장 지표와 뉴스 데이터를 참고해, 이 시나리오가 발생할 경우 시장에 어떤 영향을 줄 수 있는지 한국어로 분석하세요.
 
 ## 📈 현재 시장 출발점
-제공된 데이터에서 S&P500, KOSPI, VIX, 금리, 환율 현재값 정리
+제공된 데이터 기준 S&P500, KOSPI, VIX, 금리, 환율 현황 정리
 
-## ⏱️ 단기 반응 (지금~4주)
-- 주식시장이 어느 범위에서 움직일지
-- 달러, 금, 금리 방향
-- VIX(공포지수)가 얼마나 오를지
+## ⏱️ 단기 영향 분석 (이벤트 후 4주)
+- 주식시장에 미칠 수 있는 영향 및 리스크 요인
+- 달러·금·금리 등 안전자산 수요 변화 가능성
+- 시장 변동성(VIX) 변화 요인 분석
 
-## 📅 중기 흐름 (1~3개월)
-반등 가능성과 조건, 계속 하락하는 시나리오
+## 📅 중기 시나리오 (1~3개월)
+안정화 조건과 추가 하락 요인을 시나리오별로 구분해 분석
 
-## 🔭 장기 방향 (3~12개월)
-구조적으로 어느 방향으로 가는지
+## 🔭 장기 구조적 영향 (3~12개월)
+이 이벤트가 거시경제 구조에 미치는 중장기 함의
 
-## 🔄 이런 이벤트 때 반복되는 패턴 2가지
-과거에 이런 상황에서 항상 나타났던 현상을 쉽게 설명""",
+## 🔄 유사 과거 사례 패턴 2가지
+역사적으로 비슷한 상황에서 반복된 시장 패턴을 쉽게 설명""",
         },
         {
             "id": 4, "label": "섹터 영향 분석", "max_tokens": 1150, "inject_perplexity": False,
@@ -580,7 +657,7 @@ def _format_portfolio(holdings: dict) -> str:
         if t == "CASH":
             lines.append(f"CASH: ${info['q']:,.0f}")
         else:
-            lines.append(f"{t}: {info['q']}주 @ avg ${info['avg']:,.2f} (섹터: {info.get('sector', '-')})")
+            lines.append(f"{t}: {info['q']} sh @ avg ${info['avg']:,.2f} (sector: {info.get('sector', '-')})")
     return "\n".join(lines)
 
 
@@ -603,6 +680,7 @@ def _run_parallel_agents(
     portfolio_str: str,
     model_key: str,
     perplexity_ctx: str,
+    provider: str = "claude",
 ) -> dict[int, tuple[str, float]]:
     """Phase 1: 선택된 에이전트를 컨텍스트 없이 병렬 실행."""
     all_agents = _build_agents(ev, portfolio_str, prev_results=[])
@@ -613,9 +691,18 @@ def _run_parallel_agents(
     def _call(ag: dict):
         t0 = time.time()
         try:
-            model = _resolve_model(ag["id"], model_key)
-            ctx = perplexity_ctx if ag.get("inject_perplexity") else ""
-            text = call_claude(ag["prompt"], model, ag["max_tokens"], perplexity_ctx=ctx)
+            if provider == "gpt":
+                # GPT는 항상 전체 컨텍스트(yfinance+뉴스)를 주입해 데이터 누락 방지
+                # GPT-5.6 Sol은 reasoning 모델이라 내부 추론 토큰이 max_completion_tokens에 포함됨
+                # → 에이전트 토큰 예산을 4× 확장해 출력 공간을 확보 (최소 4000)
+                # gpt-5-mini도 reasoning 토큰 소비 — 3× (min 4000)으로 출력 여유 확보.
+                # Agent 6은 4000 캡 (전략 에이전트, 간결한 출력 선호).
+                gpt_tokens = 4000 if ag["id"] == 6 else max(4000, ag["max_tokens"] * 3)
+                text = call_gpt(ag["prompt"], gpt_tokens, perplexity_ctx=perplexity_ctx)
+            else:
+                ctx = perplexity_ctx if ag.get("inject_perplexity") else ""
+                model = _resolve_model(ag["id"], model_key)
+                text = call_claude(ag["prompt"], model, ag["max_tokens"], perplexity_ctx=ctx)
             return ag["id"], text, time.time() - t0
         except Exception as exc:
             return ag["id"], f"[오류: {exc}]", time.time() - t0
@@ -636,6 +723,7 @@ def _run_contextual_agents(
     model_key: str,
     context_texts: list[str],
     perplexity_ctx: str,
+    provider: str = "claude",
 ) -> dict[int, tuple[str, float]]:
     """Phase 2: Phase 1 결과를 컨텍스트로 받아 순차 실행 (agents 8, 9)."""
     all_agents = _build_agents(ev, portfolio_str, prev_results=context_texts,
@@ -649,9 +737,13 @@ def _run_contextual_agents(
         ag = agent_map[ag_id]
         t0 = time.time()
         try:
-            model = _resolve_model(ag_id, model_key)
-            ctx = perplexity_ctx if ag.get("inject_perplexity") else ""
-            text = call_claude(ag["prompt"], model, ag["max_tokens"], perplexity_ctx=ctx)
+            if provider == "gpt":
+                gpt_tokens = max(4000, ag["max_tokens"] * 3)
+                text = call_gpt(ag["prompt"], gpt_tokens, perplexity_ctx=perplexity_ctx)
+            else:
+                ctx = perplexity_ctx if ag.get("inject_perplexity") else ""
+                model = _resolve_model(ag_id, model_key)
+                text = call_claude(ag["prompt"], model, ag["max_tokens"], perplexity_ctx=ctx)
         except Exception as exc:
             text = f"[오류: {exc}]"
         results[ag_id] = (text, round(time.time() - t0, 2))
@@ -664,12 +756,17 @@ def run_macro_agents(
     portfolio: dict,
     model_key: str = "sonnet",
     mode: str = "fast",
+    provider: str = "claude",  # 무시됨 — 항상 Claude 사용
 ) -> list[dict]:
     """
-    Perplexity로 실시간 정보 수집 → Claude로 2단계 분석.
+    기본 분석(model_key=haiku): Claude Haiku (전체 에이전트)
+    심층 분석(model_key=sonnet): 에이전트 티어에 따라 Haiku/Sonnet 자동 분기 (_AGENT_MODEL_TIER)
     Phase 1 (id ≤ 7): 병렬 독립 분석
     Phase 2 (id > 7): Phase 1 전체 결과를 컨텍스트로 순차 종합
     """
+    effective_provider  = "claude"
+    effective_model_key = model_key  # haiku → 전체 Haiku; sonnet → _AGENT_MODEL_TIER 분기
+
     selected_ids = ANALYSIS_MODES.get(mode, ANALYSIS_MODES["fast"])
     portfolio_str = _format_portfolio(portfolio)
 
@@ -682,7 +779,7 @@ def run_macro_agents(
 
     if phase1_ids:
         all_results.update(
-            _run_parallel_agents(phase1_ids, event, portfolio_str, model_key, perplexity_ctx)
+            _run_parallel_agents(phase1_ids, event, portfolio_str, effective_model_key, perplexity_ctx, effective_provider)
         )
 
     if phase2_ids:
@@ -691,7 +788,7 @@ def run_macro_agents(
             if i in all_results and not all_results[i][0].startswith("[오류")
         ]
         all_results.update(
-            _run_contextual_agents(phase2_ids, event, portfolio_str, model_key, p1_texts, perplexity_ctx)
+            _run_contextual_agents(phase2_ids, event, portfolio_str, effective_model_key, p1_texts, perplexity_ctx, effective_provider)
         )
 
     all_agents = _build_agents(event, portfolio_str)
@@ -804,7 +901,7 @@ def get_ai_analyst_feedback(
 
 출력은 텍스트 1~2문장만, 따옴표나 마크다운 없이."""
 
-    return call_claude(prompt, "claude-haiku-4-5-20251001", 200)
+    return call_claude(prompt, MODEL_OPTIONS["haiku"], 1200)
 
 
 # ── 데일리 브리프 생성 ────────────────────────────────────────────────────────
@@ -815,7 +912,7 @@ def generate_daily_brief(
     macro_data: dict,
     news_items: list[dict],
 ) -> str:
-    """Claude Sonnet으로 월가 스타일 데일리 브리프 마크다운 생성."""
+    """Claude Haiku로 월가 스타일 데일리 브리프 마크다운 생성."""
     if not ANTHROPIC_API_KEY:
         return "ANTHROPIC_API_KEY 미설정"
 
@@ -866,4 +963,4 @@ def generate_daily_brief(
 ---
 *본 브리프는 AI 자동 생성 참고용으로, 투자 조언이 아닙니다.*"""
 
-    return call_claude(prompt, "claude-haiku-4-5-20251001", 1200)
+    return call_claude(prompt, MODEL_OPTIONS["haiku"], 1200)

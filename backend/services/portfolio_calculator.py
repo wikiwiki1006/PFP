@@ -21,74 +21,52 @@ def _safe(v, default: float = 0.0) -> float:
         return default
 
 
+def _trim_to_us_session(close_df: pd.DataFrame) -> pd.DataFrame:
+    """가격 프레임을 **미국 거래일 기준**으로 정리한다.
+
+    예전에는 서버 로컬(KST) 의 오늘 날짜로 인덱스를 연장했다.
+    KST 오전은 미국 기준 전날 밤이라, 한국 시각 8/5 오전에 8/5 행이 생기고
+    거기에 8/4 종가가 ffill 로 복사된다 → 그래프 마지막 점이 하루 앞당겨진
+    가짜 보합 구간으로 보인다 (사용자가 본 '하루씩 밀린' 증상).
+
+    규칙
+      · 장중(09:30~16:00 ET) → 오늘(ET)까지 인정. 실시간 가격이 주입돼 있다.
+      · 그 외              → 마지막으로 종가가 확정된 거래일까지만.
+      · 목표 날짜를 넘는 행은 잘라낸다. 목표 날짜가 비어 있어도 새로 만들지 않는다
+        (없는 거래일을 ffill 로 채우면 가짜 보합이 다시 생긴다).
+    """
+    if close_df.empty:
+        return close_df
+    try:
+        from backend.services.market_calendar import (
+            is_us_market_open, last_completed_session, now_et,
+        )
+        target = pd.Timestamp(
+            now_et().date() if is_us_market_open() else last_completed_session()
+        )
+    except Exception:
+        return close_df
+
+    if not isinstance(close_df.index, pd.DatetimeIndex):
+        return close_df
+    return close_df[close_df.index.normalize() <= target]
+
+
+def _price_or_cost(price, cost: float) -> float:
+    """시세가 없으면 취득원가로 대체 평가.
+
+    보유 중인 종목의 그날 시세가 NaN 이라고 0원으로 평가하면 에쿼티 곡선에
+    절벽이 생기고, TWRR 은 곱셈 누적이라 그 왜곡이 곡선 끝까지 남는다.
+    상장 직후 종목처럼 이력을 아무리 백필해도 채울 수 없는 구간이 존재하므로
+    데이터 수집을 고쳐도 이 방어는 별도로 필요하다.
+    """
+    p = _safe(price, default=0.0)
+    if p > 0:
+        return p
+    return max(0.0, _safe(cost, default=0.0))
+
+
 # ── 에쿼티 커브 ────────────────────────────────────────────────────────────────
-
-def _build_cash_series(
-    current_cash: float,
-    trade_log: list,
-    index: "pd.DatetimeIndex",
-) -> "pd.Series":
-    """
-    현재 현금에서 역산해 최초 현금을 구한 뒤 날짜별로 조정하는 시계열을 반환.
-    • 주식 BUY → 현금 감소, SELL → 현금 증가
-    • CASH DEPOSIT → 현금 직접 증가, WITHDRAW → 직접 감소
-    """
-    stock_trades = [
-        t for t in (trade_log or [])
-        if str(t.get("ticker", "")).upper() not in ("CASH", "")
-        and t.get("type", "") in ("ADD", "BUY", "SOLD", "SELL")
-        and float(t.get("price") or 0) > 0
-    ]
-    cash_deposits = [
-        t for t in (trade_log or [])
-        if str(t.get("ticker", "")).upper() == "CASH"
-        and t.get("type", "") in ("DEPOSIT", "WITHDRAW")
-        and float(t.get("q") or 0) > 0
-    ]
-    if not stock_trades and not cash_deposits:
-        return pd.Series(current_cash, index=index, dtype=float)
-
-    # 역산: 현재 현금 → 모든 이벤트 이전 초기 현금
-    initial_cash = current_cash
-    for tr in stock_trades:
-        q, price = float(tr.get("q", 0)), float(tr.get("price") or 0)
-        if tr["type"] in ("ADD", "BUY"):
-            initial_cash += q * price
-        elif tr["type"] in ("SOLD", "SELL"):
-            initial_cash -= q * price
-    for tr in cash_deposits:
-        q = float(tr.get("q", 0))
-        if tr["type"] == "DEPOSIT":
-            initial_cash -= q   # 입금 이전에는 현금이 적었음
-        elif tr["type"] == "WITHDRAW":
-            initial_cash += q   # 출금 이전에는 현금이 많았음
-    initial_cash = round(max(0.0, initial_cash), 2)
-
-    # 순방향: 날짜 순으로 모든 이벤트를 반영
-    cash_series = pd.Series(initial_cash, index=index, dtype=float)
-    all_events = sorted(stock_trades + cash_deposits,
-                        key=lambda t: (t.get("date", ""), t.get("id", 0)))
-    for tr in all_events:
-        try:
-            td = pd.Timestamp(tr["date"])
-        except Exception:
-            continue
-        q    = float(tr.get("q", 0))
-        mask = cash_series.index >= td
-        if str(tr.get("ticker", "")).upper() == "CASH":
-            if tr["type"] == "DEPOSIT":
-                cash_series[mask] += q
-            elif tr["type"] == "WITHDRAW":
-                cash_series[mask] -= q
-        else:
-            price = float(tr.get("price") or 0)
-            if tr["type"] in ("ADD", "BUY"):
-                cash_series[mask] -= q * price
-            elif tr["type"] in ("SOLD", "SELL"):
-                cash_series[mask] += q * price
-
-    return cash_series.clip(lower=0)
-
 
 def build_equity_curve(
     holdings: dict,
@@ -104,13 +82,10 @@ def build_equity_curve(
     if close_df.empty:
         return pd.Series(dtype=float)
 
-    # 오늘 날짜가 인덱스에 없으면 마지막 가격을 ffill로 연장.
-    # 단, 주말(토·일)에는 연장하지 않는다 — 주말 행이 추가되면
-    # iloc[-1] == iloc[-2](금요일 값)이 되어 당일 수익률이 0%로 표시되기 때문.
-    today = pd.Timestamp.today().normalize()
-    if close_df.index[-1] < today and today.dayofweek < 5:
-        extended_idx = pd.DatetimeIndex(list(close_df.index) + [today])
-        close_df = close_df.reindex(extended_idx).ffill()
+    # 미국 거래일 기준으로 정리 (KST 오늘로 연장하면 하루 밀린 가짜 행이 생긴다)
+    close_df = _trim_to_us_session(close_df)
+    if close_df.empty:
+        return pd.Series(dtype=float)
 
     prices = close_df.ffill()
     idx    = close_df.index
@@ -173,6 +148,10 @@ def build_equity_curve(
         # 순방향 워크: 현금 0, 보유 0에서 시작
         running_cash: float = 0.0
         running_qty: dict[str, float] = {t: static_qty.get(t, 0.0) for t in all_tickers}
+        # 시세가 없는 날 대체 평가에 쓸 취득원가 (매수 시 갱신)
+        running_cost: dict[str, float] = {
+            t: _safe(holdings.get(t, {}).get("avg", 0)) for t in all_tickers
+        }
 
         equity_vals = np.zeros(len(idx), dtype=float)
 
@@ -190,8 +169,13 @@ def build_equity_curve(
                         running_cash -= q
                 elif ticker in running_qty:
                     if trade_type in ("ADD", "BUY"):
+                        prev_q = running_qty[ticker]
+                        prev_c = running_cost.get(ticker, 0.0)
+                        new_q  = prev_q + q
+                        if new_q > 0:
+                            running_cost[ticker] = (prev_q * prev_c + q * pr) / new_q
                         running_cash -= q * pr
-                        running_qty[ticker] += q
+                        running_qty[ticker] = new_q
                     elif trade_type in ("SOLD", "SELL"):
                         running_cash += q * pr
                         running_qty[ticker] = max(0.0, running_qty[ticker] - q)
@@ -199,7 +183,13 @@ def build_equity_curve(
                         running_qty[ticker] = max(0.0, q)
 
             row_prices = prices.iloc[i]
-            stock_val  = sum(_safe(row_prices[t]) * running_qty[t] for t in all_tickers)
+            # 가격이 없는 날(상장 전·데이터 미수집)에 _safe(...)→0 으로 평가하면
+            # 보유 중인 포지션이 그날만 0원이 되어 곡선에 절벽이 생긴다.
+            # 시세가 없으면 취득원가로 이월해 평가한다.
+            stock_val = sum(
+                _price_or_cost(row_prices.get(t), running_cost.get(t, 0.0)) * running_qty[t]
+                for t in all_tickers
+            )
             equity_vals[i] = max(0.0, running_cash) + stock_val
 
         equity = pd.Series(equity_vals, index=idx, dtype=float)
@@ -293,7 +283,9 @@ def calculate_portfolio_beta(
         if not stock_tickers:
             return 1.0
 
-        latest = close_df.iloc[-1]
+        # ffill 후 마지막 행을 쓴다 — 희소 프레임이 넘어오면 마지막 행이 NaN 일 수 있고,
+        # NaN 은 `total_val <= 0` 비교를 통과해(비교 결과가 항상 False) 그대로 전파된다.
+        latest = close_df.ffill().iloc[-1]
         values, betas = [], []
         for t in stock_tickers:
             s_ret = close_df[t].pct_change().dropna()
@@ -301,15 +293,25 @@ def calculate_portfolio_beta(
             if len(common) < 30:
                 beta_t = 1.0
             else:
-                cov = np.cov(s_ret.loc[common], mkt_ret.loc[common])[0, 1]
-                beta_t = cov / mkt_var if mkt_var > 0 else 1.0
-            v = float(latest.get(t, 0)) * holdings[t]["q"]
-            values.append(v)
+                # 공분산과 분산을 같은 표본(common)에서 계산해야 베타가 성립한다.
+                # 분모만 전체 벤치마크 구간을 쓰면 표본이 어긋나 베타가 왜곡된다.
+                mv = float(mkt_ret.loc[common].var())
+                if mv <= 1e-12:
+                    beta_t = 1.0
+                else:
+                    cov = np.cov(s_ret.loc[common], mkt_ret.loc[common])[0, 1]
+                    beta_t = cov / mv
+            if not math.isfinite(beta_t):
+                beta_t = 1.0
+            px = float(latest.get(t, 0) or 0)
+            if not math.isfinite(px):
+                px = 0.0
+            values.append(px * holdings[t]["q"])
             betas.append(beta_t)
 
         cash_val = holdings.get("CASH", {}).get("q", 0)
         total_val = sum(values) + cash_val
-        if total_val <= 0:
+        if not math.isfinite(total_val) or total_val <= 0:
             return 1.0
 
         weighted = sum(v * b for v, b in zip(values, betas)) / total_val
@@ -320,11 +322,28 @@ def calculate_portfolio_beta(
 
 # ── 핵심 지표 계산 ─────────────────────────────────────────────────────────────
 
+def _market_open_flag() -> bool:
+    try:
+        from backend.services.market_calendar import is_us_market_open
+        return is_us_market_open()
+    except Exception:
+        return False
+
+
 def calculate_metrics(
     holdings: dict,
     close_df: pd.DataFrame,
     equity_curve: pd.Series,
+    raw_df: pd.DataFrame | None = None,
+    live: dict | None = None,
+    now=None,
 ) -> dict:
+    """포트폴리오 지표.
+
+    close_df — ffill 된 프레임 (에쿼티 곡선·베타·알파용)
+    raw_df   — fill=False 희소 프레임 (1일 변동 전용). 없으면 기존 곡선 차분으로 폴백.
+    live     — 장중 실시간 가격 {ticker: price}
+    """
     if close_df.empty or len(close_df) < 2:
         return {}
 
@@ -341,10 +360,6 @@ def calculate_metrics(
 
     def _price(t):
         v = curr.get(t, 0)
-        return _safe(v) if t != "CASH" else 1.0
-
-    def _prev_price(t):
-        v = prev.get(t, curr.get(t, 0))
         return _safe(v) if t != "CASH" else 1.0
 
     stock_tickers = [t for t in holdings if t != "CASH" and t in close_df.columns]
@@ -367,23 +382,55 @@ def calculate_metrics(
     else:
         total_rtn = _safe((total_equity / total_cost - 1) * 100 if total_cost else 0.0)
 
-    # 1D 변화: 에쿼티 커브 직접 사용
-    if len(equity_curve) >= 2:
-        _cur_eq = float(equity_curve.iloc[-1])
-        _pre_eq = float(equity_curve.iloc[-2])
-        today_chg_val = _safe(_cur_eq - _pre_eq)
-        today_chg_pct = _safe((_cur_eq / _pre_eq - 1) * 100 if _pre_eq else 0.0)
-    else:
-        today_chg_val = 0.0
-        today_chg_pct = 0.0
+    # 1D 변화 — 종목별 '마지막 두 실제 관측치' 합산이 1순위.
+    # 에쿼티 커브의 위치 기반 차분(iloc[-1]-iloc[-2])은 마지막 두 행이
+    # 유령(ffill 복제) 행이면 정확히 0.0 을 반환하고, 애초에 두 행이
+    # 연속된 거래일이라는 보장도 없다. 종목별 합산은 화면의 행 합계와도 일치한다.
+    today_chg_val = today_chg_pct = None
+    as_of_str = None
+    if raw_df is not None and not raw_df.empty:
+        try:
+            from backend.services.price_series import portfolio_daily_change
+            _v, _p, _a = portfolio_daily_change(holdings, raw_df, live, now)
+            if _v is not None:
+                today_chg_val = _safe(_v)
+                today_chg_pct = _safe(_p)
+                as_of_str = _a.strftime("%Y-%m-%d") if _a is not None else None
+        except Exception as e:
+            print(f"[portfolio_daily_change error] {e}")
+
+    # 폴백: raw_df 를 넘기지 않는 기존 호출자(analyst-feedback, 리포트)는 종전 방식 유지
+    if today_chg_val is None:
+        if len(equity_curve) >= 2:
+            _cur_eq = float(equity_curve.iloc[-1])
+            _pre_eq = float(equity_curve.iloc[-2])
+            today_chg_val = _safe(_cur_eq - _pre_eq)
+            today_chg_pct = _safe((_cur_eq / _pre_eq - 1) * 100 if _pre_eq else 0.0)
+        else:
+            today_chg_val = 0.0
+            today_chg_pct = 0.0
+
+    # 실제 NYSE 거래일만 추린 인덱스 — 행 개수로 세면 공휴일·합성 today 행이 섞여
+    # '5행 전'이 5거래일 전이 아니게 된다 (24/7 자산과 인덱스를 합치면 공휴일 행이 남는다).
+    try:
+        from backend.services.market_calendar import is_us_trading_day
+        _sessions = [d for d in equity_curve.index if is_us_trading_day(d.date())]
+    except Exception:
+        _sessions = list(equity_curve.index)
 
     def _perf(days):
-        # 항상 equity_curve 기반으로 계산 — 현재 보유 종목과 무관하게 과거 수익률 반영
-        if len(equity_curve) >= days + 1:
-            cur  = float(equity_curve.iloc[-1])
-            base = float(equity_curve.iloc[-(days + 1)])
-            return (cur / base - 1) * 100 if base else 0.0
-        return 0.0
+        """N 거래일 수익률. 기준점이 없거나 0이면 None (0.0 으로 위장하지 않는다).
+
+        포트폴리오가 조회 기간보다 짧으면 base 가 0(첫 거래 이전 구간)이라
+        예전에는 '이번 주 보합'이라는 잘못된 확신을 표시했다.
+        """
+        if len(_sessions) < days + 1:
+            return None
+        cur = _safe(equity_curve.get(_sessions[-1]))
+        base = _safe(equity_curve.get(_sessions[-(days + 1)]))
+        if base <= 0 or cur <= 0:
+            return None
+        return (cur / base - 1) * 100
 
     beta = calculate_portfolio_beta(holdings, close_df)
     vix  = float(curr.get("^VIX", 18.0))
@@ -391,13 +438,23 @@ def calculate_metrics(
     alpha = 0.0
     if "^GSPC" in close_df.columns:
         try:
-            p_perf = (equity_curve / equity_curve.iloc[0] - 1) * 100
-            b_sp   = close_df["^GSPC"].reindex(equity_curve.index).ffill().bfill()
-            b_first = b_sp.dropna().iloc[0] if len(b_sp.dropna()) > 0 else None
-            if b_first is not None and float(b_first) != 0:
-                b_perf = (b_sp / float(b_first) - 1) * 100
-                a_val = float(p_perf.iloc[-1]) - float(b_perf.iloc[-1])
-                if a_val == a_val:  # not NaN
+            # 에쿼티 곡선은 첫 거래 이전 구간이 0 이므로 iloc[0] 으로 나누면 inf 가 되고,
+            # NaN 검사(a_val == a_val)는 inf 를 잡지 못해 alpha 가 항상 null 로 나갔다.
+            # 최초 양수 시점(= 실제 투자 시작일)을 기준으로 두 수익률을 맞춘다.
+            eq_pos = equity_curve[equity_curve > 0]
+            if eq_pos.empty:
+                raise ValueError("no positive equity")
+            start = eq_pos.index[0]
+            eq_w  = equity_curve.loc[start:]
+            base  = float(eq_w.iloc[0])
+
+            b_sp = close_df["^GSPC"].reindex(equity_curve.index).ffill().bfill().loc[start:]
+            b_valid = b_sp.dropna()
+            if base > 0 and not b_valid.empty and float(b_valid.iloc[0]) != 0:
+                p_last = float(eq_w.iloc[-1]) / base - 1
+                b_last = float(b_valid.iloc[-1]) / float(b_valid.iloc[0]) - 1
+                a_val = (p_last - b_last) * 100
+                if math.isfinite(a_val):
                     alpha = round(a_val, 4)
         except Exception:
             pass
@@ -408,45 +465,56 @@ def calculate_metrics(
         "total_return_pct":  round(total_rtn, 4),
         "today_change_val":  round(today_chg_val, 2),
         "today_change_pct":  round(today_chg_pct, 4),
+        "as_of":             as_of_str,
+        "market_open":       _market_open_flag(),
         "portfolio_beta":    round(beta, 4),
         "vix":               round(vix, 2),
-        "perf_1w":           round(_perf(5), 4),
-        "perf_1m":           round(_perf(21), 4),
+        # 계산 불가면 null — round(None) 은 TypeError 이므로 반드시 분기해야 한다
+        "perf_1w":           (lambda v: round(v, 4) if v is not None else None)(_perf(5)),
+        "perf_1m":           (lambda v: round(v, 4) if v is not None else None)(_perf(21)),
         "alpha_vs_sp500":    round(alpha, 4) if alpha is not None else None,
     }
 
 
 # ── 보유 종목 상세 ─────────────────────────────────────────────────────────────
 
-def get_holdings_detail(holdings: dict, close_df: pd.DataFrame) -> list[dict]:
+def get_holdings_detail(
+    holdings: dict,
+    close_df: pd.DataFrame,
+    live: dict | None = None,
+    now=None,
+) -> list[dict]:
+    """보유 종목 상세. close_df 는 fill=False 로 받은 **희소(실제 관측치) 프레임**이어야 한다.
+
+    일변동률은 services/price_series.daily_change 가 계산한다:
+      · 장중  — 실시간 가격 vs 직전 거래일 종가
+      · 장 외 — 마지막 확정 거래일 종가 vs 그 전 거래일 종가
+    주말 행은 여기서 제거하지 않는다 — 암호화폐·환율의 실제 주말 거래를 보존해야 하고,
+    미국 주식의 비거래일 필터링은 primitive 가 캘린더 기준으로 수행한다.
+    """
+    from backend.services.price_series import daily_change, last_price
+
     if close_df.empty:
         return []
 
-    # 주말(토·일) 행 제거 — ffill로 복사된 주말 데이터가 변동률 0%를 만드는 버그 방지
-    close_df = close_df[close_df.index.dayofweek < 5]
-    if close_df.empty:
-        return []
+    live = live or {}
 
-    # 티커별로 마지막 유효(non-NaN) 가격 2개를 독립적으로 추출.
-    # iloc[-1]/iloc[-2] 방식은 다른 티커 때문에 생긴 NaN 행이나
-    # 장 중 ffill 저장된 행(= 전일 종가 복사)으로 chg_pct=0이 되는 버그를 방지한다.
-    ticker_px: dict[str, tuple[float, float]] = {}
+    # (현재가, 변동률, 기준일, 실시간여부)
+    ticker_px: dict[str, tuple[float, float, float | None, object, bool]] = {}
     for t in holdings:
         if t == "CASH":
             continue
-        if t in close_df.columns:
-            col = close_df[t].dropna()
-            if not col.empty:
-                curr_p = float(col.iloc[-1])
-                prev_p = float(col.iloc[-2]) if len(col) >= 2 else curr_p
-            else:
-                curr_p = prev_p = 0.0
+        dc = daily_change(close_df, t, live.get(t), now)
+        if dc is not None:
+            ticker_px[t] = (dc.price, dc.prev_close, dc.chg_pct, dc.as_of, dc.is_live)
         else:
-            curr_p = prev_p = 0.0
-        ticker_px[t] = (curr_p, prev_p)
+            # 관측치가 1개뿐이라 변동률을 못 구해도 가격은 반드시 확보한다.
+            # 여기서 0.0으로 떨어뜨리면 시가총액·비중·손익이 전부 왜곡된다.
+            p = last_price(close_df, t, live.get(t), now) or 0.0
+            ticker_px[t] = (p, p, None, None, bool(live.get(t)))
 
     total_equity = sum(
-        ticker_px.get(t, (0.0, 0.0))[0] * _safe(info.get("q", 0))
+        ticker_px.get(t, (0.0,))[0] * _safe(info.get("q", 0))
         for t, info in holdings.items() if t != "CASH"
     ) + _safe(holdings.get("CASH", {}).get("q", 0))
     total_equity = _safe(total_equity)
@@ -454,12 +522,10 @@ def get_holdings_detail(holdings: dict, close_df: pd.DataFrame) -> list[dict]:
     rows = []
     for t, info in holdings.items():
         if t == "CASH":
-            price   = 1.0
-            chg_pct = 0.0
-            pnl_pct = 0.0
+            price, chg_pct, pnl_pct = 1.0, 0.0, 0.0
+            as_of, is_live = None, False
         else:
-            price, p_price = ticker_px.get(t, (0.0, 0.0))
-            chg_pct = _safe((price / p_price - 1) * 100) if p_price else 0.0
+            price, _prev, chg_pct, as_of, is_live = ticker_px.get(t, (0.0, 0.0, None, None, False))
             avg     = _safe(info.get("avg", 0))
             pnl_pct = _safe((price / avg - 1) * 100) if avg > 0 else 0.0
 
@@ -474,11 +540,15 @@ def get_holdings_detail(holdings: dict, close_df: pd.DataFrame) -> list[dict]:
             "qty":           round(qty, 4),
             "avg_cost":      round(avg_cost, 2),
             "current_price": round(price, 2),
-            "chg_pct":       round(chg_pct, 4),
+            # 변동률을 못 구한 경우 0.0 이 아니라 null — 프론트에서 '—' 로 표시된다.
+            # 0.0 으로 내려보내면 '진짜 보합'과 구분되지 않는다.
+            "chg_pct":       round(chg_pct, 4) if chg_pct is not None else None,
             "pnl_pct":       round(pnl_pct, 4),
             "pnl":           round(pnl, 2),
             "market_value":  round(value, 2),
             "weight":        round(_safe(value / total_equity), 4) if total_equity else 0.0,
+            "as_of":         as_of.strftime("%Y-%m-%d") if as_of is not None else None,
+            "is_live":       bool(is_live),
         })
     return rows
 
@@ -507,11 +577,10 @@ def build_return_pct_curve(
     if close_df.empty:
         return pd.Series(dtype=float), {}, 0.0, {}, pd.Series(dtype=float)
 
-    # 오늘 날짜까지 인덱스 연장 — 주말(토·일)에는 연장하지 않는다.
-    today = pd.Timestamp.today().normalize()
-    if close_df.index[-1] < today and today.dayofweek < 5:
-        extended_idx = pd.DatetimeIndex(list(close_df.index) + [today])
-        close_df = close_df.reindex(extended_idx).ffill()
+    # 미국 거래일 기준으로 정리 (KST 오늘로 연장하면 하루 밀린 가짜 행이 생긴다)
+    close_df = _trim_to_us_session(close_df)
+    if close_df.empty:
+        return pd.Series(dtype=float), {}, 0.0, {}, pd.Series(dtype=float)
 
     prices = close_df.ffill()
     idx    = close_df.index
@@ -595,8 +664,23 @@ def build_return_pct_curve(
                 elif trade_type == "UPDATE":
                     running_qty[ticker] = max(0.0, q)
 
-        stock_val     = sum(_safe(row_prices.get(t, 0)) * running_qty[t] for t in all_tickers)
-        equity_arr[i] = max(0.0, running_cash) + stock_val
+        # 현금이 음수가 되는 경우 = 아직 기록되지 않은 자금 조달(입금 누락·역순 입력).
+        # 예전에는 max(0.0, running_cash) 로 잘라냈는데, 그러면 V(t-1)이 부풀려진 상태에서
+        # 나중에 실제 DEPOSIT 이 들어오면 현금흐름(CF)에는 잡히고 자산(V)에는 안 잡혀
+        # daily_factor 가 붕괴하고, 곱셈 누적이라 그 오차가 곡선 끝까지 영구히 남았다.
+        # 그렇다고 음수를 그대로 두면 자산이 음수가 되어 TWRR 이 발산한다.
+        # → 부족분을 '암묵적 외부 자금 유입'으로 기록해 V 와 CF 가 같이 움직이게 한다.
+        if running_cash < -1e-9:
+            shortfall = -running_cash
+            cash_events[date_str] = cash_events.get(date_str, 0.0) + shortfall
+            running_cash = 0.0
+
+        # 시세 없는 날은 취득원가로 대체 평가 (0원 평가 시 곡선에 절벽 발생)
+        stock_val = sum(
+            _price_or_cost(row_prices.get(t), running_avg.get(t, 0.0)) * running_qty[t]
+            for t in all_tickers
+        )
+        equity_arr[i] = running_cash + stock_val
 
         holdings_by_date[date_str] = [
             {
@@ -679,12 +763,22 @@ def return_pct_to_records(
     if return_pct.empty:
         return []
 
-    # 첫 보유 종목이 생기는 날 결정
+    # 그래프 시작점 = 계좌에 자산이 처음 생긴 날.
+    # 예전에는 '첫 **보유 종목**이 생긴 날'만 봤다. holdings_by_date 는 주식만 담으므로
+    # 현금 입금으로 시작한 계좌는 첫 매수일까지 구간이 통째로 잘려 나갔다
+    # (입금 2025-08 → 첫 매수 2026-01 이면 5개월이 사라진다).
+    # 자산이 0 을 벗어나는 시점(입금 포함)을 기준으로 삼는다.
     first_date = None
-    for date_str in sorted(holdings_by_date.keys()):
-        if holdings_by_date[date_str]:
-            first_date = pd.Timestamp(date_str)
-            break
+    if equity is not None and not equity.empty:
+        pos_eq = equity[equity > 0]
+        if not pos_eq.empty:
+            first_date = pos_eq.index[0]
+
+    if first_date is None:
+        for date_str in sorted(holdings_by_date.keys()):
+            if holdings_by_date[date_str]:
+                first_date = pd.Timestamp(date_str)
+                break
     if first_date is None and trade_markers:
         sorted_dates = sorted(tr.get("date", "") for tr in trade_markers if tr.get("date"))
         if sorted_dates:
@@ -695,8 +789,8 @@ def return_pct_to_records(
     if first_date is None:
         return []
 
-    display_start = first_date - pd.DateOffset(months=1)
-    curve = return_pct.loc[return_pct.index >= display_start]
+    # 시작 직전 여백은 자산이 생기기 전 구간이라 0% 직선만 그려진다 — 붙이지 않는다.
+    curve = return_pct.loc[return_pct.index >= first_date]
     # 주말(토·일) 포인트 제거 — ffill 연장으로 생긴 0% 변동 날짜를 그래프에서 제외
     curve = curve[curve.index.dayofweek < 5]
     if curve.empty:

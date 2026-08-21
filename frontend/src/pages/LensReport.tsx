@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import {
-  BookOpen, Play, ChevronDown, ChevronRight, Download, History, X, Square, Search,
+  BookOpen, Play, ChevronDown, ChevronRight, Download, History, X, Square, Search, Lock,
 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -13,6 +13,9 @@ import {
   listIndustries, searchTickers,
 } from '@/api'
 import { cn } from '@/lib/utils'
+import { useLoginPrompt } from '@/components/auth/LockedPreview'
+import AuthGate from '@/components/auth/AuthGate'
+import { useAuth } from '@/lib/AuthContext'
 
 // ── sessionStorage 키 ──────────────────────────────────────────────────────────
 const EQ_JOB_ID  = 'lens_eq_job_id'
@@ -57,6 +60,12 @@ type EquityResult = {
   market_data?: Record<string, unknown>
   report_type?: string
   file_path?: string
+  /** 공용 캐시 재사용 여부 — 다른 사용자가 이미 만든 리포트를 받아온 경우 true */
+  from_cache?: boolean
+  model_tier?: string
+  cached_at?: string
+  cache_age_hours?: number
+  cache_ttl_hours?: number
 }
 
 type IndustryResult = {
@@ -68,6 +77,12 @@ type IndustryResult = {
   market_data?: Record<string, unknown>
   report_type?: string
   file_path?: string
+  /** 공용 캐시 재사용 여부 — 다른 사용자가 이미 만든 리포트를 받아온 경우 true */
+  from_cache?: boolean
+  model_tier?: string
+  cached_at?: string
+  cache_age_hours?: number
+  cache_ttl_hours?: number
 }
 
 // ── 섹션 파서 (히스토리 레포트 클라이언트 파싱용) ──────────────────────────────
@@ -410,6 +425,9 @@ async function downloadPdfFromHtml(htmlContent: string, filename: string) {
 
 // ── 주식 리포트 탭 ─────────────────────────────────────────────────────────────
 function EquityTab() {
+  // 리포트 생성·과거 이력은 로그인이 필요하다. 예시 리포트는 만들지 않는다 —
+  // 로그인 전에는 결과도 이력도 비어 있고, 버튼을 누르면 로그인을 요구한다.
+  const { isAuthed, requireLogin, modalEl } = useLoginPrompt()
   const [ticker,    setTicker]    = useState(() => sessionStorage.getItem(EQ_TICKER) || '')
   const [modelTier, setModelTier] = useState(() => sessionStorage.getItem(EQ_TIER)   || 'basic')
   const [jobId,  setJobId]    = useState<string | null>(() => sessionStorage.getItem(EQ_JOB_ID))
@@ -417,6 +435,7 @@ function EquityTab() {
     try { const s = sessionStorage.getItem(EQ_RESULT); return s ? JSON.parse(s) : null }
     catch { return null }
   })
+
   const [progress,  setProgress]  = useState(0)
   const [elapsedMs, setElapsedMs] = useState(0)
   const [pdfBusy,   setPdfBusy]   = useState(false)
@@ -439,7 +458,7 @@ function EquityTab() {
     queryKey: ['report-history'],
     queryFn:  getReportHistory,
     staleTime: 60_000,
-    enabled:  showHist,
+    enabled:  showHist && isAuthed,
   })
   const loadHistMut = useMutation({
     mutationFn: getReportFile,
@@ -609,6 +628,7 @@ function EquityTab() {
 
   return (
     <div className="space-y-4">
+      {modalEl}
       {/* 히스토리 모달 */}
       {showHist && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setShowHist(false)}>
@@ -631,8 +651,13 @@ function EquityTab() {
                   disabled={loadHistMut.isPending}
                   className="w-full text-left px-4 py-3 hover:bg-[#0f172a] transition-colors"
                 >
-                  <div className="text-xs font-medium text-[#e2e8f0] truncate">{r.name}</div>
-                  <div className="text-[10px] text-[#475569] mt-0.5">
+                  <div className="flex items-center gap-1.5 mb-0.5">
+                    <span className={cn('text-[9px] px-1 py-0.5 rounded font-bold', r.model_tier === 'deep' ? 'bg-[#9b59b6]/20 text-[#c084fc]' : 'bg-[#2e75b6]/20 text-[#60a5fa]')}>
+                      {r.model_tier === 'deep' ? '심층' : '기본'}
+                    </span>
+                    <div className="text-xs font-medium text-[#e2e8f0] truncate">{r.name}</div>
+                  </div>
+                  <div className="text-[10px] text-[#475569]">
                     {r.created_at ? new Date(r.created_at).toLocaleString('ko-KR') : ''}
                   </div>
                 </button>
@@ -648,16 +673,17 @@ function EquityTab() {
           <BookOpen className="w-4 h-4 text-[#2e75b6]" />
           <div>
             <h1 className="text-base font-bold text-[#e2e8f0]">종목 리서치</h1>
-            <p className="text-[11px] text-[#4a5568]">yfinance 실제 데이터 + Perplexity 뉴스 + Claude AI 분석</p>
+          
           </div>
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={() => setShowHist(true)}
+            onClick={() => requireLogin(() => setShowHist(true))}
             disabled={isRunning}
+            title={isAuthed ? '저장된 리포트 보기' : '로그인 후 사용 가능합니다'}
             className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0] hover:border-[#2e75b6]/40 rounded transition-colors disabled:opacity-40"
           >
-            <History className="w-3.5 h-3.5" />
+            {isAuthed ? <History className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5" />}
             과거 레포트
           </button>
           {result && !isRunning && (
@@ -728,14 +754,13 @@ function EquityTab() {
           <div>
             <div className="text-[10px] text-[#4a5568] font-bold tracking-wider mb-1.5">분석 등급</div>
             <div className="flex gap-1.5">
-              {([['basic', '기본 분석', 'Haiku 전용'], ['deep', '심층 분석', 'Sonnet 분석']] as const).map(([t, label, desc]) => (
+              {([['basic', '기본 분석'], ['deep', '심층 분석']] as const).map(([t, label]) => (
                 <button key={t} onClick={() => setModelTier(t)} disabled={isRunning}
                   className={cn(
                     'px-3 py-1.5 text-left rounded font-medium transition-colors min-w-[80px] disabled:opacity-40 disabled:cursor-not-allowed',
                     modelTier === t ? 'bg-[#9b59b6] text-white' : 'bg-[#0b0f1a] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0]'
                   )}>
                   <div className="text-[11px] font-bold">{label}</div>
-                  <div className={cn('text-[9px] mt-0.5', modelTier === t ? 'text-purple-200' : 'text-[#475569]')}>{desc}</div>
                 </button>
               ))}
             </div>
@@ -752,11 +777,11 @@ function EquityTab() {
               </button>
             )}
             <button
-              onClick={startAnalysis}
+              onClick={() => requireLogin(startAnalysis)}
               disabled={isRunning || !ticker.trim()}
               className="flex items-center gap-1.5 px-4 py-2 bg-[#2e75b6] hover:bg-[#1d5fa0] disabled:opacity-50 text-white text-sm font-bold rounded transition-colors"
             >
-              <Play className="w-3.5 h-3.5" />
+              {isAuthed ? <Play className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5" />}
               {isRunning ? '생성 중...' : '리포트 생성'}
             </button>
           </div>
@@ -785,6 +810,18 @@ function EquityTab() {
               <span className="text-sm text-[#94a3b8] ml-2">— {result.company_name}</span>
             )}
           </div>
+          {result.from_cache && (
+            <div className="bg-[#0b1a2e] border border-[#1e3a5f] rounded-lg px-3 py-2 flex items-center gap-2">
+              <span className="text-[10px] font-bold text-[#3b82f6] tracking-wider">공용 레포트</span>
+              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#1e2d40] text-[#94a3b8]">
+                {result.model_tier === 'deep' ? '심층' : '기본'}
+              </span>
+              <span className="text-[11px] text-[#94a3b8]">
+                {Math.round(result.cache_age_hours ?? 0)}시간 전 생성된 레포트를 재사용했습니다
+                {result.cache_ttl_hours ? ` (유효 ${result.cache_ttl_hours}시간)` : ''}
+              </span>
+            </div>
+          )}
           {headerContent && <ReportHeaderCard headerContent={headerContent} type="equity" />}
           <div className="space-y-1.5">
             {sections.filter(([k]) => k !== 'header').map(([key, content], i) => (
@@ -805,6 +842,7 @@ function EquityTab() {
 
 // ── 산업 리포트 탭 ─────────────────────────────────────────────────────────────
 function IndustryTab() {
+  const { isAuthed, requireLogin, modalEl } = useLoginPrompt()
   const [selectedId, setSelectedId] = useState<string>(() => sessionStorage.getItem(IND_INDUSTRY) || '')
   const [modelTier,  setModelTier]  = useState(() => sessionStorage.getItem(IND_TIER) || 'basic')
   const [jobId,      setJobId]      = useState<string | null>(() => sessionStorage.getItem(IND_JOB_ID))
@@ -812,6 +850,7 @@ function IndustryTab() {
     try { const s = sessionStorage.getItem(IND_RESULT); return s ? JSON.parse(s) : null }
     catch { return null }
   })
+
   const [progress,  setProgress]  = useState(0)
   const [elapsedMs, setElapsedMs] = useState(0)
   const [pdfBusy,   setPdfBusy]   = useState(false)
@@ -831,7 +870,7 @@ function IndustryTab() {
     queryKey: ['report-history'],
     queryFn:  getReportHistory,
     staleTime: 60_000,
-    enabled:  showHist,
+    enabled:  showHist && isAuthed,
   })
   const loadHistMut = useMutation({
     mutationFn: getReportFile,
@@ -999,6 +1038,7 @@ function IndustryTab() {
 
   return (
     <div className="space-y-4">
+      {modalEl}
       {/* 히스토리 모달 */}
       {showHist && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setShowHist(false)}>
@@ -1021,8 +1061,13 @@ function IndustryTab() {
                   disabled={loadHistMut.isPending}
                   className="w-full text-left px-4 py-3 hover:bg-[#0f172a] transition-colors"
                 >
-                  <div className="text-xs font-medium text-[#e2e8f0] truncate">{r.name}</div>
-                  <div className="text-[10px] text-[#475569] mt-0.5">
+                  <div className="flex items-center gap-1.5 mb-0.5">
+                    <span className={cn('text-[9px] px-1 py-0.5 rounded font-bold', r.model_tier === 'deep' ? 'bg-[#9b59b6]/20 text-[#c084fc]' : 'bg-[#2e75b6]/20 text-[#60a5fa]')}>
+                      {r.model_tier === 'deep' ? '심층' : '기본'}
+                    </span>
+                    <div className="text-xs font-medium text-[#e2e8f0] truncate">{r.name}</div>
+                  </div>
+                  <div className="text-[10px] text-[#475569]">
                     {r.created_at ? new Date(r.created_at).toLocaleString('ko-KR') : ''}
                   </div>
                 </button>
@@ -1038,16 +1083,16 @@ function IndustryTab() {
           <BookOpen className="w-4 h-4 text-[#9b59b6]" />
           <div>
             <h1 className="text-base font-bold text-[#e2e8f0]">산업 리서치</h1>
-            <p className="text-[11px] text-[#4a5568]">yfinance 실제 데이터 + Perplexity 뉴스 + Claude AI 분석</p>
           </div>
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={() => setShowHist(true)}
+            onClick={() => requireLogin(() => setShowHist(true))}
             disabled={isRunning}
+            title={isAuthed ? '저장된 리포트 보기' : '로그인 후 사용 가능합니다'}
             className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0] hover:border-[#9b59b6]/40 rounded transition-colors disabled:opacity-40"
           >
-            <History className="w-3.5 h-3.5" />
+            {isAuthed ? <History className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5" />}
             과거 레포트
           </button>
           {result && !isRunning && (
@@ -1111,14 +1156,13 @@ function IndustryTab() {
         <div>
           <div className="text-[10px] text-[#4a5568] font-bold tracking-wider mb-1.5">분석 등급</div>
           <div className="flex gap-1.5">
-            {([['basic', '기본 분석', 'Haiku 전용'], ['deep', '심층 분석', 'Sonnet 분석']] as const).map(([t, label, desc]) => (
+            {([['basic', '기본 분석'], ['deep', '심층 분석']] as const).map(([t, label]) => (
               <button key={t} onClick={() => setModelTier(t)} disabled={isRunning}
                 className={cn(
                   'px-3 py-1.5 text-left rounded font-medium transition-colors min-w-[80px] disabled:opacity-40 disabled:cursor-not-allowed',
                   modelTier === t ? 'bg-[#9b59b6] text-white' : 'bg-[#0b0f1a] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0]'
                 )}>
                 <div className="text-[11px] font-bold">{label}</div>
-                <div className={cn('text-[9px] mt-0.5', modelTier === t ? 'text-purple-200' : 'text-[#475569]')}>{desc}</div>
               </button>
             ))}
           </div>
@@ -1135,11 +1179,11 @@ function IndustryTab() {
             </button>
           )}
           <button
-            onClick={startAnalysis}
+            onClick={() => requireLogin(startAnalysis)}
             disabled={isRunning || !selectedId}
             className="flex items-center gap-1.5 px-4 py-2 bg-[#9b59b6] hover:bg-[#7c3aed] disabled:opacity-50 text-white text-sm font-bold rounded transition-colors"
           >
-            <Play className="w-3.5 h-3.5" />
+            {isAuthed ? <Play className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5" />}
             {isRunning ? '생성 중...' : '산업 레포트 생성'}
           </button>
         {(startMut.isError || pollQ.data?.status === 'error') && (
@@ -1168,6 +1212,18 @@ function IndustryTab() {
               <span className="text-sm text-[#64748b] ml-2">({result.industry_name_en})</span>
             )}
           </div>
+          {result.from_cache && (
+            <div className="bg-[#0b1a2e] border border-[#1e3a5f] rounded-lg px-3 py-2 flex items-center gap-2">
+              <span className="text-[10px] font-bold text-[#3b82f6] tracking-wider">공용 레포트</span>
+              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#1e2d40] text-[#94a3b8]">
+                {result.model_tier === 'deep' ? '심층' : '기본'}
+              </span>
+              <span className="text-[11px] text-[#94a3b8]">
+                {Math.round(result.cache_age_hours ?? 0)}시간 전 생성된 레포트를 재사용했습니다
+                {result.cache_ttl_hours ? ` (유효 ${result.cache_ttl_hours}시간)` : ''}
+              </span>
+            </div>
+          )}
           {headerContent && <ReportHeaderCard headerContent={headerContent} type="industry" />}
           <div className="space-y-1.5">
             {sections.filter(([k]) => k !== 'header').map(([key, content], i) => (
@@ -1192,10 +1248,12 @@ function HistoryTab() {
   const [selected, setSelected] = useState<string | null>(null)
   const [viewResult, setViewResult] = useState<{ sections: Record<string, string>; raw: string; name: string } | null>(null)
 
+  const { isAuthed } = useAuth()
   const histQ = useQuery({
     queryKey: ['report-history'],
     queryFn:  getReportHistory,
     staleTime: 60_000,
+    enabled:  isAuthed,
   })
 
   const fileMut = useMutation({
@@ -1219,6 +1277,11 @@ function HistoryTab() {
   const viewSections = viewResult?.sections ? Object.entries(viewResult.sections) : []
   const viewHeader   = viewResult?.sections?.['header'] || ''
   const viewType     = selected?.includes('industry') ? 'industry' : 'equity'
+
+  // 과거 이력은 전부 개인 데이터다. 로그인 전에는 목록 자체를 만들지 않는다.
+  if (!isAuthed) {
+    return <AuthGate feature="과거 리포트 이력" />
+  }
 
   return (
     <div className="space-y-4">
@@ -1273,6 +1336,9 @@ function HistoryTab() {
                   : 'bg-[#64748b]/20 text-[#94a3b8]',
                 )}>
                   {isEq ? '주식' : isInd ? '산업' : r.type}
+                </span>
+                <span className={cn('text-[9px] px-1 py-0.5 rounded font-bold', r.model_tier === 'deep' ? 'bg-[#9b59b6]/20 text-[#c084fc]' : 'bg-[#475569]/20 text-[#94a3b8]')}>
+                  {r.model_tier === 'deep' ? '심층' : '기본'}
                 </span>
                 <span className="text-[10px] text-[#475569]">
                   {r.created_at ? new Date(r.created_at).toLocaleString('ko-KR') : ''}
@@ -1376,9 +1442,6 @@ export default function LensReport() {
         <BookOpen className="w-4 h-4 text-[#2e75b6]" />
         <div>
           <h1 className="text-base font-bold text-[#e2e8f0]">LENS 리서치</h1>
-          <p className="text-[11px] text-[#4a5568]">
-            종목·산업 딥 리서치 · yfinance + Perplexity + Claude AI
-          </p>
         </div>
       </div>
 

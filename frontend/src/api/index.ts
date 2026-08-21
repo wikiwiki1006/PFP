@@ -1,15 +1,15 @@
 import axios from 'axios'
+import { getIdToken } from '@/lib/firebase'
 import type {
   PortfolioMetrics, EquityCurvePoint, HoldingsMap, HoldingDetail,
   SectorWeights, Trade, TradeForm, MarketSnapshot, SectorData,
   MacroData, NewsItem, EarningsEvent, CorrelationMatrix,
   ScanResult, PairsSignal, MeanReversionSignal, MomentumSignal,
   MarketRegime, OptimizationResult, FactorAnalysisResult,
-  MonteCarloPortfolioResult, MonteCarloStockResult, MonteCarloMacroResult,
   MacroModes, MacroAnalysisResult, AnalystFeedback,
   DailyBriefResult, ReportFile, Industry, EquityReportResult, IndustryReportResult,
   MarketSituation, BBScanFullResult, TechnicalChartResult, PairsAutoResult,
-  TickerDetail,
+  TickerDetail, AIOptimizationResult,
 } from '@/types'
 
 // 개발(로컬+LAN): VITE_API_URL 미설정 → undefined → axios 상대경로 → Vite proxy가 /api/* 를 localhost:8000 으로 중계
@@ -23,12 +23,69 @@ export const api = axios.create({
   headers: { 'Content-Type': 'application/json' },
 })
 
+// ── 인증 ───────────────────────────────────────────────────────────────────────
+// 모든 요청에 Firebase ID 토큰을 붙인다. 예전에는 X-User-Id 헤더로 신원을
+// "주장"했는데, 서버가 그 말을 그대로 믿어 아무나 남의 데이터를 볼 수 있었다.
+// 이제 서버는 이 토큰의 서명을 검증하고 그 안의 uid 만 신뢰한다.
+api.interceptors.request.use(async (config) => {
+  const token = await getIdToken()
+  if (token) config.headers.Authorization = `Bearer ${token}`
+  return config
+})
+
+// 401 이 한 번 나면 토큰이 만료됐을 수 있다. 강제 갱신 후 딱 한 번만 재시도한다
+// (무한 재시도를 막기 위해 _retried 플래그를 단다).
+api.interceptors.response.use(
+  (r) => r,
+  async (error) => {
+    const cfg = error?.config
+    if (error?.response?.status === 401 && cfg && !cfg._retried) {
+      cfg._retried = true
+      const fresh = await getIdToken(true).catch(() => null)
+      if (fresh) {
+        cfg.headers.Authorization = `Bearer ${fresh}`
+        return api.request(cfg)
+      }
+    }
+    return Promise.reject(error)
+  },
+)
+
+/** 401 여부 — 화면에서 "로그인 필요" 안내를 띄울지 판단할 때 쓴다. */
+export function isAuthError(err: unknown): boolean {
+  return (err as { response?: { status?: number } })?.response?.status === 401
+}
+
+/**
+ * "보유 종목이 없어서" 실패한 요청인지.
+ *
+ * 서버는 빈 포트폴리오에 400 "보유 종목 없음" 을 돌려준다. 이걸 일반 오류와
+ * 뭉뚱그리면 방금 가입한 사용자에게 "불러오지 못했습니다"라는 잘못된 안내가
+ * 뜬다 — 조회에 실패한 게 아니라 보여줄 게 없는 것이다.
+ */
+export function isEmptyPortfolioError(err: unknown): boolean {
+  const r = (err as { response?: { status?: number; data?: { detail?: unknown } } })?.response
+  if (r?.status !== 400) return false
+  return typeof r.data?.detail === 'string' && r.data.detail.includes('보유 종목')
+}
+
 // ── Portfolio ──────────────────────────────────────────────────────────────────
 export const getPortfolioMetrics = async (): Promise<PortfolioMetrics> =>
   (await api.get('/api/portfolio/metrics')).data
 
 export const getEquityCurve = async (): Promise<EquityCurvePoint[]> =>
   (await api.get('/api/portfolio/equity-curve')).data
+
+export interface SetupHolding { ticker: string; q: number; price: number; date: string }
+export interface SetupResult {
+  ok: boolean; holdings: number; invested: number; cash: number
+  seed_deposit: number; first_date: string
+}
+/** 포트폴리오 최초 등록 / 새로 등록. replace=true 면 기존 정보를 지운다. */
+export const setupPortfolio = async (
+  holdings: SetupHolding[], cash: number, replace = false,
+): Promise<SetupResult> =>
+  (await api.post('/api/portfolio/setup', { holdings, cash, replace })).data
 
 export const getHoldings = async (): Promise<HoldingsMap> =>
   (await api.get('/api/portfolio/holdings')).data
@@ -149,21 +206,43 @@ export const runBlackLitterman = async (body?: object): Promise<OptimizationResu
 export const runFactorAnalysis = async (body?: object): Promise<FactorAnalysisResult> =>
   (await api.post('/api/optimizer/factor-analysis', body || {})).data
 
-export const runMonteCarloPortfolio = async (body: object): Promise<MonteCarloPortfolioResult> =>
-  (await api.post('/api/optimizer/montecarlo/portfolio', body)).data
+export const runAIOptimize = async (body: {
+  tickers?: string[]
+  period?: string
+  target_return?: number
+  risk_free_rate?: number
+  holding_period_years?: number
+  weight_bounds?: [number, number]
+}): Promise<AIOptimizationResult> =>
+  (await api.post('/api/optimizer/ai-optimize', body)).data
 
-export const runMonteCarloStock = async (body: object): Promise<MonteCarloStockResult> =>
-  (await api.post('/api/optimizer/montecarlo/stock', body)).data
+export const startAIOptimizeJob = async (body: {
+  tickers?: string[]
+  period?: string
+  target_return?: number
+  risk_free_rate?: number
+  holding_period_years?: number
+  weight_bounds?: [number, number]
+}): Promise<{ job_id: string }> =>
+  (await api.post('/api/optimizer/ai-optimize-job', body)).data
 
-export const runMonteCarloMacro = async (body: object): Promise<MonteCarloMacroResult> =>
-  (await api.post('/api/optimizer/montecarlo/macro', body)).data
+export const getAIOptimizeJob = async (jobId: string): Promise<{
+  status: 'running' | 'done' | 'error' | 'cancelled'
+  stage: number
+  stage_text: string
+  result?: AIOptimizationResult
+  detail?: string
+}> => (await api.get(`/api/optimizer/ai-optimize-job/${jobId}`)).data
+
+export const cancelAIOptimizeJob = async (jobId: string): Promise<{ ok: boolean }> =>
+  (await api.delete(`/api/optimizer/ai-optimize-job/${jobId}`)).data
 
 // ── Macro AI ───────────────────────────────────────────────────────────────────
 export const getMacroModes = async (): Promise<MacroModes> =>
   (await api.get('/api/macro/modes')).data
 
 export const startMacroAnalysis = async (body: {
-  event: string; model?: string; mode?: string; portfolio?: Record<string, unknown>
+  event: string; model?: string; mode?: string; portfolio?: Record<string, unknown>; provider?: string
 }): Promise<{ job_id: string }> =>
   (await api.post('/api/macro/analyze', body)).data
 

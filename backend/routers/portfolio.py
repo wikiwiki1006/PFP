@@ -6,137 +6,49 @@ routers/portfolio.py
 """
 from __future__ import annotations
 
-import time as _time
-from datetime import datetime, time as _dtime, timedelta, timezone
+from datetime import datetime
 from typing import Optional
 
 import pandas as pd
-from fastapi import APIRouter, HTTPException, Header
+from backend.services.auth import current_user
+from fastapi import Depends, APIRouter, HTTPException, Header
 from pydantic import BaseModel
 
 from backend.db.portfolio_repo import (
-    get_holdings, save_holding, delete_holding,
-    get_trade_log, add_trade,
+    get_holdings, save_holding, delete_holding, update_holding_sector, user_write_lock,
+    get_trade_log, add_trade, wipe_portfolio,
     update_trade_by_id, delete_trade_by_id,
-    list_users, create_user,
 )
 from backend.models.portfolio import (
-    HoldingItem, AddTradeRequest, UpdateHoldingRequest,
+    HoldingItem, AddTradeRequest, UpdateHoldingRequest, PortfolioSetupRequest,
 )
 from backend.services.market_data import get_close_df
 from backend.services.portfolio_calculator import (
     build_equity_curve,
-    equity_curve_to_records,
     calculate_metrics,
     get_holdings_detail,
     build_return_pct_curve,
     return_pct_to_records,
 )
 
-# ─── 실시간 현재가 (장중 주입용) ──────────────────────────────────────────────
-
-try:
-    from zoneinfo import ZoneInfo as _ZI
-    _ET_TZ = _ZI("America/New_York")
-except Exception:
-    try:
-        import pytz as _pytz  # type: ignore
-        _ET_TZ = _pytz.timezone("America/New_York")
-    except Exception:
-        _ET_TZ = None
-
-_live_px: dict = {"ts": 0.0, "prices": {}}
-_LIVE_TTL = 60  # seconds
+# ─── 시세·현금·섹터 로직은 services 로 분리 ──────────────────────────────────
+from backend.services.live_prices import (
+    _is_market_open, _get_live_prices, _ensure_prev_close, _inject_live,
+)
+from backend.services.cash_ledger import (
+    _cash_event_delta, _revert_cash_event, _cash_delta, _adjust_cash,
+    _recalculate_holding_from_trades,
+)
+from backend.services.sector_lookup import _fetch_sector
 
 
-def _is_market_open() -> bool:
-    """미국 주식 시장 개장 여부 (ET 월–금 09:30–16:00)."""
-    if _ET_TZ is not None:
-        now = datetime.now(_ET_TZ)  # type: ignore[arg-type]
-    else:
-        from datetime import timezone, timedelta
-        now = datetime.now(timezone.utc) + timedelta(hours=-4)
-    if now.weekday() >= 5:
-        return False
-    t = now.time()
-    return _dtime(9, 30) <= t < _dtime(16, 0)
+import logging
 
-
-def _get_live_prices(tickers: list[str]) -> dict[str, float]:
-    """실시간 현재가 조회 (60초 메모리 캐시). 실패 시 빈 dict."""
-    import yfinance as yf
-    now = _time.time()
-    cached: dict[str, float] = _live_px["prices"]
-    if now - _live_px["ts"] < _LIVE_TTL and all(t in cached for t in tickers):
-        return {t: cached[t] for t in tickers if t in cached}
-
-    prices: dict[str, float] = dict(cached)
-    try:
-        # 최근 30분의 2분봉만 다운로드 (당일 전체 1분봉 대비 데이터량 대폭 감소)
-        if _ET_TZ is not None:
-            end_dt   = datetime.now(_ET_TZ)
-        else:
-            end_dt   = datetime.now(timezone.utc) + timedelta(hours=-4)
-        start_dt = end_dt - timedelta(minutes=30)
-        data = yf.download(
-            tickers, start=start_dt, end=end_dt, interval="2m",
-            progress=False, auto_adjust=True,
-        )
-        if not data.empty:
-            close = (
-                data["Close"]
-                if isinstance(data.columns, pd.MultiIndex)
-                else data[["Close"]].rename(columns={"Close": tickers[0]})
-                if len(tickers) == 1
-                else data
-            )
-            for t in tickers:
-                if t in close.columns:
-                    col = close[t].dropna()
-                    if not col.empty:
-                        prices[t] = float(col.iloc[-1])
-    except Exception:
-        pass
-
-    _live_px["ts"] = now
-    _live_px["prices"] = prices
-    return {t: prices[t] for t in tickers if t in prices}
-
-
-def _inject_live(df: pd.DataFrame) -> pd.DataFrame:
-    """장중에만 ET 날짜 기준 오늘 행에 실시간 현재가 주입.
-    DB에 오늘 부분(intraday) 행이 있으면 먼저 제거해 전일 종가가 prev로 오도록 보장."""
-    if df.empty or not _is_market_open():
-        return df
-    live = _get_live_prices(list(df.columns))
-    if not live:
-        return df
-    df = df.copy()
-
-    # 서버 로컬 타임이 아닌 ET 날짜 기준 (KST 서버에서도 미국 거래일과 일치)
-    if _ET_TZ is not None:
-        today_et = pd.Timestamp(datetime.now(_ET_TZ).date())
-    else:
-        today_et = pd.Timestamp((datetime.now(timezone.utc) + timedelta(hours=-4)).date())
-
-    # DB/스냅샷에 오늘 intraday 행이 저장돼 있으면 제거 → prev = 전일 종가가 됨
-    if today_et in df.index:
-        df = df.drop(today_et)
-
-    for t, p in live.items():
-        if t in df.columns and p > 0:
-            df.loc[today_et, t] = p
-    df.sort_index(inplace=True)
-    df.ffill(inplace=True)
-    return df
-
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/portfolio", tags=["portfolio"])
 
 
-def _uid(x_user_id: Optional[str]) -> str:
-    """헤더 X-User-Id 가 없으면 'default' 사용."""
-    return (x_user_id or "default").strip() or "default"
 
 
 def _portfolio_close_df(
@@ -156,23 +68,59 @@ def _portfolio_close_df(
         + ["^GSPC", "^VIX"]
     ))
     df = get_close_df(tickers, period=period, ttl=ttl, include_market=False)
-    return _inject_live(df)
+    df = _inject_live(df)
+    # 이 프레임은 에쿼티 곡선·베타·알파 전용이다 (곡선 밀도를 위해 ffill 유지).
+    # 일변동률은 더 이상 여기서 계산하지 않고 services/price_series.py 의
+    # '마지막 두 실제 관측치' primitive 가 담당한다. 예전의 유령행 제거 휴리스틱은
+    # 전 종목 값 일치를 요구하고 한 행만 지워 실제로 동작하지 않았으므로 제거했다.
+    return df
+
+
+def _period_covering_first_trade(trade_log: list, minimum: str = "2y") -> str:
+    """첫 거래일(입금 포함)까지 포함하는 최소 가격 기간을 고른다.
+
+    period 를 "2y" 로 고정하면 그보다 오래된 계좌는 그래프 왼쪽이 잘려
+    "최초 입금일부터" 보이지 않는다. 첫 거래일까지의 경과 연수를 보고
+    yfinance 가 지원하는 구간 중 이를 덮는 가장 짧은 것을 고른다
+    (필요 이상으로 길게 받으면 조회·계산 비용만 늘어난다).
+    """
+    from datetime import date
+    dates = []
+    for tr in (trade_log or []):
+        d = str(tr.get("date", ""))[:10]
+        if len(d) == 10:
+            try:
+                dates.append(date.fromisoformat(d))
+            except ValueError:
+                pass
+    if not dates:
+        return minimum
+
+    years = (date.today() - min(dates)).days / 365.25
+    # 문자열 비교("10y" >= "2y" 는 False)로 최소값을 강제하면 안 된다 — 연수로 비교한다.
+    _MIN_YEARS = {"1y": 1, "2y": 2, "5y": 5, "10y": 10}.get(minimum, 2)
+    # 첫 거래일을 확실히 덮도록 여유를 두되, 최소 기간보다 짧아지지 않게 한다.
+    need = max(years + 0.05, _MIN_YEARS)
+    for span, yrs in (("2y", 2), ("5y", 5), ("10y", 10)):
+        if need <= yrs:
+            return span
+    return "max"
 
 
 # ── Holdings ───────────────────────────────────────────────────────────────────
 
 @router.get("/holdings")
-def get_holdings_endpoint(x_user_id: Optional[str] = Header(default=None)):
-    return get_holdings(_uid(x_user_id))
+def get_holdings_endpoint(_auth: dict = Depends(current_user)):
+    return get_holdings(_auth["uid"])
 
 
 @router.put("/holdings/{ticker}")
 def update_holding(
     ticker: str,
     body: UpdateHoldingRequest,
-    x_user_id: Optional[str] = Header(default=None),
+    _auth: dict = Depends(current_user),
 ):
-    uid = _uid(x_user_id)
+    uid = _auth["uid"]
     ticker = ticker.upper()
     holdings = get_holdings(uid)
     if ticker not in holdings:
@@ -203,9 +151,9 @@ def update_holding(
 def add_holding(
     ticker: str,
     item: HoldingItem,
-    x_user_id: Optional[str] = Header(default=None),
+    _auth: dict = Depends(current_user),
 ):
-    uid = _uid(x_user_id)
+    uid = _auth["uid"]
     ticker = ticker.upper()
     holdings = get_holdings(uid)
     if ticker in holdings:
@@ -230,71 +178,105 @@ def add_holding(
 @router.delete("/holdings/{ticker}")
 def delete_holding_endpoint(
     ticker: str,
-    x_user_id: Optional[str] = Header(default=None),
+    _auth: dict = Depends(current_user),
 ):
-    uid = _uid(x_user_id)
-    ticker = ticker.upper()
+    uid = _auth["uid"]
+    with user_write_lock(uid):
+        return _delete_holding_locked(ticker.upper(), uid)
+
+
+def _delete_holding_locked(ticker: str, uid: str):
     holdings = get_holdings(uid)
     if ticker not in holdings:
         raise HTTPException(status_code=404, detail=f"{ticker} 미보유")
-    # 명시적 삭제 시 거래 이력도 함께 삭제 (SELL로 qty=0된 경우와 구분)
+
+    # 거래 이력을 함께 지우면 그 거래들이 소비했던 현금이 영영 복구되지 않는다.
+    # (매수로 차감된 현금이 그대로 사라져 총자산이 줄고, 에쿼티 곡선에서도
+    #  해당 종목 구간이 통째로 없어진다.) 삭제 전에 순 현금 델타를 되돌린다.
+    net_delta = 0.0
+    for tr in get_trade_log(uid):
+        if str(tr.get("ticker", "")).upper() != ticker:
+            continue
+        net_delta += _cash_delta(
+            tr.get("type", ""), float(tr.get("q", 0)), float(tr.get("price") or 0)
+        )
+
     delete_holding(ticker, uid, with_trades=True)
-    return {"ok": True, "ticker": ticker}
+    if abs(net_delta) >= 0.001:
+        _adjust_cash(uid, -net_delta)
+    return {"ok": True, "ticker": ticker, "cash_restored": round(-net_delta, 2)}
 
 
 # ── 섹터 헬퍼 (내부 함수, 엔드포인트 아님) ────────────────────────────────────
 
-def _fetch_sector(ticker: str) -> str:
-    """yfinance로 종목 섹터 조회. 실패 시 'Other' 반환."""
-    try:
-        import yfinance as yf
-        info = yf.Ticker(ticker).info or {}
-        sector = info.get("sector") or info.get("sectorDisp") or ""
-        _MAP = {
-            "Technology": "Technology",
-            "Information Technology": "Technology",
-            "Healthcare": "Healthcare",
-            "Health Care": "Healthcare",
-            "Financials": "Financials",
-            "Financial Services": "Financials",
-            "Financial": "Financials",
-            "Consumer Cyclical": "Consumer Discretionary",
-            "Consumer Discretionary": "Consumer Discretionary",
-            "Consumer Defensive": "Consumer Staples",
-            "Consumer Staples": "Consumer Staples",
-            "Energy": "Energy",
-            "Industrials": "Industrials",
-            "Basic Materials": "Materials",
-            "Materials": "Materials",
-            "Real Estate": "Real Estate",
-            "Utilities": "Utilities",
-            "Communication Services": "Communication Services",
-            "Telecommunication Services": "Communication Services",
-        }
-        return _MAP.get(sector, sector) if sector else "Other"
-    except Exception:
-        return "Other"
-
-
 # ── Trade Log ──────────────────────────────────────────────────────────────────
 
 @router.get("/trades")
-def get_trades(x_user_id: Optional[str] = Header(default=None)):
-    return get_trade_log(_uid(x_user_id))
+def get_trades(_auth: dict = Depends(current_user)):
+    return get_trade_log(_auth["uid"])
 
 
 @router.post("/trades")
 def add_trade_endpoint(
     body: AddTradeRequest,
-    x_user_id: Optional[str] = Header(default=None),
+    _auth: dict = Depends(current_user),
 ):
+    uid = _auth["uid"]
+    # 사용자별 쓰기 직렬화 — 동시 매매의 read-modify-write 경쟁 방지
+    with user_write_lock(uid):
+        return _add_trade_locked(body, uid)
+
+
+def _add_trade_locked(body: AddTradeRequest, uid: str):
     import threading
-    uid = _uid(x_user_id)
     holdings = get_holdings(uid)
     ticker = body.ticker.upper()
 
     _type_map = {"BUY": "ADD", "SELL": "SOLD"}
     trade_type = _type_map.get(body.type.upper(), body.type.upper())
+
+    # ── 입력 검증 ────────────────────────────────────────────────────────────
+    # 검증이 없으면 음수 수량·미보유 종목 매도·초과 매도가 모두 통과해
+    # _adjust_cash 가 없는 현금을 만들어낸다 (보유 갱신은 건너뛰고 현금만 증가).
+    try:
+        qty_in = float(body.q)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="수량이 올바르지 않습니다")
+    if not (qty_in > 0) or qty_in != qty_in or qty_in in (float("inf"), float("-inf")):
+        raise HTTPException(status_code=400, detail="수량은 0보다 커야 합니다")
+
+    price_in = float(body.price or 0)
+    if price_in < 0 or price_in != price_in:
+        raise HTTPException(status_code=400, detail="가격이 올바르지 않습니다")
+
+    if trade_type == "SOLD" and ticker != "CASH":
+        held = float(holdings.get(ticker, {}).get("q", 0) or 0)
+        if held <= 0:
+            raise HTTPException(
+                status_code=400, detail=f"{ticker} 미보유 — 매도할 수 없습니다"
+            )
+        if qty_in > held + 1e-9:
+            raise HTTPException(
+                status_code=400,
+                detail=f"보유 수량({held:g})보다 많이 매도할 수 없습니다",
+            )
+
+    # ── 현금 잔고 검사 ───────────────────────────────────────────────────────
+    # 매수·출금이 잔고를 넘으면 막는다. 예전에는 음수 잔고를 그대로 두었는데,
+    # 사용자는 그 상태를 오류로 인식하지 못하고 계속 거래해 장부가 어긋났다.
+    # (포트폴리오 최초 등록만 예외다 — /setup 이 따로 처리한다.)
+    cash_now = float(holdings.get("CASH", {}).get("q", 0) or 0)
+    need = 0.0
+    if ticker == "CASH" and trade_type == "WITHDRAW":
+        need = abs(qty_in)
+    elif ticker != "CASH" and trade_type == "ADD":
+        need = qty_in * price_in
+
+    if need > 0 and need > cash_now + 1e-6:
+        raise HTTPException(
+            status_code=400,
+            detail=f"현금이 부족합니다. 필요 ${need:,.2f} · 보유 ${cash_now:,.2f}",
+        )
 
     if ticker not in holdings and trade_type == "ADD":
         save_holding(ticker, 0.0, float(body.price or 0), "Other", uid)
@@ -303,9 +285,8 @@ def add_trade_endpoint(
         def _bg_sector():
             sector = _fetch_sector(ticker)
             if sector and sector != "Other":
-                h = get_holdings(uid).get(ticker, {})
-                if h:
-                    save_holding(ticker, h.get("q", 0), h.get("avg", 0), sector, uid)
+                # 섹터만 UPDATE — 조회를 기다리는 사이 체결된 매매를 되돌리지 않는다
+                update_holding_sector(ticker, sector, uid)
         threading.Thread(target=_bg_sector, daemon=True).start()
 
     trade_date = (body.date or "").strip() or datetime.now().strftime("%Y-%m-%d")
@@ -358,15 +339,29 @@ class UpdateTradeRequest(BaseModel):
 def update_trade_endpoint(
     trade_id: int,
     body: UpdateTradeRequest,
-    x_user_id: Optional[str] = Header(default=None),
+    _auth: dict = Depends(current_user),
 ):
-    uid = _uid(x_user_id)
+    uid = _auth["uid"]
+    with user_write_lock(uid):
+        return _update_trade_locked(trade_id, body, uid)
+
+
+def _update_trade_locked(trade_id: int, body: "UpdateTradeRequest", uid: str):
     # 수정 전에 기존 티커 파악 (ticker가 변경될 수 있으므로 old/new 모두 재계산)
     all_trades = get_trade_log(uid)
     old_trade  = next((t for t in all_trades if t.get("id") == trade_id), None)
     old_ticker = old_trade["ticker"] if old_trade else None
 
-    ok = update_trade_by_id(trade_id, body.dict(), uid)
+    # 티커·거래유형을 다른 쓰기 경로와 동일하게 정규화한다.
+    # 정규화하지 않으면 소문자/BUY 표기가 그대로 저장되고, 재생 로직은
+    # 정확히 일치하는 문자열만 세므로 해당 거래가 통째로 누락돼 보유가 삭제된다.
+    payload = body.dict()
+    payload["ticker"] = str(body.ticker).upper().strip()
+    payload["type"] = {"BUY": "ADD", "SELL": "SOLD"}.get(
+        str(body.type).upper(), str(body.type).upper()
+    )
+
+    ok = update_trade_by_id(trade_id, payload, uid)
     if not ok:
         raise HTTPException(status_code=404, detail="거래 내역 없음")
 
@@ -384,15 +379,25 @@ def update_trade_endpoint(
         )
         new_delta = _cash_delta(body.type, float(body.q), float(body.price or 0))
         _adjust_cash(uid, new_delta - old_delta)
+    elif body.ticker.upper() == "CASH" and old_trade:
+        # DEPOSIT/WITHDRAW 수정도 잔고에 반영해야 한다 (_cash_delta 는 0 을 반환하므로 별도 처리)
+        old_delta = _cash_event_delta(old_trade.get("type", ""), float(old_trade.get("q", 0)))
+        new_delta = _cash_event_delta(body.type, float(body.q))
+        _adjust_cash(uid, new_delta - old_delta)
     return {"ok": True}
 
 
 @router.delete("/trades/{trade_id}")
 def delete_trade_endpoint(
     trade_id: int,
-    x_user_id: Optional[str] = Header(default=None),
+    _auth: dict = Depends(current_user),
 ):
-    uid = _uid(x_user_id)
+    uid = _auth["uid"]
+    with user_write_lock(uid):
+        return _delete_trade_locked(trade_id, uid)
+
+
+def _delete_trade_locked(trade_id: int, uid: str):
     all_trades = get_trade_log(uid)
     trade = next((t for t in all_trades if t.get("id") == trade_id), None)
     if not trade:
@@ -402,100 +407,26 @@ def delete_trade_endpoint(
     if not ok:
         raise HTTPException(status_code=404, detail="거래 내역 없음")
 
-    # BUY 삭제 시: 해당 날짜 이후의 동일 종목 SELL 기록도 함께 삭제
     ttype  = str(trade.get("type",   "")).upper()
     ticker = str(trade.get("ticker", "")).upper()
-    t_date = str(trade.get("date",   ""))[:10]
-    cascade_sells: list[dict] = []
-    if ttype in ("ADD", "BUY") and ticker not in ("CASH", ""):
-        for t in all_trades:
-            if (t.get("id") != trade_id
-                    and str(t.get("ticker", "")).upper() == ticker
-                    and str(t.get("type",   "")).upper() in ("SOLD", "SELL")
-                    and str(t.get("date",   ""))[:10] >= t_date):
-                cascade_sells.append(t)
-                delete_trade_by_id(t["id"], uid)
 
-    _recalculate_holding_from_trades(trade["ticker"], uid)
+    # 예전에는 BUY 를 지우면 그 날짜 이후의 SELL 을 전부 연쇄 삭제했다.
+    # 남은 BUY 가 그 SELL 들을 충분히 커버하는 경우까지 지워버려 사용자 거래
+    # 이력이 소실됐으므로 제거했다. 재생(_recalculate_holding_from_trades)이
+    # 수량을 0 이하로 클램프하므로 보유 수량은 어차피 정합성을 유지한다.
+    _recalculate_holding_from_trades(ticker, uid)
 
-    # CASH 잔고: 삭제된 거래(및 연쇄 삭제 SELL) 델타를 역방향으로 복원
+    # CASH 잔고: 삭제된 거래 델타를 역방향으로 복원
     if ticker != "CASH":
-        total_delta = _cash_delta(
+        _adjust_cash(uid, -_cash_delta(
             trade.get("type", ""),
             float(trade.get("q", 0)),
             float(trade.get("price") or 0),
-        )
-        for s in cascade_sells:
-            total_delta += _cash_delta(
-                s.get("type", ""),
-                float(s.get("q", 0)),
-                float(s.get("price") or 0),
-            )
-        _adjust_cash(uid, -total_delta)
-    return {"ok": True}
-
-
-def _cash_delta(trade_type: str, q: float, price: float) -> float:
-    """거래 유형에 따른 현금 변화량 반환. BUY → 음수(차감), SELL → 양수(증가)."""
-    t = trade_type.upper()
-    if t in ("ADD", "BUY"):
-        return -(q * price)
-    if t in ("SOLD", "SELL"):
-        return +(q * price)
-    return 0.0
-
-
-def _adjust_cash(uid: str, delta: float) -> None:
-    """CASH 잔고에 delta를 가감. 잔고가 없으면 delta > 0일 때만 생성."""
-    if abs(delta) < 0.001:
-        return
-    holdings_ = get_holdings(uid)
-    cash_h = holdings_.get("CASH")
-    if cash_h is None:
-        if delta > 0:
-            save_holding("CASH", round(delta, 2), 1.0, "Cash", uid)
-        return
-    cur = float(cash_h.get("q", 0)) if isinstance(cash_h, dict) else float(cash_h or 0)
-    save_holding("CASH", round(max(0.0, cur + delta), 2), 1.0, "Cash", uid)
-
-
-def _recalculate_holding_from_trades(ticker: str, uid: str) -> None:
-    """거래 기록 전체를 재생해 보유 수량·단가를 재계산. 수량 0이면 삭제.
-    CASH는 _adjust_cash로 별도 처리."""
-    if ticker.upper() == "CASH":
-        return
-    trades = sorted(
-        [t for t in get_trade_log(uid) if t["ticker"] == ticker],
-        key=lambda t: (t.get("date", ""), t.get("id", 0)),
-    )
-    qty        = 0.0
-    total_cost = 0.0
-
-    for tr in trades:
-        q     = float(tr.get("q") or 0)
-        price = float(tr.get("price") or 0)
-        ttype = tr.get("type", "")
-        if ttype in ("ADD", "BUY"):
-            total_cost += price * q
-            qty        += q
-        elif ttype in ("SOLD", "SELL"):
-            if qty > 0:
-                ratio      = min(q, qty) / qty
-                total_cost = total_cost * (1.0 - ratio)
-            qty = max(0.0, qty - q)
-        elif ttype == "UPDATE":
-            qty = q   # avg 는 그대로 유지
-
-    holdings = get_holdings(uid)
-    existing = holdings.get(ticker, {})
-    sector   = existing.get("sector", "Other")
-
-    qty = round(qty, 6)
-    if qty <= 0:
-        delete_holding(ticker, uid)
+        ))
     else:
-        avg = round(total_cost / qty, 4) if qty > 0 else 0.0
-        save_holding(ticker, qty, avg, sector, uid)
+        # CASH DEPOSIT/WITHDRAW 삭제 시 잔고를 되돌린다 (_cash_delta 는 0 을 반환)
+        _revert_cash_event(uid, ttype, float(trade.get("q", 0)))
+    return {"ok": True}
 
 
 # 시총 순 미국 상장 주요 티커 (rank 낮을수록 대형주)
@@ -668,36 +599,106 @@ _US_TICKERS: list[tuple[str, str]] = [
 
 @router.get("/ticker-search")
 def ticker_search(q: str = "", limit: int = 5):
-    """미국 상장 티커 시총 순 검색. prefix 우선, 그 다음 contains 매칭."""
+    """상장 티커 검색. ticker_universe(NASDAQ+NYSE 전 종목)를 우선 조회한다.
+
+    DB가 없거나 결과가 없으면 내장 시총 상위 목록으로 폴백한다.
+    """
     if not q:
         return []
     q = q.upper().strip()
-    # prefix 매칭 먼저 (시총 순 정렬 유지)
+
+    try:
+        from backend.db import get_conn, is_available
+        if is_available():
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT ticker, name FROM ticker_universe
+                           WHERE active AND (ticker LIKE %s OR UPPER(name) LIKE %s)
+                           ORDER BY
+                             CASE WHEN ticker = %s THEN 0
+                                  WHEN ticker LIKE %s THEN 1
+                                  ELSE 2 END,
+                             is_etf,          -- 보통주를 ETF보다 앞에
+                             length(ticker),
+                             ticker
+                           LIMIT %s""",
+                        (f"%{q}%", f"%{q}%", q, f"{q}%", limit),
+                    )
+                    rows = cur.fetchall()
+            if rows:
+                return [{"ticker": r[0], "name": r[1] or ""} for r in rows]
+    except Exception as e:
+        print(f"[ticker_search DB error] {e}")
+
+    # 폴백: 내장 시총 상위 목록
     prefix  = [(t, n) for t, n in _US_TICKERS if t.startswith(q)]
-    # contains 매칭 (이미 prefix에 없는 것만)
     in_mid  = [(t, n) for t, n in _US_TICKERS if q in t and not t.startswith(q)]
-    # 회사명 contains 매칭
     by_name = [(t, n) for t, n in _US_TICKERS if q in n.upper() and not t.startswith(q) and q not in t]
     merged = (prefix + in_mid + by_name)[:limit]
     return [{"ticker": t, "name": n} for t, n in merged]
 
 
 @router.get("/ticker-price")
-def get_ticker_price(ticker: str, x_user_id: Optional[str] = Header(default=None)):
-    """티커 현재가 조회 (빠른 응답 — sector는 /auto-sector 경유)."""
+def get_ticker_price(ticker: str, _auth: dict = Depends(current_user)):
+    """티커 현재가 조회 — 거래 입력 폼의 가격 자동 채움용.
+
+    **속도가 핵심인 경로다.** 사용자가 티커를 입력하고 값이 채워질 때까지
+    기다리는 화면이라, 예전에는 없는 심볼에 17초까지 걸렸다. 원인은 yfinance 를
+    순차로 최대 네 번 부른 것이었다(폴링 → 종가 백필 → 단일조회 → fast_info).
+
+    지금은 이렇게 줄였다.
+      ① 상장 목록(11,000여 종목)에서 심볼 존재 여부를 먼저 본다 — 없으면 즉시
+         404. 타이핑 중간값처럼 존재하지 않는 심볼을 yfinance 에 물어보느라
+         수 초를 쓰지 않는다.
+      ② 확정 종가 백필을 건너뛴다 — 여기서 필요한 건 현재가 하나뿐이고,
+         일별 종가는 스케줄러가 채운다.
+      ③ 마지막 수단인 단일 조회도 fast_info 를 부르지 않는다 — 이름은 이미
+         상장 목록에 있다.
+    """
+    from backend.services.live_quotes import get_quote, DEFAULT_MAX_AGE
+    from backend.services.ticker_universe import lookup as universe_lookup
+
+    sym = ticker.upper().strip()
+    if not sym:
+        raise HTTPException(status_code=400, detail="티커를 입력하세요")
+
+    # ① 상장 목록 조회 (DB, 약 1ms). 목록에 없으면 여기서 끝낸다 —
+    #    타이핑 중간값 같은 없는 심볼을 yfinance 에 물어보면 수 초가 그냥 날아간다.
+    known = universe_lookup(sym)
+    if known is None:
+        raise HTTPException(status_code=404, detail=f"티커 {sym}를 찾을 수 없습니다")
+
+    try:
+        # interval="5m": 화면에 값 하나 채우는 용도라 1분봉까지 받을 이유가 없다.
+        q = get_quote(sym, max_age=DEFAULT_MAX_AGE, backfill=False, interval="5m")
+    except Exception as e:
+        logger.warning(f"[ticker-price] {sym} 조회 오류: {e}")
+        q = None
+
+    if q and q.get("price"):
+        return {
+            "ticker":        sym,
+            "price":         round(float(q["price"]), 4),
+            "name":          (known or {}).get("name", ""),
+            "currency":      "USD",
+            "change_pct":    q.get("change_1d_pct"),
+            "volume":        q.get("volume"),
+            "as_of_session": q.get("session"),
+            "age_sec":       round(float(q.get("age_sec") or 0), 1),
+        }
+
+    # 상장은 돼 있는데 시세만 못 받은 경우 — 마지막으로 직접 조회한다.
     try:
         import yfinance as yf
-        tk = yf.Ticker(ticker.upper())
-        hist = tk.history(period="5d")
+        hist = yf.Ticker(sym).history(period="5d")
         if hist.empty:
-            raise HTTPException(status_code=404, detail=f"티커 {ticker}를 찾을 수 없습니다")
-        price = round(float(hist["Close"].iloc[-1]), 4)
-        info  = tk.fast_info  # fast_info: .info 보다 훨씬 빠름
+            raise HTTPException(status_code=404, detail=f"티커 {sym}의 시세가 없습니다")
         return {
-            "ticker":   ticker.upper(),
-            "price":    price,
-            "name":     getattr(info, "display_name", "") or "",
-            "currency": getattr(info, "currency", "USD") or "USD",
+            "ticker":   sym,
+            "price":    round(float(hist["Close"].iloc[-1]), 4),
+            "name":     known.get("name", ""),
+            "currency": "USD",
         }
     except HTTPException:
         raise
@@ -706,9 +707,9 @@ def get_ticker_price(ticker: str, x_user_id: Optional[str] = Header(default=None
 
 
 @router.post("/auto-sector")
-def auto_sector(x_user_id: Optional[str] = Header(default=None)):
+def auto_sector(_auth: dict = Depends(current_user)):
     """보유 종목 중 sector='Other'인 종목의 섹터를 yfinance로 자동 분류."""
-    uid      = _uid(x_user_id)
+    uid      = _auth["uid"]
     holdings = get_holdings(uid)
     updated  = []
     for ticker, info in holdings.items():
@@ -719,16 +720,18 @@ def auto_sector(x_user_id: Optional[str] = Header(default=None)):
             continue
         sector = _fetch_sector(ticker)
         if sector and sector != "Other":
-            save_holding(ticker, info.get("q", 0), info.get("avg", 0), sector, uid)
-            updated.append({"ticker": ticker, "sector": sector})
+            # 섹터만 UPDATE — save_holding 으로 스냅샷을 되쓰면, yfinance 응답을
+            # 기다리는 수 초 사이에 사용자가 체결한 매매가 되돌아간다.
+            if update_holding_sector(ticker, sector, uid):
+                updated.append({"ticker": ticker, "sector": sector})
     return {"updated": updated, "count": len(updated)}
 
 
 # ── 분석 데이터 ─────────────────────────────────────────────────────────────────
 
 @router.get("/metrics")
-def get_metrics(x_user_id: Optional[str] = Header(default=None)):
-    uid = _uid(x_user_id)
+def get_metrics(_auth: dict = Depends(current_user)):
+    uid = _auth["uid"]
     holdings  = get_holdings(uid)
     trade_log = get_trade_log(uid)
     if not holdings and not trade_log:
@@ -739,11 +742,27 @@ def get_metrics(x_user_id: Optional[str] = Header(default=None)):
         for tr in (trade_log or [])
         if str(tr.get("ticker", "")).upper() not in ("CASH", "")
     })
-    close_df = _portfolio_close_df(holdings, period="2y", ttl=300, extra_tickers=traded_tickers)
+    _period = _period_covering_first_trade(trade_log)
+    close_df = _portfolio_close_df(holdings, period=_period, ttl=300, extra_tickers=traded_tickers)
     if close_df.empty:
         raise HTTPException(status_code=400, detail="가격 데이터 없음")
     equity_curve = build_equity_curve(holdings, trade_log, close_df)
-    metrics = calculate_metrics(holdings, close_df, equity_curve)
+
+    # 1일 변동은 곡선의 위치 기반 차분(iloc[-1]-iloc[-2])이 아니라
+    # 종목별 '마지막 두 실제 관측치'의 합으로 계산한다 →
+    # 화면의 종목별 행 합계와 정의상 일치하고, 유령 행에 영향받지 않는다.
+    _1d_tickers = [t for t in holdings if t != "CASH"]
+    raw_df = (
+        get_close_df(_1d_tickers, period="1mo", ttl=1800, include_market=False, fill=False)
+        if _1d_tickers else pd.DataFrame()
+    )
+    # /holdings-detail 과 동일하게 얇은 종목을 보완한다. 빠뜨리면 그 종목만
+    # daily_change 가 None 이 되어 변동액에서는 빠지고 분모에는 그대로 남아
+    # 포트폴리오 변동률이 실제보다 작게 나온다.
+    if _1d_tickers and not raw_df.empty:
+        raw_df = _ensure_prev_close(raw_df, _1d_tickers)
+    live = _get_live_prices(_1d_tickers) if (_1d_tickers and _is_market_open()) else {}
+    metrics = calculate_metrics(holdings, close_df, equity_curve, raw_df=raw_df, live=live)
 
     # total_return_pct: TWRR(날짜 보정 없는 시간가중수익률)의 마지막 값으로 덮어쓰기
     # calculate_metrics는 equity_curve(날짜 보정 포함)를 쓰므로 추가 입금 시 왜곡 가능
@@ -759,9 +778,9 @@ def get_metrics(x_user_id: Optional[str] = Header(default=None)):
 @router.get("/equity-curve")
 def get_equity_curve(
     benchmark: Optional[str] = "sp500",
-    x_user_id: Optional[str] = Header(default=None),
+    _auth: dict = Depends(current_user),
 ):
-    uid = _uid(x_user_id)
+    uid = _auth["uid"]
     holdings  = get_holdings(uid)
     trade_log = get_trade_log(uid)
     if not holdings and not trade_log:
@@ -773,7 +792,8 @@ def get_equity_curve(
         for tr in (trade_log or [])
         if str(tr.get("ticker", "")).upper() not in ("CASH", "")
     })
-    close_df = _portfolio_close_df(holdings, period="2y", ttl=300, extra_tickers=traded_tickers)
+    _period = _period_covering_first_trade(trade_log)
+    close_df = _portfolio_close_df(holdings, period=_period, ttl=300, extra_tickers=traded_tickers)
 
     return_pct, holdings_by_date, initial_equity, cash_events, equity = build_return_pct_curve(holdings, trade_log, close_df)
 
@@ -789,8 +809,8 @@ def get_equity_curve(
 
 
 @router.get("/holdings-detail")
-def get_holdings_detail_endpoint(x_user_id: Optional[str] = Header(default=None)):
-    uid = _uid(x_user_id)
+def get_holdings_detail_endpoint(_auth: dict = Depends(current_user)):
+    uid = _auth["uid"]
     holdings = get_holdings(uid)
     if not holdings:
         return []
@@ -805,31 +825,22 @@ def get_holdings_detail_endpoint(x_user_id: Optional[str] = Header(default=None)
             "pnl_pct": 0.0, "pnl": 0.0,
             "market_value": round(cash_q, 2), "weight": 1.0,
         }]
-    # include_market=False: 현재가만 필요, 시장 지수 불필요
-    # ttl=1800: 역사 종가는 하루 1회만 갱신되므로 30분 캐시 (live 가격은 _inject_live가 별도 60초 갱신)
-    close_df = get_close_df(tickers, period="5d", ttl=1800, include_market=False)
-    close_df = _inject_live(close_df)
+    # fill=False: 실제 관측치만 담은 희소 프레임.
+    # ffill 된 프레임을 쓰면 유령 행이 '마지막 종가'로 잡혀 변동률이 0%가 된다.
+    # period="1mo": 연휴+공휴일이 겹쳐도 모든 종목에 실제 관측치가 2개 이상 남도록 넉넉히.
+    raw_df = get_close_df(tickers, period="1mo", ttl=1800, include_market=False, fill=False)
+    # 전일 종가가 없는 종목(DB에 1행만 존재)을 yfinance에서 보완
+    raw_df = _ensure_prev_close(raw_df, tickers)
 
-    # 장 외 시간: 오늘 ET 행이 DB의 ffill 아티팩트(전일 종가 복사)일 수 있어 제거.
-    # → curr = 마지막 완료 거래일 종가, prev = 그 전날 종가 → 올바른 "마지막날 변동률" 표시.
-    # 오늘 행이 실제 종가(전일과 다름)이면 제거하지 않는다.
-    if not _is_market_open() and len(close_df) >= 2:
-        if _ET_TZ is not None:
-            today_et = pd.Timestamp(datetime.now(_ET_TZ).date())
-        else:
-            today_et = pd.Timestamp((datetime.now(timezone.utc) + timedelta(hours=-4)).date())
-        if today_et in close_df.index:
-            today_vals = close_df.loc[today_et].dropna()
-            prev_vals  = close_df.iloc[-2].reindex(today_vals.index).dropna()
-            if not today_vals.empty and today_vals.equals(prev_vals.reindex(today_vals.index)):
-                close_df = close_df.drop(today_et)
+    # 장중에만 실시간 가격 사용. 장 외에는 마지막 확정 종가 기준으로 계산된다.
+    live = _get_live_prices(tickers) if _is_market_open() else {}
 
-    return get_holdings_detail(holdings, close_df)
+    return get_holdings_detail(holdings, raw_df, live=live)
 
 
 @router.get("/sector-weights")
-def get_sector_weights(x_user_id: Optional[str] = Header(default=None)):
-    uid = _uid(x_user_id)
+def get_sector_weights(_auth: dict = Depends(current_user)):
+    uid = _auth["uid"]
     holdings = get_holdings(uid)
     if not holdings:
         return {}
@@ -851,33 +862,119 @@ def get_sector_weights(x_user_id: Optional[str] = Header(default=None)):
     return {s: round(v / total, 4) for s, v in sorted(rows.items(), key=lambda x: -x[1])}
 
 
+# ── 포트폴리오 최초 등록 ───────────────────────────────────────────────────────
+
+@router.post("/setup")
+def setup_portfolio(body: PortfolioSetupRequest, _auth: dict = Depends(current_user)):
+    """포트폴리오 최초 등록 / 새로 등록.
+
+    사용자는 "지금 이만큼 갖고 있다"를 입력하는 것이지 거래를 하는 게 아니다.
+    그런데 내부 장부는 거래의 누적으로 잔고를 만든다. 그 간극을 여기서 메운다.
+
+      ① 최초 거래일에 (매수금 합계 + 현재 현금) 을 입금한 것으로 기록한다.
+         이 입금이 없으면 매수 시점마다 현금이 모자라 잔고가 음수가 된다.
+      ② 각 종목을 입력한 매수일·단가로 매수 처리한다.
+      ③ 결과적으로 현금은 사용자가 입력한 값과 정확히 일치한다.
+
+    그래프와 이력에는 ①의 입금이 시작점으로 보이므로, 수익률이 "입금 이후의
+    성과"로 올바르게 계산된다.
+    """
+    uid = _auth["uid"]
+
+    # ── 검증: 저장을 시작하기 전에 전부 확인한다 ────────────────────────────
+    cash = float(body.cash or 0)
+    if cash < 0:
+        raise HTTPException(status_code=400, detail="현금 잔고는 0 이상이어야 합니다")
+
+    rows = []
+    for h in body.holdings:
+        t = (h.ticker or "").upper().strip()
+        if not t or t == "CASH":
+            raise HTTPException(status_code=400, detail="종목 코드를 확인해 주세요")
+        if not (h.q > 0):
+            raise HTTPException(status_code=400, detail=f"{t}: 수량은 0보다 커야 합니다")
+        if not (h.price > 0):
+            raise HTTPException(status_code=400, detail=f"{t}: 매수 단가를 입력해 주세요")
+        d = (h.date or "").strip()[:10]
+        try:
+            datetime.strptime(d, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"{t}: 매수일 형식이 올바르지 않습니다")
+        rows.append({"ticker": t, "q": float(h.q), "price": float(h.price), "date": d})
+
+    if not rows and cash <= 0:
+        raise HTTPException(status_code=400, detail="보유 종목이나 현금 중 하나는 입력해 주세요")
+
+    with user_write_lock(uid):
+        existing = get_holdings(uid)
+        has_data = bool([k for k in existing if k != "CASH"]) or \
+                   float(existing.get("CASH", {}).get("q", 0) or 0) != 0
+        if has_data and not body.replace:
+            raise HTTPException(
+                status_code=409,
+                detail="이미 등록된 포트폴리오가 있습니다. 새로 등록하려면 기존 정보를 삭제해야 합니다.",
+            )
+        if body.replace:
+            wipe_portfolio(uid)
+
+        invested = sum(r["q"] * r["price"] for r in rows)
+        first_date = min((r["date"] for r in rows), default=None) or \
+                     datetime.now().strftime("%Y-%m-%d")
+
+        # ① 시드 입금 — 매수금 전액 + 남은 현금
+        add_trade({"date": first_date, "ticker": "CASH", "type": "DEPOSIT",
+                   "q": round(invested + cash, 2), "price": 1.0,
+                   "memo": "포트폴리오 등록"}, uid)
+        save_holding("CASH", round(invested + cash, 2), 1.0, "Cash", uid)
+
+        # ② 종목 매수 — 매수일 순서대로 기록해 이력이 시간순으로 읽히게 한다
+        for r in sorted(rows, key=lambda x: x["date"]):
+            add_trade({"date": r["date"], "ticker": r["ticker"], "type": "ADD",
+                       "q": r["q"], "price": r["price"], "memo": "포트폴리오 등록"}, uid)
+            save_holding(r["ticker"], r["q"], r["price"], "Other", uid)
+
+        # ③ 현금은 입력값 그대로
+        save_holding("CASH", round(cash, 2), 1.0, "Cash", uid)
+
+    # 섹터는 백그라운드로 채운다 — 등록 응답을 그만큼 기다리게 할 이유가 없다.
+    import threading
+
+    def _bg_sectors():
+        for r in rows:
+            try:
+                sec = _fetch_sector(r["ticker"])
+                if sec and sec != "Other":
+                    update_holding_sector(r["ticker"], sec, uid)
+            except Exception:
+                pass
+    threading.Thread(target=_bg_sectors, daemon=True).start()
+
+    return {
+        "ok": True,
+        "holdings": len(rows),
+        "invested": round(invested, 2),
+        "cash": round(cash, 2),
+        "seed_deposit": round(invested + cash, 2),
+        "first_date": first_date,
+    }
+
+
 # ── 사용자 관리 ─────────────────────────────────────────────────────────────────
-
-@router.get("/users")
-def get_users():
-    return list_users()
-
-
-class UserCreateBody(BaseModel):
-    name: str
-    email: str = ""
-
-
-@router.post("/users/{user_id}")
-def post_create_user(user_id: str, body: UserCreateBody):
-    ok = create_user(user_id.strip(), body.name, body.email)
-    return {"ok": ok, "user_id": user_id}
+#
+# GET /users (전체 사용자 목록)와 POST /users/{id} (임의 계정 생성)는 삭제했다.
+# 전자는 모든 가입자의 ID·이메일을 인증 없이 노출했고, 후자는 아무나 계정을
+# 만들 수 있게 했다. 계정 수명주기는 이제 Firebase Auth 와 /api/auth 가 맡는다.
 
 
 # ── 개인 데이터 새로고침 ────────────────────────────────────────────────────────
 
 @router.post("/refresh")
-def refresh_portfolio(x_user_id: Optional[str] = Header(default=None)):
+def refresh_portfolio(_auth: dict = Depends(current_user)):
     """
     사용자 포트폴리오 종목의 최신 가격 강제 수집.
     새로고침 버튼 클릭 시 프론트엔드에서 호출.
     """
-    uid = _uid(x_user_id)
+    uid = _auth["uid"]
     holdings = get_holdings(uid)
     tickers = [t for t in holdings if t != "CASH"]
     if not tickers:

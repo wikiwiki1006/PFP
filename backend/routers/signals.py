@@ -8,12 +8,12 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-import numpy as np
 import pandas as pd
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 logger = logging.getLogger(__name__)
 
+from backend.services.auth import optional_user
 from backend.db.portfolio_repo import get_holdings as db_get_holdings
 from backend.db.market_cache import get_common, save_common
 from backend.services.market_data import get_close_df, _cached
@@ -23,7 +23,7 @@ from backend.services.trading_signals import (
     pairs_trading_signal,
     mean_reversion_signal,
     momentum_breakout_signal,
-    detect_market_regime,
+    detect_regime_er,
     get_sp500_universe,
     bollinger_scan_full_universe,
     compute_macro_spread_levels,
@@ -36,8 +36,6 @@ router = APIRouter(prefix="/api/signals", tags=["signals"])
 _scan_cache: dict = {}
 
 
-def _uid(x: Optional[str]) -> str:
-    return (x or "default").strip() or "default"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -49,6 +47,7 @@ def _uid(x: Optional[str]) -> str:
 def scan_universe(
     top_n:             int  = Query(default=10, ge=1, le=30),
     include_portfolio: bool = Query(default=True),
+    _auth: Optional[dict] = Depends(optional_user),
 ):
     """
     S&P500 + 나스닥 전수 스캔 — 롱/숏 타점 반환.
@@ -57,9 +56,10 @@ def scan_universe(
     import yfinance as yf
     from backend.db.market_cache import _yf_lock
 
+    # 비로그인 사용자는 표준 유니버스만 스캔한다 (남의 보유 종목이 섞이면 안 된다).
     extra    = []
-    if include_portfolio:
-        extra = [t for t in db_get_holdings("default") if t != "CASH"]
+    if include_portfolio and _auth:
+        extra = [t for t in db_get_holdings(_auth["uid"]) if t != "CASH"]
 
     universe = sorted(set(SP500_NASDAQ_UNIVERSE + extra))
 
@@ -283,23 +283,50 @@ def multi_signal(
 
 @router.get("/regime")
 def market_regime(
-    ticker: str = Query(default="^GSPC", description="분석 티커 (기본: S&P500)"),
-    years:  int = Query(default=1, ge=1, le=5, description="표시 기간 (1-5년)"),
+    ticker:    str   = Query(default="^GSPC", description="분석 티커 (기본: S&P500)"),
+    years:     int   = Query(default=1, ge=1, le=5, description="표시 기간 (1-5년)"),
+    window:    int   = Query(default=20, ge=5, le=120, description="ER 계산 기간(거래일)"),
+    threshold: float = Query(default=0.30, ge=0.05, le=0.90, description="추세 판정 임계값"),
 ):
-    """MA50/200 골든크로스 기반 시장 국면 감지 (Bull/Sideways/Bear). years 범위 내 데이터만 반환."""
-    ticker   = ticker.upper()
-    close_df = get_close_df([ticker], period="5y", ttl=300)
+    """효율성 비율(ER) 기반 시장 국면 분류 (상승/횡보/하락).
 
+    카우프만 효율성 비율(ER) = |기간 순변동| / 기간 내 일별 절대변동 합.
+    한 방향으로 곧게 가면 1 에 가깝고, 요동치며 제자리면 0 에 가깝다.
+
+        ER < threshold           → 횡보
+        ER ≥ threshold, 순변동>0 → 상승
+        ER ≥ threshold, 순변동<0 → 하락
+
+    종가만 있으면 되므로 가격 캐시(get_close_df)를 그대로 쓴다 — OHLCV 를 매번
+    내려받던 K-Means 방식과 달리 네트워크 호출이 없다. 계산도 결정적이라
+    같은 입력이면 항상 같은 결과가 나온다.
+    """
+    ticker = ticker.upper()
+
+    from backend.services.market_data import _cache_get, _cache_put
+    from backend.services.market_calendar import is_us_extended_hours
+    _ck  = f"regime_er_{ticker}_{years}_{window}_{threshold}"
+    _ttl = 300 if is_us_extended_hours() else 3600
+    _hit = _cache_get(_ck, _ttl)
+    if _hit is not None:
+        return _hit
+
+    close_df = get_close_df([ticker], period="5y", ttl=300)
     if ticker not in close_df.columns:
         raise HTTPException(status_code=400, detail=f"{ticker} 데이터 없음")
-
     price_all = close_df[ticker].dropna()
-    result    = detect_market_regime(price_all)
+
+    try:
+        result = detect_regime_er(price_all, window=window, threshold=threshold)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     rl = result.get("regime_labels")
     if rl is None or len(rl) == 0:
         return {"ticker": ticker, "current_regime": "Unknown",
-                "regime_pct": {}, "n_regimes": 3, "chart_data": []}
+                "regime_pct": {}, "n_regimes": 3, "chart_data": [],
+                "method": "efficiency_ratio", "current_er": None,
+                "window": window, "threshold": threshold}
 
     rl_series    = pd.Series(rl)
     cutoff       = rl_series.index.max() - pd.Timedelta(days=365 * years)
@@ -323,13 +350,20 @@ def market_regime(
         if date in price_window.index
     ]
 
-    return {
+    _payload = {
         "ticker":         ticker,
         "current_regime": result.get("current_regime", "Unknown"),
         "regime_pct":     regime_counts,
         "n_regimes":      result.get("n_regimes", 3),
         "chart_data":     chart_data,
+        "method":         "efficiency_ratio",
+        # 판정 근거를 화면에서 확인할 수 있도록 현재 ER 값과 설정을 함께 내려보낸다
+        "current_er":     result.get("current_er"),
+        "window":         result.get("window", window),
+        "threshold":      result.get("threshold", threshold),
     }
+    _cache_put(_ck, _payload)
+    return _payload
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -531,11 +565,8 @@ def pairs_auto(
 
     # 섹터 정보: 보유 종목 DB → common_cache → yfinance 순 조회 (TTL 7일)
     def _get_sector(t: str) -> str:
-        holdings_db = db_get_holdings("default")
-        if t in holdings_db:
-            s = holdings_db[t].get("sector", "")
-            if s and s not in ("", "Other"):
-                return s
+        # 섹터는 공개 정보다. 예전엔 'default' 사용자의 보유 종목에서 먼저 찾았는데,
+        # 남의 포트폴리오를 읽을 이유가 없고 공용 캐시로 충분하므로 제거했다.
         cached_s = get_common(f"sector_info::{t}")
         if cached_s:
             return str(cached_s)

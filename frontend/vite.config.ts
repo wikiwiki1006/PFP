@@ -38,6 +38,7 @@ export default defineConfig({
           vendor: ['react', 'react-dom'],
           charts: ['recharts'],
           query: ['@tanstack/react-query'],
+          firebase: ['firebase/app', 'firebase/auth'],
         },
       },
     },

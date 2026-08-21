@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Optional
@@ -30,8 +31,23 @@ _pool: Optional[Any] = None
 
 
 def _dsn() -> str:
+    """psycopg2 연결 문자열.
+
+    DATABASE_URL 이 있으면 그것을 우선한다 — Neon·Cloud Run 등 관리형 환경은
+    호스트/포트를 나눠 주지 않고 하나의 URL 로 제공한다.
+    없으면 기존 DB_HOST/DB_PORT... 조합으로 폴백해 로컬 개발을 그대로 지원한다.
+    """
+    url = os.getenv("DATABASE_URL", "").strip()
+    if url:
+        # psycopg2 는 channel_binding 파라미터를 인식하지 못해 연결이 실패한다.
+        # Neon 이 붙여 주는 값이므로 제거한다 (sslmode=require 로 암호화는 유지).
+        url = re.sub(r"[?&]channel_binding=[^&]*", "", url)
+        if "sslmode=" not in url:
+            url += ("&" if "?" in url else "?") + "sslmode=require"
+        return url
+
     host = os.getenv("DB_HOST", "localhost")
-    # Supabase(원격) 연결 시 SSL 필수, 로컬 localhost 연결 시 불필요
+    # 원격 연결 시 SSL 필수, 로컬 localhost 연결 시 불필요
     is_remote = host != "localhost" and host != "127.0.0.1"
     ssl_part  = "sslmode=require " if is_remote else ""
     return (

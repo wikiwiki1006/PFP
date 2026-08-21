@@ -15,7 +15,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -48,7 +48,7 @@ class SafeJSONResponse(JSONResponse):
             separators=(",", ":"),
         ).encode("utf-8")
 
-from backend.routers import portfolio, market, macro, signals, optimizer, reports, ticker
+from backend.routers import portfolio, market, macro, signals, optimizer, reports, ticker, auth
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -96,6 +96,7 @@ app.add_middleware(
 )
 
 # ── 라우터 등록 ────────────────────────────────────────────────────────────────
+app.include_router(auth.router)
 app.include_router(portfolio.router)
 app.include_router(market.router)
 app.include_router(macro.router)
@@ -114,16 +115,25 @@ def on_startup():
     from backend.db import scheduler
 
     db_ok = init_pool()
-    if db_ok:
-        init_schema()
-        # 백그라운드 스레드로 공통 티커 프리패치 (앱 시작을 블로킹하지 않음)
-        threading.Thread(target=_prefetch_common_tickers, daemon=True).start()
-        # KST 03:00 수집을 놓쳤으면 백그라운드에서 즉시 SP500 전 종목 수집 + pairs 사전계산
-        scheduler.trigger_sp500_if_missed()
-        # 1분 주기 공통 데이터 스케줄러 시작
-        scheduler.start()
-    else:
+    if not db_ok:
         logger.warning("DB 미연결 — 파일 폴백 모드로 동작합니다.")
+        return
+
+    init_schema()
+
+    # 서버리스(Cloud Run 등)에서는 요청이 없으면 인스턴스가 0으로 내려가므로
+    # 백그라운드 스레드 스케줄러가 신뢰성 있게 돌지 않는다. 그런 환경에서는
+    # ENABLE_SCHEDULER=false 로 꺼두고, 시세는 온디맨드 경로로만 수집한다.
+    if os.getenv("ENABLE_SCHEDULER", "true").lower() not in ("1", "true", "yes"):
+        logger.info("ENABLE_SCHEDULER=false — 백그라운드 스케줄러/프리패치 비활성화")
+        return
+
+    # 백그라운드 스레드로 공통 티커 프리패치 (앱 시작을 블로킹하지 않음)
+    threading.Thread(target=_prefetch_common_tickers, daemon=True).start()
+    # 수집을 놓쳤으면 백그라운드에서 즉시 SP500 전 종목 수집 + pairs 사전계산
+    scheduler.trigger_sp500_if_missed()
+    # 1분 주기 공통 데이터 스케줄러 시작
+    scheduler.start()
 
 
 def _prefetch_common_tickers():
@@ -188,6 +198,11 @@ if _frontend_dist.exists():
         # 반드시 마지막에 등록 — API 라우트가 먼저 매칭됨
         @app.get("/{full_path:path}", include_in_schema=False)
         def _serve_spa(full_path: str):
+            # /api/* 는 SPA 경로가 아니다. 여기까지 왔다는 건 그런 엔드포인트가
+            # 없다는 뜻이므로, index.html 대신 404 JSON 을 돌려준다.
+            # (API 클라이언트가 HTML 을 받아 파싱에 실패하면 원인 파악이 어렵다.)
+            if full_path.startswith("api/"):
+                raise HTTPException(status_code=404, detail="존재하지 않는 API 경로입니다.")
             return _FileResponse(str(_frontend_dist / "index.html"))
 
         logger.info(f"프론트엔드 정적 파일 서빙 활성화: {_frontend_dist}")

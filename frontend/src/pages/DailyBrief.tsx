@@ -64,7 +64,7 @@ export default function DailyBrief() {
             <FileText className="w-4 h-4 text-[#10b981]" />
             <span className="text-[10px] font-bold text-[#4a5568] tracking-[3px]">DAILY PORTFOLIO BRIEF</span>
           </div>
-          <p className="text-xs text-[#374151] mt-1">Claude Sonnet 웹서치 기반 AI 포트폴리오 브리프 · Bloomberg-style 한국어 리포트</p>
+          <p className="text-xs text-[#374151] mt-1">AI 포트폴리오 브리프 · Bloomberg-style 한국어 리포트</p>
         </div>
 
         {/* Logs area when generating */}

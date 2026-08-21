@@ -24,24 +24,30 @@ TODAY = datetime.now().strftime("%Y년 %m월 %d일")
 
 # ── 시스템 프롬프트 ──────────────────────────────────────────────────────────────
 
-EQUITY_SYSTEM_PROMPT = """당신은 LENS CAPITAL RESEARCH의 수석 애널리스트입니다.
-반드시 아래 규칙을 엄수하세요:
-1. 지정된 모든 섹션(## 헤더 포함)을 빠짐없이 순서대로 작성하세요.
-2. 각 섹션은 반드시 ## 섹션제목 으로 시작하세요. 섹션을 생략하거나 합치지 마세요.
-3. 표(Table)는 반드시 마크다운 표 형식(| 헤더 | 헤더 |\\n| --- | --- |\\n| 값 | 값 |)으로 작성하세요.
-4. 수치는 [A] 공시확인 / [E] 추정 표시를 반드시 붙이세요.
-5. 제공된 yfinance 수치를 그대로 인용하고 추정치에만 [E]를 붙이세요.
-6. 마지막 섹션까지 완전하게 마무리하세요. 토큰이 부족하면 내용을 줄이되 섹션 자체는 반드시 포함하세요.
+EQUITY_SYSTEM_PROMPT = """You are the lead analyst at LENS CAPITAL RESEARCH.
+
+**Write the entire report in Korean.** Only these instructions are in English.
+
+Rules — follow strictly:
+1. Write every specified section in order, none omitted.
+2. Start each section with `## <section title>`. Never merge or skip sections.
+3. Tables must be markdown (`| h | h |\n| --- | --- |\n| v | v |`).
+4. Tag every figure with [A] (disclosed) or [E] (estimated).
+5. Quote the provided yfinance figures verbatim; tag only your own estimates with [E].
+6. Finish through the last section. If tokens run short, shorten the content but keep every section.
 """
 
-INDUSTRY_SYSTEM_PROMPT = """당신은 LENS CAPITAL RESEARCH의 수석 산업 애널리스트입니다.
-반드시 아래 규칙을 엄수하세요:
-1. 지정된 모든 섹션(## 헤더 포함)을 빠짐없이 순서대로 작성하세요.
-2. 각 섹션은 반드시 ## 섹션제목 으로 시작하세요. 섹션을 생략하거나 합치지 마세요.
-3. 표(Table)는 반드시 마크다운 표 형식(| 헤더 | 헤더 |\\n| --- | --- |\\n| 값 | 값 |)으로 작성하세요.
-4. 수치는 [A] 공시확인 / [E] 추정 표시를 반드시 붙이세요.
-5. 제공된 yfinance 수치를 그대로 인용하고 추정치에만 [E]를 붙이세요.
-6. 마지막 섹션까지 완전하게 마무리하세요. 토큰이 부족하면 내용을 줄이되 섹션 자체는 반드시 포함하세요.
+INDUSTRY_SYSTEM_PROMPT = """You are the lead industry analyst at LENS CAPITAL RESEARCH.
+
+**Write the entire report in Korean.** Only these instructions are in English.
+
+Rules — follow strictly:
+1. Write every specified section in order, none omitted.
+2. Start each section with `## <section title>`. Never merge or skip sections.
+3. Tables must be markdown (`| h | h |\n| --- | --- |\n| v | v |`).
+4. Tag every figure with [A] (disclosed) or [E] (estimated).
+5. Quote the provided yfinance figures verbatim; tag only your own estimates with [E].
+6. Finish through the last section. If tokens run short, shorten the content but keep every section.
 """
 
 # ── 산업 목록 ────────────────────────────────────────────────────────────────────
@@ -102,18 +108,22 @@ def _call_claude(model: str, prompt: str, system: str, max_tokens: int) -> str:
     )
 
     if msg.stop_reason == "max_tokens" and text.strip():
+        # 끊긴 마지막 문장만 이어붙이는 호출이다.
+        # 예전에는 원본 프롬프트(수천 토큰) + 잘린 응답(4096 토큰)을 통째로 재전송해,
+        # 출력 200 토큰을 얻는 데 입력 9,000 토큰을 썼다 (전체 입력의 63%).
+        # 문장을 잇는 데 필요한 것은 **끝부분 몇 줄뿐**이므로 꼬리만 보낸다.
         try:
+            tail_ctx = text[-600:]
             fix = client.messages.create(
                 model=model,
                 max_tokens=200,
-                system=system,
                 messages=[
-                    {"role": "user",      "content": prompt},
-                    {"role": "assistant", "content": text},
-                    {"role": "user",      "content": (
-                        "위 텍스트가 토큰 한도로 중간에 끊겼습니다. "
-                        "끊긴 마지막 문장만 한두 문장으로 자연스럽게 완성해 주세요. "
-                        "새 섹션이나 추가 내용은 쓰지 마세요."
+                    {"role": "user", "content": (
+                        "Below is the tail of a Korean report that was cut off mid-sentence "
+                        "by a token limit. Write ONLY the few words or one sentence needed to "
+                        "finish that last incomplete sentence naturally, in Korean. "
+                        "Do not repeat the text, do not add new sections or headings.\n\n"
+                        f"---\n{tail_ctx}"
                     )},
                 ],
             )
@@ -133,8 +143,9 @@ def _call_haiku(prompt: str, system: str = "", max_tokens: int = 2000) -> str:
     return _call_claude("claude-haiku-4-5-20251001", prompt, system, max_tokens)
 
 
-def _call_sonnet(prompt: str, system: str = "", max_tokens: int = 8000) -> str:
+def _call_sonnet(prompt: str, system: str = "", max_tokens: int = 4096) -> str:
     return _call_claude("claude-sonnet-4-6", prompt, system, max_tokens)
+
 
 
 
@@ -361,22 +372,26 @@ def gather_equity_perplexity(ticker: str, company_name: str) -> str:
     if not PERPLEXITY_API_KEY:
         return ""
     try:
-        prompt = f"""오늘 날짜: {TODAY}
-종목: {company_name} ({ticker})
+        # 응답을 **영어로** 받는다. 이 결과는 그대로 Claude 입력이 되는데,
+        # 같은 내용이라도 한국어는 글자당 약 1토큰, 영어는 약 0.23토큰이라
+        # 실측상 Claude 입력이 66% 줄어든다 (2,308 → 791 토큰).
+        # 최종 리포트는 Claude 가 한국어로 쓰므로 사용자 화면은 영향받지 않는다.
+        prompt = f"""Today: {TODAY}
+Stock: {company_name} ({ticker})
 
-아래 정보를 한국어로 수집해주세요. 수치 인용보다는 뉴스와 서사 위주로 작성하세요.
+Collect the following **in English**, concise bullet points. Favor news and narrative over raw figures.
 
-【최근 30일 주요 뉴스 및 이벤트】
-- 주요 언론 보도 3~5건 (제목·출처·날짜·핵심 요약 각 1문장)
+[Key news & events, last 30 days]
+- 3-5 major press items (title, source, date, one-sentence summary each)
 
-【애널리스트 의견 변화 (최근 30일)】
-- 목표주가 상향/하향 조정, 투자의견 변경 내용
+[Analyst actions, last 30 days]
+- Price-target raises/cuts, rating changes
 
-【경쟁사 동향】
-- 주요 경쟁사 최근 이슈 1~2건
+[Competitor moves]
+- 1-2 recent issues at key competitors
 
-【산업 트렌드】
-- {company_name}과 관련된 최신 산업 트렌드 1~2건"""
+[Industry trends]
+- 1-2 current trends relevant to {company_name}"""
 
         resp = requests.post(
             "https://api.perplexity.ai/chat/completions",
@@ -403,20 +418,21 @@ def gather_industry_perplexity(meta: dict) -> str:
     if not PERPLEXITY_API_KEY:
         return ""
     try:
-        prompt = f"""오늘 날짜: {TODAY}
-산업: {meta['name_kr']} ({meta['name_en']})
-주요 기업: {meta['coverage']}
+        # 영어로 수집 — Claude 입력 토큰을 크게 줄인다 (한국어 대비 약 1/3)
+        prompt = f"""Today: {TODAY}
+Industry: {meta['name_en']}
+Key names: {meta['coverage']}
 
-아래 정보를 한국어로 수집해주세요.
+Collect the following **in English**, concise bullet points.
 
-【산업 최신 뉴스 (최근 30일)】
-- 주요 언론 보도 3~5건 (제목·출처·날짜·핵심 요약 1문장씩)
+[Industry news, last 30 days]
+- 3-5 major press items (title, source, date, one-sentence summary each)
 
-【산업 트렌드 및 규제 동향】
-- 최근 주요 정책 변화, 규제 이슈, 기술 동향
+[Trends & regulation]
+- Recent policy shifts, regulatory issues, technology moves
 
-【핵심 KPI 업데이트】
-- 최근 발표된 시장 규모, 성장률, 수요 지표"""
+[KPI updates]
+- Recently reported market size, growth rate, demand indicators"""
 
         resp = requests.post(
             "https://api.perplexity.ai/chat/completions",
@@ -688,8 +704,8 @@ def _industry_prompt_part2(meta: dict) -> str:
 
 def write_equity_report(ticker: str, model_tier: str = "basic") -> dict:
     """종목 리서치 레포트 생성.
-    model_tier: "basic" → Haiku 2-phase (각 4096 토큰)
-                "deep"  → Sonnet 단일 호출 (8000 토큰)
+    model_tier: "basic" → GPT-5.6 Sol 2-phase (각 4096 토큰)
+                "deep"  → Claude Haiku 2-phase (각 4096 토큰)
     """
     ticker = ticker.upper()
 
@@ -699,44 +715,43 @@ def write_equity_report(ticker: str, model_tier: str = "basic") -> dict:
     # 2) Perplexity 뉴스
     news_text = gather_equity_perplexity(ticker, company_name)
 
-    # 3) Haiku — 핵심 지표 구조화 (항상 Haiku, 단순 정리 작업)
-    haiku_prompt = f"""다음 yfinance 데이터에서 핵심 재무 지표를 한국어로 간략히 요약해주세요:
-
-{yf_text}
-
-아래 항목으로 정리해주세요:
-- 현재 주가 및 시가총액
-- 밸류에이션 (Trailing P/E, Forward P/E)
-- 수익성 (매출, 영업이익률, 순이익률)
-- 성장성 (매출성장률 YoY)
-- 기술적 지표 (52주 고/저, 베타)
-- 애널리스트 컨센서스 의견 및 목표주가
-- 배당 정보 (있는 경우)"""
-
-    structured_data = _call_haiku(haiku_prompt, max_tokens=2000)
-
-    context = (
+    context_base = (
         f"【yfinance 실제 데이터】\n{yf_text}\n\n"
-        f"【구조화된 핵심 지표 요약】\n{structured_data}\n\n"
         f"【최신 뉴스·애널리스트 동향 (Perplexity)】\n"
         f"{news_text if news_text else '(뉴스 데이터 없음 — 학습 지식 활용)'}"
     )
 
-    if model_tier == "deep":
-        # Sonnet: 단일 호출, 8000 토큰으로 전체 섹션 완성
-        report_prompt = f"{context}\n\n{_equity_prompt(ticker, company_name)}"
-        raw = _call_sonnet(report_prompt, EQUITY_SYSTEM_PROMPT, max_tokens=8000)
-    else:
-        # Haiku: 2-phase — Phase1(HEADER+II~V) + Phase2(VI~X), 각 4096 토큰
+    # 예전에는 Haiku 로 yf_text 를 한 번 더 요약한 뒤, 원본과 요약본을 **둘 다**
+    # 컨텍스트에 넣었다. 같은 숫자가 두 형태로 중복되는 데다 요약 호출 자체가
+    # 추가 비용이었다. yf_text 는 이미 정형화된 지표 목록이라 요약이 정보를 늘리지
+    # 않으므로 원본만 전달한다.
+    context_deep = (
+        f"[Market data — yfinance]\n{yf_text}\n\n"
+        f"[Recent news & analyst view — Perplexity]\n"
+        f"{news_text if news_text else '(no news data — rely on model knowledge)'}"
+    )
+
+    if model_tier == "basic":
+        # Haiku 기본 분석: Haiku 구조화 + Haiku 2-phase 작성
         p1 = _call_haiku(
-            f"{context}\n\n{_equity_prompt_part1(ticker, company_name)}",
+            f"{context_deep}\n\n{_equity_prompt_part1(ticker, company_name)}",
             EQUITY_SYSTEM_PROMPT, max_tokens=4096,
         )
         p2 = _call_haiku(
-            f"{context}\n\n{_equity_prompt_part2(ticker, company_name)}",
+            f"{context_deep}\n\n{_equity_prompt_part2(ticker, company_name)}",
             EQUITY_SYSTEM_PROMPT, max_tokens=4096,
         )
-        raw = p1.strip() + "\n\n" + p2.strip()
+    else:
+        # Sonnet 심층 분석: Haiku 구조화 + Sonnet 2-phase 작성
+        p1 = _call_sonnet(
+            f"{context_deep}\n\n{_equity_prompt_part1(ticker, company_name)}",
+            EQUITY_SYSTEM_PROMPT, max_tokens=4096,
+        )
+        p2 = _call_sonnet(
+            f"{context_deep}\n\n{_equity_prompt_part2(ticker, company_name)}",
+            EQUITY_SYSTEM_PROMPT, max_tokens=4096,
+        )
+    raw = p1.strip() + "\n\n" + p2.strip()
 
     sections = _parse_sections(raw)
     return {
@@ -751,8 +766,8 @@ def write_equity_report(ticker: str, model_tier: str = "basic") -> dict:
 
 def write_industry_report(industry_id: str, model_tier: str = "basic") -> dict:
     """산업 리서치 레포트 생성.
-    model_tier: "basic" → Haiku 2-phase (각 4096 토큰)
-                "deep"  → Sonnet 단일 호출 (8000 토큰)
+    model_tier: "basic" → GPT-5.6 Sol 2-phase (각 4096 토큰)
+                "deep"  → Claude Haiku 2-phase (각 4096 토큰)
     """
     if industry_id not in INDUSTRIES:
         raise ValueError(f"지원하지 않는 산업: {industry_id}")
@@ -770,12 +785,8 @@ def write_industry_report(industry_id: str, model_tier: str = "basic") -> dict:
         f"{news_text if news_text else '(뉴스 데이터 없음 — 학습 지식 활용)'}"
     )
 
-    if model_tier == "deep":
-        # Sonnet: 단일 호출, 8000 토큰으로 전체 섹션 완성
-        report_prompt = f"{context}\n\n{_industry_prompt(meta)}"
-        raw = _call_sonnet(report_prompt, INDUSTRY_SYSTEM_PROMPT, max_tokens=8000)
-    else:
-        # Haiku: 2-phase — Phase1(HEADER+II~V) + Phase2(VI~IX), 각 4096 토큰
+    if model_tier == "basic":
+        # Haiku 기본 분석: 2-phase
         p1 = _call_haiku(
             f"{context}\n\n{_industry_prompt_part1(meta)}",
             INDUSTRY_SYSTEM_PROMPT, max_tokens=4096,
@@ -784,7 +795,17 @@ def write_industry_report(industry_id: str, model_tier: str = "basic") -> dict:
             f"{context}\n\n{_industry_prompt_part2(meta)}",
             INDUSTRY_SYSTEM_PROMPT, max_tokens=4096,
         )
-        raw = p1.strip() + "\n\n" + p2.strip()
+    else:
+        # Sonnet 심층 분석: 2-phase
+        p1 = _call_sonnet(
+            f"{context}\n\n{_industry_prompt_part1(meta)}",
+            INDUSTRY_SYSTEM_PROMPT, max_tokens=4096,
+        )
+        p2 = _call_sonnet(
+            f"{context}\n\n{_industry_prompt_part2(meta)}",
+            INDUSTRY_SYSTEM_PROMPT, max_tokens=4096,
+        )
+    raw = p1.strip() + "\n\n" + p2.strip()
 
     sections = _parse_sections(raw)
     return {
@@ -807,12 +828,17 @@ def _parse_sections(raw: str) -> dict:
     for line in raw.split("\n"):
         if line.startswith("## "):
             if buf:
-                sections[cur] = "\n".join(buf).strip()
+                content = "\n".join(buf).strip()
+                # 이미 내용이 있는 섹션은 빈 내용으로 덮어쓰지 않음
+                if cur not in sections or (content and not sections[cur]):
+                    sections[cur] = content
             cur = line[3:].strip().lower().replace(" ", "_")
             buf = []
         else:
             buf.append(line)
     if buf:
-        sections[cur] = "\n".join(buf).strip()
+        content = "\n".join(buf).strip()
+        if cur not in sections or (content and not sections[cur]):
+            sections[cur] = content
     sections["_raw"] = raw
     return sections

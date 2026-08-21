@@ -170,11 +170,12 @@ const PanicBar = ({ score }: { score: number }) => {
 const VarChart = ({ dist, var95 }: { dist: { x: number; count: number }[]; var95: number | null }) => {
   if (!dist.length) return <div style={{ color: C.muted, fontSize: 11 }}>데이터 없음</div>
 
-  const maxCount = Math.max(...dist.map(d => d.count))
+  // 백엔드가 이미 퍼센트 단위(-3.78 = -3.78%)로 내려준다.
+  // 여기서 또 100을 곱하면 축이 -378% 로 표시된다.
   const data = dist.map(d => ({
     ...d,
     fill: var95 != null && d.x <= var95 ? '#ef4444' : '#1e3a5f',
-    displayX: (d.x * 100).toFixed(1),
+    displayX: d.x.toFixed(1),
   }))
 
   return (
@@ -185,7 +186,7 @@ const VarChart = ({ dist, var95 }: { dist: { x: number; count: number }[]; var95
             tickFormatter={v => `${v}%`} />
           <YAxis hide />
           {var95 != null && (
-            <ReferenceLine x={`${(var95 * 100).toFixed(1)}`} stroke="#ef4444" strokeDasharray="3 2" />
+            <ReferenceLine x={var95.toFixed(1)} stroke="#ef4444" strokeDasharray="3 2" />
           )}
           <Bar dataKey="count" isAnimationActive={false}>
             {data.map((d, i) => <Cell key={i} fill={d.fill} />)}
@@ -658,10 +659,26 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                     퀀트 스코어보드
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <QuantGauge score={data.quant.score} />
-                    <div>
-                      <div style={{ fontSize: 10, color: C.muted }}>퀀트 점수: <span style={{ color: C.up, fontWeight: 700 }}>{data.quant.score}/100</span></div>
+                    <QuantGauge score={data.quant.score ?? 0} />
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 10, color: C.muted }}>퀀트 점수: <span style={{ color: C.up, fontWeight: 700 }}>{data.quant.score ?? '—'}/100</span></div>
                       <div style={{ fontSize: 11, color: C.up, fontWeight: 700, marginTop: 2 }}>{data.quant.score_label}</div>
+                      {/* 합성 점수만 보여주면 실제보다 정밀해 보인다 — 팩터별 근거를 함께 표시 */}
+                      {data.quant.factors && (
+                        <div style={{ display: 'flex', gap: 8, marginTop: 5 }}>
+                          {([['모멘텀','momentum'],['추세','trend'],['퀄리티','quality'],['밸류','value']] as const).map(([ko,k]) => {
+                            const v = (data.quant.factors as any)?.[k]
+                            if (v == null) return null
+                            const col = v >= 67 ? C.up : v >= 34 ? '#f59e0b' : C.down
+                            return (
+                              <div key={k} style={{ textAlign: 'center' }}>
+                                <div style={{ fontSize: 9, color: C.muted }}>{ko}</div>
+                                <div style={{ fontSize: 11, fontWeight: 700, color: col, fontFamily: 'monospace' }}>{v}</div>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -670,18 +687,44 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                 <div style={{ padding: '10px 14px', borderBottom: `1px solid ${C.border}` }}>
                   <div style={{ fontSize: 10, color: '#f59e0b', fontWeight: 700, marginBottom: 6 }}>
                     시장 국면: <span style={{ color: C.text }}>{data.quant.regime}</span>
+                    {data.quant.regime_er != null && (
+                      <span style={{ color: C.muted, fontWeight: 400, marginLeft: 6 }}>
+                        (효율성비율 {data.quant.regime_er.toFixed(2)})
+                      </span>
+                    )}
                   </div>
                   <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 6 }}>
                     옵티마이저 인사이트
                   </div>
-                  {[
-                    [`목표 최적 비중: ${data.quant.optimizer.target_weight}%`, null],
-                    [`리스크 기여도: ${data.quant.optimizer.risk_contribution}% (현재 비중 ${data.quant.optimizer.current_weight}%)`, null],
-                    [`포트 상관관계: ${data.quant.optimizer.correlation} (${data.quant.optimizer.correlation_label})`, null],
-                    [`Beta 익스포저: ${data.quant.optimizer.beta_exposure}x`, null],
-                  ].map(([label], i) => (
-                    <div key={i} style={{ fontSize: 10, color: C.muted, marginBottom: 3 }}>{label as string}</div>
-                  ))}
+                  {(() => {
+                    const o = data.quant.optimizer
+                    const n = (v: number | null | undefined, suffix = '%') =>
+                      v == null ? '—' : `${v}${suffix}`
+                    const over = o.target_weight != null && o.current_weight != null
+                      && o.current_weight > o.target_weight * 1.3 && o.current_weight > 1
+                    return (
+                      <>
+                        <div style={{ fontSize: 10, color: C.muted, marginBottom: 3 }}>
+                          목표 최적 비중(HRP): <span style={{ color: C.text }}>{n(o.target_weight)}</span>
+                          {' · 현재 '}<span style={{ color: over ? C.down : C.text }}>{n(o.current_weight)}</span>
+                          {over && <span style={{ color: C.down, marginLeft: 4 }}>과다 편중</span>}
+                        </div>
+                        <div style={{ fontSize: 10, color: C.muted, marginBottom: 3 }}>
+                          리스크 기여도: <span style={{ color: C.text }}>{n(o.risk_contribution)}</span>
+                        </div>
+                        <div style={{ fontSize: 10, color: C.muted, marginBottom: 3 }}>
+                          포트 상관관계: <span style={{ color: C.text }}>{o.correlation ?? '—'}</span>
+                          {o.correlation_label && ` (${o.correlation_label})`}
+                        </div>
+                        <div style={{ fontSize: 10, color: C.muted, marginBottom: 3 }}>
+                          Beta 익스포저: <span style={{ color: C.text }}>{n(o.beta_exposure, 'x')}</span>
+                        </div>
+                        {o.note && (
+                          <div style={{ fontSize: 9, color: '#f59e0b', marginTop: 4 }}>{o.note}</div>
+                        )}
+                      </>
+                    )
+                  })()}
                   <div style={{ fontSize: 9, color: '#64748b', marginTop: 4, fontStyle: 'italic' }}>
                     (주) 수학적 기반 참고 추천으로, 강제 포지션이 아닙니다.
                   </div>
@@ -695,11 +738,24 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                   <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, marginBottom: 8 }}>
                     <span style={{ fontSize: 10, color: C.muted }}>패닉 상태 점수:</span>
                     <span style={{ fontSize: 22, fontWeight: 700, color: '#ef4444', fontFamily: 'monospace' }}>
-                      {data.quant.panic_score}
+                      {data.quant.panic_score ?? '—'}
                     </span>
                     <span style={{ fontSize: 11, color: C.muted }}>/100</span>
                   </div>
-                  <PanicBar score={data.quant.panic_score} />
+                  <PanicBar score={data.quant.panic_score ?? 0} />
+                  {data.quant.panic_components && (
+                    <div style={{ display: 'flex', gap: 8, marginTop: 6, flexWrap: 'wrap' }}>
+                      {([['RSI','rsi'],['낙폭','drawdown'],['고점대비','vs_52w_high'],['거래량','volume'],['변동성','volatility']] as const).map(([ko,k]) => {
+                        const v = (data.quant.panic_components as any)?.[k]
+                        if (v == null) return null
+                        return (
+                          <span key={k} style={{ fontSize: 9, color: C.muted }}>
+                            {ko} <span style={{ color: C.text, fontFamily: 'monospace' }}>{v}</span>
+                          </span>
+                        )
+                      })}
+                    </div>
+                  )}
                   <div style={{ fontSize: 10, color: '#ef4444', marginTop: 6, fontWeight: 600 }}>
                     시그널 상태: {data.quant.panic_status}
                   </div>

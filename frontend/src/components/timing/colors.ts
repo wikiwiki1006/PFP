@@ -41,3 +41,12 @@ export function regimeColor(regime: string): string {
   if (regime === 'Bear') return COLOR_DOWN
   return COLOR_NEUTRAL
 }
+
+export function regimeLabel(regime: string): string {
+  switch (regime) {
+    case 'Bull':     return '상승'
+    case 'Bear':     return '하락'
+    case 'Sideways': return '횡보'
+    default:         return '알 수 없음'
+  }
+}

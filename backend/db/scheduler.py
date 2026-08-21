@@ -37,9 +37,16 @@ _MACRO_INTERVAL         = 3600      # 1시간
 _HISTORY_INTERVAL       = 43200     # 12시간
 _BB_SCAN_INTERVAL       = 21600     # 6시간 (Timing Engine: S&P500 볼린저 스캔)
 _MACRO_SPREAD_INTERVAL  = 86400     # 24시간 (Timing Engine: 금리차/HY스프레드 백분위)
+_RTC_INTERVAL           = 300       # 5분  (24시간 자산: 원유·금·금리·환율·암호화폐)
+_SLICE_INTERVAL         = 60        # 1분  (티어1 전량 갱신 — 장중만)
+_UNIVERSE_INTERVAL      = 86400     # 24시간 (상장 티커 목록 동기화)
+_CLOSE_SEED_INTERVAL    = 900       # 15분 (장 마감 후 확정 종가 반영)
 
-# KST 06:00 = UTC 21:00 (전날) = EDT 17:00 (미국 장 마감 1시간 후)
-_KST_3AM_UTC_HOUR = 21
+# 일일 수집 시각 — **ET 기준** 17:00 (미국 장 마감 1시간 후).
+# 예전에는 UTC 21:00 고정이었는데, 이는 EDT 에서만 17:00 이고 EST(11~3월)에는
+# 정확히 16:00:00 ET 가 된다. last_completed_session() 이 16:00 을 '마감'으로
+# 보므로(>=), 아직 확정되지 않은 당일 봉을 공식 종가로 저장하게 된다.
+_DAILY_COLLECT_ET_HOUR = 17
 
 # pairs 사전 계산 대상 인기 종목 (기본 파라미터 threshold=5%, top_n=5)
 _PAIRS_PRECOMPUTE_TICKERS = [
@@ -53,10 +60,17 @@ def start():
     _stop_event.clear()
     _thread = threading.Thread(target=_loop, name="pfp-scheduler", daemon=True)
     _thread.start()
+    try:
+        from backend.services.market_calendar import et_to_kst_label, now_kst
+        daily = et_to_kst_label(_DAILY_COLLECT_ET_HOUR)
+        now_s = now_kst().strftime("%Y-%m-%d %H:%M KST")
+    except Exception:
+        daily, now_s = f"{_DAILY_COLLECT_ET_HOUR}:00 ET", "?"
     logger.info(
-        "백그라운드 스케줄러 시작 "
-        "(snapshot 60s / sector 5m / macro 1h / history 12h / "
-        "bb_scan 6h / macro_spread 24h / sp500_daily KST-06:00)"
+        f"백그라운드 스케줄러 시작 [{now_s}] — "
+        f"티어1 1분(장중) / 마퀴 1분 / 24h자산 5분 / 섹터 5분 / 종가반영 15분 / "
+        f"매크로 1시간 / 이력백필 12시간 / BB스캔 6시간 / "
+        f"S&P500일별 {daily} / 유니버스 24시간"
     )
 
 
@@ -78,13 +92,21 @@ def trigger_sp500_if_missed():
 
 
 def _sp500_update_due() -> bool:
-    """오늘 KST 06:00 (= UTC 21:00 = EDT 17:00) 이후 SP500 수집이 아직 안 됐으면 True."""
+    """가장 최근 ET 17:00 이후 SP500 수집이 아직 안 됐으면 True.
+
+    UTC 고정 시각이 아니라 ET 기준으로 계산해 서머타임 전환에도
+    '장 마감 1시간 후'라는 의도가 연중 유지되도록 한다.
+    """
     from backend.db.market_cache import get_common
-    utc_now = datetime.now(tz=timezone.utc)
-    # 가장 최근의 KST 03:00 시각(UTC)
-    target = utc_now.replace(hour=_KST_3AM_UTC_HOUR, minute=0, second=0, microsecond=0)
-    if utc_now.hour < _KST_3AM_UTC_HOUR:
-        target -= timedelta(days=1)
+    from backend.services.market_calendar import now_et
+
+    et_now = now_et()
+    target_et = et_now.replace(
+        hour=_DAILY_COLLECT_ET_HOUR, minute=0, second=0, microsecond=0
+    )
+    if et_now < target_et:
+        target_et -= timedelta(days=1)
+    target = target_et.astimezone(timezone.utc)
 
     last_ts = get_common("sp500_price_update_last")
     if not last_ts:
@@ -96,6 +118,90 @@ def _sp500_update_due() -> bool:
         return last_dt < target
     except Exception:
         return True
+
+
+def _in_extended_hours() -> bool:
+    """프리마켓~애프터마켓(04:00~20:00 ET). 이 시간대에는 가격이 움직인다."""
+    try:
+        from backend.services.market_calendar import is_us_extended_hours
+        return is_us_extended_hours()
+    except Exception:
+        return False
+
+
+# ── 실시간 시세 수집 (유니버스 / 스트리밍 / 순환 폴링) ──────────────────────────
+
+_quote_stream = None
+
+
+def _sync_universe():
+    from backend.services.ticker_universe import sync_universe, set_tiers
+    from backend.services.market_data import ALWAYS_FETCH, SECTOR_ETF_TICKERS
+    from backend.services.live_quotes import ROUND_THE_CLOCK
+
+    res = sync_universe()
+    logger.info(f"유니버스 동기화: {res}")
+
+    # 티어 1 = 1분마다 갱신: S&P500 + 보유 종목 + 지수·섹터 ETF + 24시간 자산.
+    # 나머지 약 11,000종목은 티어 3 — 사용자가 검색/보유할 때 온디맨드로만 수집한다
+    # (전 종목 1분 폴링은 1회 8.3분이 걸려 물리적으로 불가능).
+    hot = set(ALWAYS_FETCH) | set(SECTOR_ETF_TICKERS) | set(ROUND_THE_CLOCK)
+    try:
+        from backend.services.trading_signals import get_sp500_universe
+        hot |= set(get_sp500_universe())
+    except Exception as e:
+        logger.warning(f"S&P500 목록 조회 실패: {e}")
+    try:
+        from backend.db import get_conn
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT DISTINCT ticker FROM holdings WHERE ticker <> 'CASH'")
+                hot |= {r[0] for r in cur.fetchall()}
+    except Exception:
+        pass
+    set_tiers(tier1=hot)
+    logger.info(f"티어1(1분 갱신) 대상: {len(hot)}종목")
+
+
+def _start_quote_stream():
+    """티어 1 종목 실시간 스트리밍 시작. 성공 시 True."""
+    global _quote_stream
+    if _quote_stream is not None:
+        return True
+    from backend.services.ticker_universe import get_tier
+    from backend.services.live_quotes import QuoteStream, ROUND_THE_CLOCK
+    from backend.services.market_data import ALWAYS_FETCH, SECTOR_ETF_TICKERS
+
+    # 지수(^GSPC)·선물(CL=F)·환율(USDKRW=X)은 상장 주식이 아니라 ticker_universe 에
+    # 없으므로 tier 조회만으로는 누락된다. 항상 합집합으로 구독한다.
+    syms = sorted(
+        set(get_tier(1))
+        | set(ALWAYS_FETCH) | set(SECTOR_ETF_TICKERS) | set(ROUND_THE_CLOCK)
+    )
+    if not syms:
+        return False
+    qs = QuoteStream(flush_interval=_SNAPSHOT_INTERVAL)
+    qs.start(syms)
+    _quote_stream = qs
+    return True
+
+
+def _update_round_the_clock():
+    from backend.services.live_quotes import refresh_round_the_clock
+    n = refresh_round_the_clock()
+    logger.debug(f"24시간 자산 갱신: {n}개")
+
+
+def _update_tier1():
+    from backend.services.live_quotes import refresh_tier1
+    n = refresh_tier1()
+    logger.debug(f"티어1(S&P500+보유+지수) 갱신: {n}개")
+
+
+def _seed_closes():
+    from backend.services.live_quotes import seed_closing_prices
+    n = seed_closing_prices()
+    logger.debug(f"확정 종가 반영: {n}개")
 
 
 def _run_sp500_with_guard():
@@ -113,12 +219,46 @@ def _loop():
     last_history      = 0.0
     last_bb_scan      = 0.0
     last_macro_spread = 0.0
+    last_rtc          = 0.0     # 24시간 자산 (5분)
+    last_universe     = 0.0     # 유니버스 목록 동기화 (24시간)
+    last_slice        = 0.0     # 유니버스 순환 갱신 (60초, 장중만)
+    last_close_seed   = 0.0     # 장 마감 후 종가 반영
+    stream_started    = False
 
     while not _stop_event.is_set():
         now = time.time()
+        extended_hours = _in_extended_hours()
+
+        # ⓪ 상장 티커 유니버스 동기화: 24시간마다 (NASDAQ Trader 공개 파일)
+        if now - last_universe >= _UNIVERSE_INTERVAL:
+            _run_safe("universe", _sync_universe)
+            last_universe = now
+
+        # ⓪-b 실시간 스트리밍: 최초 1회 기동 (체결 시 푸시 → 폴링 불필요)
+        if not stream_started:
+            stream_started = _run_safe("quote_stream", _start_quote_stream) is not False
 
         # ① 스냅샷: 60초마다 (현재가 + 오늘치 종가)
         _run_safe("snapshot", _update_snapshot)
+
+        # ①-b 24시간 자산(원유·금·금리·환율·암호화폐): 5분마다, 장 개폐 무관
+        if now - last_rtc >= _RTC_INTERVAL:
+            _run_safe("round_the_clock", _update_round_the_clock)
+            last_rtc = now
+
+        # ①-c 티어1(S&P500 + 보유종목 + 지수·섹터ETF): 1분마다 전량 갱신.
+        #      정규장뿐 아니라 프리·애프터마켓(04:00~20:00 ET)에도 가격이 움직이므로
+        #      market_open 이 아니라 확장 거래시간 기준으로 돈다. 실측 515종목 24.5초.
+        #      나머지 약 11,000종목은 검색/보유 시 온디맨드 수집 (live_quotes.get_quotes).
+        if extended_hours and now - last_slice >= _SLICE_INTERVAL:
+            _run_safe("tier1", _update_tier1)
+            last_slice = now
+
+        # ①-d 확정 종가 반영: 거래가 완전히 끝난 시간대에만.
+        #      프리마켓에 실행하면 움직이는 시간외 가격을 낡은 종가로 덮어쓴다.
+        if not extended_hours and now - last_close_seed >= _CLOSE_SEED_INTERVAL:
+            _run_safe("close_seed", _seed_closes)
+            last_close_seed = now
 
         # ② 섹터: 5분마다
         if now - last_sector >= _SECTOR_INTERVAL:
@@ -153,10 +293,12 @@ def _loop():
 
 
 def _run_safe(name: str, fn):
+    """작업 실행 후 반환값 전달. 실패 시 False (호출자가 재시도 여부 판단)."""
     try:
-        fn()
+        return fn()
     except Exception as e:
         logger.warning(f"스케줄러 작업 '{name}' 실패: {e}")
+        return False
 
 
 # ── 개별 갱신 함수 ─────────────────────────────────────────────────────────────
@@ -172,10 +314,15 @@ def _update_snapshot():
     from backend.services.market_data import SNAPSHOT_TICKERS
     from backend.db.market_cache import save_snapshot, save_prices_to_db, _yf_lock
 
+    from backend.services.price_series import daily_change
+
     try:
         with _yf_lock:
+            # period="7d": SNAPSHOT_TICKERS 는 미국 지수 + 해외 지수 + 암호화폐 + 선물이
+            # 섞여 있어 인덱스가 캘린더 합집합이 된다. 2일치로는 대부분의 티커에
+            # 유효 관측치가 1개뿐이라 직전 종가를 못 찾고 변동률이 전부 0%가 됐다.
             data = yf.download(
-                SNAPSHOT_TICKERS, period="2d",
+                SNAPSHOT_TICKERS, period="7d",
                 progress=False, auto_adjust=True, threads=False,
             )
         if data.empty:
@@ -191,19 +338,14 @@ def _update_snapshot():
 
         snap = {}
         for t in close_raw.columns:
-            series = close_raw[t].dropna()
-            if series.empty:
-                continue
-            c_f = float(series.iloc[-1])
-            if not math.isfinite(c_f):
-                continue
-            p_f = float(series.iloc[-2]) if len(series) >= 2 else c_f
-            if not math.isfinite(p_f):
-                p_f = c_f
+            # 백엔드 전체가 동일한 '마지막 두 실제 관측치' 규칙을 쓰도록 primitive 재사용
+            dc = daily_change(close_raw, str(t))
+            if dc is None or not math.isfinite(dc.price):
+                continue  # 값을 못 구하면 0.0 을 쓰지 말고 건너뛴다
             snap[str(t)] = {
-                "price":         round(c_f, 4),
-                "change_1d":     round(c_f - p_f, 4),
-                "change_1d_pct": round((c_f / p_f - 1) * 100, 4) if p_f else 0.0,
+                "price":         round(dc.price, 4),
+                "change_1d":     round(dc.chg_val, 4),
+                "change_1d_pct": round(dc.chg_pct, 4),
             }
         if snap:
             save_snapshot(snap)
@@ -380,8 +522,14 @@ def refresh_user_prices(tickers: list[str]):
         return
     try:
         import math
+        from backend.services.market_data import canonical_period
         with _yf_lock:
-            data = yf.download(tickers, period="5d", progress=False, auto_adjust=True, threads=False)
+            # 5d 로 받아 저장하면 updated_at 만 새로 찍혀 '신선' 판정이 나고,
+            # 그 티커는 깊은 이력 백필을 영영 못 받는다 → 항상 표준 깊이로 수집.
+            data = yf.download(
+                tickers, period=canonical_period("5d"),
+                progress=False, auto_adjust=True, threads=False,
+            )
         if data.empty:
             return
         close_raw = (

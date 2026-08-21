@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
-import { Globe, Play, ChevronDown, ChevronRight, Download, History, X, Square } from 'lucide-react'
+import { Globe, Play, ChevronDown, ChevronRight, Download, History, X, Square, Lock } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { ErrorMessage } from '@/components/LoadingSpinner'
@@ -8,15 +8,18 @@ import { FinancialTips } from '@/components/FinancialTips'
 import { getMacroModes, startMacroAnalysis, getMacroJob, cancelMacroJob, getHoldings, getMacroReportHistory, getMacroReportFile } from '@/api'
 import type { MacroAnalysisResult, MacroAgent } from '@/types'
 import { cn } from '@/lib/utils'
+import { useLoginPrompt } from '@/components/auth/LockedPreview'
+import { useDemoQuery } from '@/lib/useDemoQuery'
+import { DEMO_HOLDINGS_RAW } from '@/lib/demoData'
 
 // ── sessionStorage 키 ──────────────────────────────────────────────────────────
-const SK_PENDING = 'macro_pending'
-const SK_START   = 'macro_start'
-const SK_RESULT  = 'macro_result'
-const SK_EVENT   = 'macro_event'
-const SK_MODEL   = 'macro_model'
-const SK_MODE    = 'macro_mode'
-const SK_JOB_ID  = 'macro_job_id'
+const SK_PENDING   = 'macro_pending'
+const SK_START     = 'macro_start'
+const SK_RESULT    = 'macro_result'
+const SK_EVENT     = 'macro_event'
+const SK_MODEL     = 'macro_model'
+const SK_MODE      = 'macro_mode'
+const SK_JOB_ID    = 'macro_job_id'
 
 // 모드별 예상 소요 시간 (ms)
 const MODE_MAX_MS: Record<string, number> = {
@@ -390,10 +393,12 @@ function buildPdfHtml(result: MacroAnalysisResult, dateStr: string): string {
 // ── 메인 페이지 ───────────────────────────────────────────────────────────────
 
 export default function MacroScenario() {
+  // 시나리오 분석·과거 이력은 로그인이 필요하다. 예시 분석 결과는 만들지 않는다.
+  const { isAuthed, requireLogin, modalEl } = useLoginPrompt()
   // sessionStorage 에서 이전 상태 복원
-  const [event, setEvent] = useState(() => sessionStorage.getItem(SK_EVENT) || '')
-  const [model, setModel] = useState(() => sessionStorage.getItem(SK_MODEL) || 'sonnet')
-  const [mode,  setMode]  = useState(() => sessionStorage.getItem(SK_MODE)  || 'standard')
+  const [event,    setEvent]    = useState(() => sessionStorage.getItem(SK_EVENT)    || '')
+  const [model,    setModel]    = useState(() => sessionStorage.getItem(SK_MODEL)    || 'sonnet')
+  const [mode,     setMode]     = useState(() => sessionStorage.getItem(SK_MODE)     || 'standard')
 
   const [result, setResult] = useState<MacroAnalysisResult | null>(() => {
     try {
@@ -416,12 +421,12 @@ export default function MacroScenario() {
   const [showHist, setShowHist] = useState(false)
 
   const modesQ    = useQuery({ queryKey: ['macro-modes'], queryFn: getMacroModes })
-  const holdingsQ = useQuery({ queryKey: ['holdings'],    queryFn: getHoldings, staleTime: 60_000 })
+  const holdingsQ = useDemoQuery(['holdings'], getHoldings, DEMO_HOLDINGS_RAW, { staleTime: 60_000 })
   const histQ     = useQuery({
     queryKey: ['macro-report-history'],
     queryFn:  getMacroReportHistory,
     staleTime: 60_000,
-    enabled:   showHist,
+    enabled:  showHist && isAuthed,
   })
 
   const loadHistMut = useMutation({
@@ -560,9 +565,9 @@ export default function MacroScenario() {
 
   // 분석 시작 핸들러
   const startAnalysis = () => {
-    sessionStorage.setItem(SK_EVENT,   event)
-    sessionStorage.setItem(SK_MODEL,   model)
-    sessionStorage.setItem(SK_MODE,    mode)
+    sessionStorage.setItem(SK_EVENT,    event)
+    sessionStorage.setItem(SK_MODEL,    model)
+    sessionStorage.setItem(SK_MODE,     mode)
     sessionStorage.setItem(SK_START,   String(Date.now()))
     sessionStorage.setItem(SK_PENDING, '1')   // POST 응답 전 새로고침 대비 — 즉시 세팅
     sessionStorage.removeItem(SK_RESULT)
@@ -629,6 +634,7 @@ export default function MacroScenario() {
 
   return (
     <div className="p-5 space-y-4 max-w-full">
+      {modalEl}
 
       {/* 히스토리 모달 */}
       {showHist && (
@@ -672,11 +678,12 @@ export default function MacroScenario() {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={() => setShowHist(true)}
+            onClick={() => requireLogin(() => setShowHist(true))}
             disabled={isRunning}
+            title={isAuthed ? '저장된 분석 보기' : '로그인 후 사용 가능합니다'}
             className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0] hover:border-[#9b59b6]/40 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            <History className="w-3.5 h-3.5" />
+            {isAuthed ? <History className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5" />}
             과거 레포트
           </button>
           {displayResult && !isRunning && (
@@ -748,10 +755,11 @@ export default function MacroScenario() {
               ))}
             </div>
           </div>
+          {/* 분석 등급 */}
           <div>
             <div className="text-[10px] text-[#4a5568] font-bold tracking-wider mb-1.5">분석 등급</div>
             <div className="flex gap-2">
-              {([['haiku', '기본 분석', 'Haiku 전용 · 빠름'], ['sonnet', '심층 분석', '핵심에 Sonnet 적용']] as const).map(([m, label, desc]) => (
+              {([['haiku', '기본 분석', '빠른 분석'], ['sonnet', '심층 분석', '정밀 분석']] as const).map(([m, label, desc]) => (
                 <button key={m} onClick={() => setModel(m)} disabled={isRunning}
                   className={cn(
                     'px-3 py-1.5 text-left rounded font-medium transition-colors min-w-[90px] disabled:opacity-40 disabled:cursor-not-allowed',
@@ -777,11 +785,11 @@ export default function MacroScenario() {
               </button>
             )}
             <button
-              onClick={startAnalysis}
+              onClick={() => requireLogin(startAnalysis)}
               disabled={isRunning || !event.trim()}
               className="flex items-center gap-1.5 px-4 py-2 bg-[#9b59b6] hover:bg-[#7c3aed] disabled:opacity-50 text-white text-sm font-bold rounded transition-colors"
             >
-              <Play className="w-3.5 h-3.5" />
+              {isAuthed ? <Play className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5" />}
               {isRunning ? '분석 중...' : '분석 실행'}
             </button>
           </div>

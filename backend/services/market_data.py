@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone, time as _time
 from typing import Any
 
@@ -28,26 +29,52 @@ def _is_us_market_open() -> bool:
 
 # ── TTL 캐시 ──────────────────────────────────────────────────────────────────
 
-_cache: dict[str, tuple[float, Any]] = {}
+# LRU + TTL 캐시.
+# 키가 '정렬된 티커 집합 + 기간' 이라 사용자 포트폴리오 조합·extra_tickers(거래마다 변함)·
+# news_*/earnings_* 마다 새 엔트리가 생긴다. 값은 수 MB짜리 DataFrame 이므로
+# 상한이 없으면 프로세스 메모리가 무한정 증가한다.
+_CACHE_MAX_ENTRIES = 256
+_cache: "OrderedDict[str, tuple[float, Any]]" = OrderedDict()
+_cache_lock = threading.Lock()
 
 # 백그라운드 stale 갱신 중복 방지
 _bg_in_progress: set[str] = set()
 _bg_lock = threading.Lock()
+# 티커별 마지막 시도 시각 — 데이터 공급자에 아직 없는 날짜(예: 당일 종가 미도착) 때문에
+# 영구 stale 로 남는 티커가 캐시 미스마다 재수집을 트리거하는 것을 막는다.
+_bg_last_attempt: dict[str, float] = {}
+_BG_COOLDOWN = 900   # 15분
+
+
+def _cache_get(key: str, ttl: int):
+    """TTL 내면 값 반환하고 최근 사용으로 승격. 없거나 만료면 None."""
+    with _cache_lock:
+        hit = _cache.get(key)
+        if hit is None:
+            return None
+        ts, val = hit
+        if time.time() - ts >= ttl:
+            _cache.pop(key, None)
+            return None
+        _cache.move_to_end(key)
+        return val
+
+
+def _cache_put(key: str, val) -> None:
+    with _cache_lock:
+        _cache[key] = (time.time(), val)
+        _cache.move_to_end(key)
+        while len(_cache) > _CACHE_MAX_ENTRIES:
+            _cache.popitem(last=False)   # 가장 오래 안 쓴 항목 제거
 
 
 def _cached(key: str, ttl: int, fn):
-    now = time.time()
-    if key in _cache:
-        ts, val = _cache[key]
-        if now - ts < ttl:
-            return val
+    val = _cache_get(key, ttl)
+    if val is not None:
+        return val
     val = fn()
-    _cache[key] = (now, val)
+    _cache_put(key, val)
     return val
-
-
-def clear_cache():
-    _cache.clear()
 
 
 # ── 시세 ────────────────────────────────────────────────────────────────────────
@@ -89,15 +116,43 @@ GICS_SECTOR_ETFS = [
 SECTOR_ETF_TICKERS = [etf for _, etf in GICS_SECTOR_ETFS]
 
 
+# DB에 적재할 최소 이력 깊이. 어떤 엔드포인트가 촉발했든 이 깊이로 수집한다.
+_CANONICAL_PERIOD = "2y"
+
+
+def canonical_period(period: str) -> str:
+    """수집 깊이 결정 — 호출자의 period 와 _CANONICAL_PERIOD 중 더 긴 쪽.
+
+    /holdings-detail 이 period="1mo" 로 먼저 도착하면 그 티커는 1개월치만 저장되고
+    updated_at 이 NOW() 로 찍힌다. 이후 /metrics 가 period="2y" 를 요청해도 그 티커는
+    이미 '컬럼 존재 + 신선' 으로 판정돼 깊은 백필이 영원히 일어나지 않는다.
+    저장 깊이를 호출자의 요청 기간과 분리해 이 굶주림을 없앤다.
+    """
+    from backend.db.market_cache import period_to_days
+    try:
+        return period if period_to_days(period) >= period_to_days(_CANONICAL_PERIOD) else _CANONICAL_PERIOD
+    except Exception:
+        return _CANONICAL_PERIOD
+
+
 def _bg_refresh_tickers(stale: list[str], period: str) -> None:
     """stale 티커를 백그라운드 스레드에서 yfinance 수집 → DB 저장. 중복 실행 방지."""
     from backend.db.market_cache import _yf_download_batched, save_prices_to_db
 
+    period = canonical_period(period)
+    now = time.time()
+
     with _bg_lock:
-        new_stale = [t for t in stale if t not in _bg_in_progress]
+        new_stale = [
+            t for t in stale
+            if t not in _bg_in_progress
+            and now - _bg_last_attempt.get(t, 0.0) >= _BG_COOLDOWN
+        ]
         if not new_stale:
             return
         _bg_in_progress.update(new_stale)
+        for t in new_stale:
+            _bg_last_attempt[t] = now
 
     def _worker():
         try:
@@ -115,7 +170,13 @@ def _bg_refresh_tickers(stale: list[str], period: str) -> None:
     threading.Thread(target=_worker, daemon=True).start()
 
 
-def get_close_df(tickers: list[str], period: str = "2y", ttl: int = 300, include_market: bool = True) -> pd.DataFrame:
+def get_close_df(
+    tickers: list[str],
+    period: str = "2y",
+    ttl: int = 300,
+    include_market: bool = True,
+    fill: bool = True,
+) -> pd.DataFrame:
     """
     1) 메모리 캐시 (TTL 5분) 히트 → 즉시 반환
     2) DB 데이터 즉시 반환 + stale 티커는 백그라운드에서 비동기 갱신
@@ -125,6 +186,11 @@ def get_close_df(tickers: list[str], period: str = "2y", ttl: int = 300, include
 
     include_market=True  → ALWAYS_FETCH(시장 지수) 를 tickers에 자동 추가
     include_market=False → 전달된 tickers만 사용
+
+    fill=True  (기본) — ffill + 주말 행 제거. 곡선·공분산 등 기존 소비자 전용.
+    fill=False        — 실제 관측치만 남긴 희소 프레임. 일변동률 계산 전용이며
+                        주말 행도 보존한다 (암호화폐·환율의 실제 주말 거래).
+                        두 뷰는 메모리 캐시 키가 분리돼 서로를 오염시키지 않는다.
     """
     from backend.db.market_cache import get_prices_from_db, save_prices_to_db, get_stale_tickers
     from backend.db import is_available
@@ -132,33 +198,37 @@ def get_close_df(tickers: list[str], period: str = "2y", ttl: int = 300, include
     all_tickers = list(set(tickers + ALWAYS_FETCH)) if include_market else list(set(tickers))
     if not all_tickers:
         return pd.DataFrame()
-    mem_key = f"close_{','.join(sorted(all_tickers))}_{period}"
+    mem_key = f"close_{','.join(sorted(all_tickers))}_{period}{'' if fill else '_raw'}"
 
-    # ① 메모리 캐시 확인
+    # ① 메모리 캐시 확인 (LRU + TTL)
     now = time.time()
-    if mem_key in _cache:
-        ts, val = _cache[mem_key]
-        if now - ts < ttl:
-            return val
+    _hit = _cache_get(mem_key, ttl)
+    if _hit is not None:
+        return _hit
 
     # ② DB 우선 경로 — 데이터 있으면 즉시 반환, stale은 백그라운드 갱신
     if is_available():
-        db_df = get_prices_from_db(all_tickers, period)
+        db_df = get_prices_from_db(all_tickers, period, fill=fill)
         if db_df is not None and not db_df.empty:
             # DB에 전혀 없는 신규 티커(예: 방금 매수한 종목)는 즉시 동기 수집
             missing = [t for t in all_tickers if t not in db_df.columns]
             if missing:
                 try:
                     from backend.db.market_cache import _yf_download_batched
-                    fresh = _yf_download_batched(missing, period=period, inter_batch_sleep=0.5)
+                    # 호출자가 짧은 기간을 요청했더라도 DB 에는 깊게 적재한다
+                    fresh = _yf_download_batched(
+                        missing, period=canonical_period(period), inter_batch_sleep=0.5
+                    )
                     if not fresh.empty:
                         save_prices_to_db(fresh.dropna(axis=1, how="all"))
                         db_df = pd.concat([db_df, fresh], axis=1)
                 except Exception as e:
                     _logger.warning(f"신규 티커 즉시 수집 실패: {e}")
-            # 주말(토·일) 행 제거 — 장외 데이터가 ffill로 전일과 동일해져 0% 변동률 오류 방지
-            db_df = db_df[db_df.index.dayofweek < 5]
-            _cache[mem_key] = (now, db_df)
+            # 주말(토·일) 행 제거 — 장외 데이터가 ffill로 전일과 동일해져 0% 변동률 오류 방지.
+            # fill=False 뷰는 실제 관측치만 담고 있으므로 주말 행(암호화폐·환율의 진짜 거래)을 보존한다.
+            if fill:
+                db_df = db_df[db_df.index.dayofweek < 5]
+            _cache_put(mem_key, db_df)
             # stale 티커를 백그라운드에서 비동기 갱신 (max_age 22h: daily 업데이트 주기 기준)
             stale = get_stale_tickers(all_tickers, max_age_hours=22)
             if stale:
@@ -170,15 +240,18 @@ def get_close_df(tickers: list[str], period: str = "2y", ttl: int = 300, include
         if all_stale:
             try:
                 from backend.db.market_cache import _yf_download_batched
-                fresh_df = _yf_download_batched(all_stale, period=period, inter_batch_sleep=0.5)
+                fresh_df = _yf_download_batched(
+                    all_stale, period=canonical_period(period), inter_batch_sleep=0.5
+                )
                 if not fresh_df.empty:
                     save_prices_to_db(fresh_df.dropna(axis=1, how="all"))
             except Exception as e:
                 _logger.warning(f"최초 yfinance 수집 실패: {e}")
-        db_df = get_prices_from_db(all_tickers, period)
+        db_df = get_prices_from_db(all_tickers, period, fill=fill)
         if db_df is not None and not db_df.empty:
-            db_df = db_df[db_df.index.dayofweek < 5]
-            _cache[mem_key] = (now, db_df)
+            if fill:
+                db_df = db_df[db_df.index.dayofweek < 5]
+            _cache_put(mem_key, db_df)
             return db_df
 
     # ③ DB 없음 → yfinance 직접 수집 (폴백)
@@ -188,10 +261,14 @@ def get_close_df(tickers: list[str], period: str = "2y", ttl: int = 300, include
     except Exception as e:
         _logger.warning(f"yfinance 폴백 수집 실패: {e}")
         return pd.DataFrame()
-    if not result.empty and is_available():
+    if result is None or result.empty:
+        # 빈 프레임은 RangeIndex 라 .dayofweek 접근 시 AttributeError → 500 이 된다
+        return pd.DataFrame()
+    if is_available():
         save_prices_to_db(result)
-    result = result[result.index.dayofweek < 5]
-    _cache[mem_key] = (now, result)
+    if fill and isinstance(result.index, pd.DatetimeIndex):
+        result = result[result.index.dayofweek < 5]
+    _cache_put(mem_key, result)
     return result
 
 
@@ -348,35 +425,6 @@ def get_fred_macro(ttl: int = 3600) -> dict:
             }
 
     return _cached("fred_macro", ttl, _fetch)
-
-
-def get_doom_radar(ttl: int = 300) -> dict:
-    """장단기 금리차 + 하이일드 스프레드 기반 위기 레이더."""
-    def _fetch():
-        try:
-            import pandas_datareader.data as web
-            start = datetime.now() - timedelta(days=400)
-            df = web.DataReader(["T10Y2Y", "BAMLH0A0HYM2"], "fred", start).dropna()
-            rate_spread = float(df["T10Y2Y"].iloc[-1])
-            hy_spread   = float(df["BAMLH0A0HYM2"].iloc[-1])
-        except Exception:
-            rate_spread, hy_spread = 0.3, 3.5
-
-        is_doom = (rate_spread < 0.0) or (hy_spread > 5.0)
-        reasons = []
-        if rate_spread < 0.0:
-            reasons.append(f"10Y-2Y 역전({rate_spread:+.2f}%p)")
-        if hy_spread > 5.0:
-            reasons.append(f"HY스프레드 급등({hy_spread:.1f}%)")
-
-        return {
-            "is_doom":     is_doom,
-            "rate_spread": rate_spread,
-            "hy_spread":   hy_spread,
-            "reason":      " / ".join(reasons) if reasons else "정상 범위",
-        }
-
-    return _cached("doom_radar", ttl, _fetch)
 
 
 # ── 뉴스 ────────────────────────────────────────────────────────────────────────

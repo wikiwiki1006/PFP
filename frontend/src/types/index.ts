@@ -7,9 +7,14 @@ export interface PortfolioMetrics {
   today_change_pct: number
   portfolio_beta: number
   vix: number
-  perf_1w: number
-  perf_1m: number
+  /** 포트폴리오가 해당 기간보다 짧으면 null (계산 불가와 보합을 구분) */
+  perf_1w: number | null
+  perf_1m: number | null
   alpha_vs_sp500: number
+  /** 일변동률의 기준 거래일 (YYYY-MM-DD). 장 외에는 마지막 확정 거래일. */
+  as_of?: string | null
+  /** 미국 증시 개장 여부 — true면 today_change_*가 실시간 값이다. */
+  market_open?: boolean
 }
 
 export interface EquityCurvePoint {
@@ -39,6 +44,12 @@ export interface HoldingDetail {
   pnl_pct: number
   sector: string
   weight: number
+  /** 일변동률(%). null = 관측치 부족으로 계산 불가 (0%와 구분해야 함). */
+  chg_pct: number | null
+  /** 이 값의 기준 거래일 (YYYY-MM-DD). */
+  as_of?: string | null
+  /** 장중 실시간 가격으로 계산됐는지. */
+  is_live?: boolean
 }
 
 export interface SectorWeights {
@@ -173,12 +184,23 @@ export interface RegimeChartPoint {
   regime: string
 }
 
+/** 카우프만 ER 기반 3국면. */
+export type RegimeLabel = 'Bull' | 'Sideways' | 'Bear' | 'Unknown'
+
 export interface MarketRegime {
   ticker: string
-  current_regime: string
-  regime_pct: { Bull: number; Sideways: number; Bear: number }
+  current_regime: RegimeLabel
+  regime_pct: Partial<Record<RegimeLabel, number>>
   n_regimes: number
   chart_data: RegimeChartPoint[]
+  /** 'efficiency_ratio' */
+  method?: string
+  /** 현재 효율성 비율 (0~1). 1에 가까울수록 한 방향으로 직진. */
+  current_er?: number | null
+  /** ER 계산 기간(거래일) */
+  window?: number
+  /** 추세 판정 임계값 */
+  threshold?: number
 }
 
 // Timing Engine Types
@@ -314,33 +336,60 @@ export interface FactorAnalysisResult {
   residual_vol: number
 }
 
-export interface MonteCarloPortfolioResult {
-  probability: number
-  mean_return: number
-  median_return: number
-  var_95: number
-  message: string
-  histogram?: Array<{ bin: number; count: number }>
+// AI Portfolio Optimization Types
+export interface AIView {
+  expected_return: number
+  confidence: number
+  sentiment: 'Bullish' | 'Neutral' | 'Bearish'
+  key_driver?: string
 }
 
-export interface MonteCarloStockResult {
-  probability_final: number
-  probability_touch: number
-  message: string
+export interface PriceStats {
   current_price: number
-  histogram?: Array<{ bin: number; count: number }>
-  paths?: number[][]
+  // multi-period returns (%)
+  ret_1m: number | null
+  ret_3m: number | null
+  ret_6m: number | null
+  ret_1y: number | null
+  annual_vol_1y: number
+  vs_52w_high_pct: number | null
+  vs_52w_low_pct: number | null
+  // legacy compat
+  annual_return_1y?: number
+  ytd_return?: number
 }
 
-export interface MonteCarloMacroResult {
-  probability_above_zero: number
-  var_95: number
-  cvar_95: number
-  mean_return: number
-  median_return: number
-  histogram: Array<{ bin: number; count: number }>
-  paths: number[][]
-  message: string
+export interface OptimizationMode {
+  weights: { [ticker: string]: number }
+  expected_return: number
+  volatility: number
+  sharpe_ratio: number
+  // 확장 리스크 지표 (역사 데이터 기반)
+  sortino_ratio?: number
+  max_drawdown?: number
+  calmar_ratio?: number
+  beta?: number | null
+  cvar_95?: number
+}
+
+export interface AIOptimizationResult {
+  tickers: string[]
+  ai_views: { [ticker: string]: AIView }
+  price_stats: { [ticker: string]: PriceStats }
+  optimizations: {
+    black_litterman: OptimizationMode | null
+    max_sharpe_hist: OptimizationMode | null
+    hrp: OptimizationMode | null
+    target_return: OptimizationMode | null
+  }
+  effective_target_return: number
+  posterior_returns: { [ticker: string]: number }
+  frontier: Array<{ return: number; volatility: number }>
+  correlation: {
+    tickers: string[]
+    matrix: number[][]
+  }
+  data_period?: string
 }
 
 // Macro AI Types
@@ -411,6 +460,7 @@ export interface ReportFile {
   type: 'daily' | 'equity' | 'industry'
   size_kb: number
   mtime: number
+  model_tier?: string
 }
 
 export interface Industry {
@@ -493,19 +543,34 @@ export interface TickerDetailVar {
 }
 
 export interface TickerDetailQuant {
-  score: number
+  /** 4팩터 합성 점수 (0~100). 계산 불가 시 null. */
+  score: number | null
   score_label: string
+  /** 팩터별 원점수 — 합성 점수의 근거 */
+  factors?: { momentum?: number; trend?: number; quality?: number; value?: number }
+  /** 한국어 국면 라벨 */
   regime: string
+  /** 'Bull' | 'Sideways' | 'Bear' */
+  regime_code?: string
+  /** 효율성 비율 (0~1) */
+  regime_er?: number | null
   optimizer: {
-    target_weight: number
-    risk_contribution: number
-    current_weight: number
-    correlation: number
-    correlation_label: string
-    beta_exposure: number
+    target_weight: number | null
+    risk_contribution: number | null
+    current_weight: number | null
+    correlation: number | null
+    correlation_label: string | null
+    beta_exposure: number | null
+    in_portfolio?: boolean
+    note?: string | null
   }
-  panic_score: number
+  panic_score: number | null
   panic_status: string
+  /** 패닉 점수 구성 요소 */
+  panic_components?: {
+    rsi?: number; drawdown?: number; vs_52w_high?: number
+    volume?: number; volatility?: number
+  }
 }
 
 export interface TickerDetail {

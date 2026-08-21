@@ -76,8 +76,17 @@ def period_to_days(period: str) -> int:
 
 # ── market_prices (일별 종가) ──────────────────────────────────────────────────
 
-def get_prices_from_db(tickers: list[str], period: str = "2y") -> Optional[pd.DataFrame]:
-    """DB → DatetimeIndex × ticker DataFrame. 데이터 없으면 None."""
+def get_prices_from_db(
+    tickers: list[str], period: str = "2y", fill: bool = True
+) -> Optional[pd.DataFrame]:
+    """DB → DatetimeIndex × ticker DataFrame. 데이터 없으면 None.
+
+    fill=True  (기본) — 곡선·공분산 계산용. 누락 셀을 ffill 한다.
+    fill=False        — **일변동률 계산 전용**. 실제 관측치만 남긴 희소 프레임.
+                        pivot 인덱스는 요청한 티커들의 거래일 합집합이므로,
+                        ffill 하면 24/7 자산 하나가 인덱스를 오늘까지 끌어와
+                        미국 주식에 가짜 종가를 만들어낸다 (0% 변동률 버그의 원인).
+    """
     if not is_available() or not tickers:
         return None
     days = period_to_days(period)
@@ -104,7 +113,8 @@ def get_prices_from_db(tickers: list[str], period: str = "2y") -> Optional[pd.Da
         pivot.columns.name = None
         # 티커마다 업데이트 주기가 달라 최신 행에 NaN이 생길 수 있음.
         # ffill로 마지막 유효 가격을 이월해 price=0 반환을 방지한다.
-        pivot = pivot.ffill()
+        if fill:
+            pivot = pivot.ffill()
         return pivot
     except Exception as e:
         logger.warning(f"DB get_prices_from_db 실패: {e}")
@@ -112,19 +122,43 @@ def get_prices_from_db(tickers: list[str], period: str = "2y") -> Optional[pd.Da
 
 
 def save_prices_to_db(df: pd.DataFrame):
-    """close_df (DatetimeIndex × tickers) → market_prices upsert."""
+    """close_df (DatetimeIndex × tickers) → market_prices upsert.
+
+    캘린더 가드: 미국 증시 캘린더를 따르는 티커에 대해
+      ① NYSE 비거래일(주말·공휴일) 행
+      ② 아직 종가가 확정되지 않은 당일(16:00 ET 이전) 행 — 장중 부분 봉
+    은 저장하지 않는다. 이 함수가 market_prices 의 **유일한 SQL 기록 지점**이므로,
+    어떤 호출자가 ffill 된 프레임을 넘기더라도 위조 종가가 영구 저장되지 않는다.
+    (암호화폐·환율·선물·해외 종목은 자기 캘린더로 실제 거래되므로 그대로 저장한다.)
+    """
     if not is_available() or df is None or df.empty:
         return
     try:
         from psycopg2.extras import execute_values
+        from backend.services.market_calendar import (
+            is_us_trading_day, last_completed_session, uses_us_session_calendar,
+        )
+
+        us_cal   = {t: uses_us_session_calendar(str(t)) for t in df.columns}
+        last_ses = last_completed_session()
 
         rows = []
+        skipped = 0
         for dt, row in df.iterrows():
             d = dt.date() if hasattr(dt, "date") else dt
+            day_is_session = is_us_trading_day(d)
             for ticker in df.columns:
                 val = row.get(ticker)
-                if val is not None and not pd.isna(val):
-                    rows.append((str(ticker), d, float(val)))
+                if val is None or pd.isna(val):
+                    continue
+                if us_cal[ticker]:
+                    # 비거래일이거나, 아직 종가 미확정인 당일 → 저장 금지
+                    if not day_is_session or d > last_ses:
+                        skipped += 1
+                        continue
+                rows.append((str(ticker), d, float(val)))
+        if skipped:
+            logger.debug(f"market_prices 캘린더 가드로 {skipped}개 셀 저장 스킵")
         if not rows:
             return
         # 배치 크기 제한 (너무 크면 DB 타임아웃)
@@ -146,14 +180,21 @@ def save_prices_to_db(df: pd.DataFrame):
 
 
 def get_stale_tickers(tickers: list[str], max_age_hours: int = _STALE_HOURS) -> list[str]:
-    """DB 캐시가 없거나 오래된 ticker 목록 반환."""
+    """DB 캐시가 없거나 오래된 ticker 목록 반환.
+
+    updated_at(마지막 '기록 시각')만 보면, 새 종가를 하나도 저장하지 못한
+    페이지 로드도 신선도를 갱신해버려 오늘 종가가 영원히 DB에 못 들어온다.
+    → 실제 보유 데이터의 최신 **날짜**(MAX(price_date))가 기대치에 도달했는지도 함께 본다.
+    기대치는 캘린더별로 다르다: 미국 주식은 마지막 확정 거래일, 24시간 자산은 어제.
+    """
     if not is_available():
         return list(tickers)
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """SELECT ticker, MAX(updated_at) AS last_updated
+                    """SELECT ticker, MAX(updated_at) AS last_updated,
+                              MAX(price_date)  AS last_date
                        FROM market_prices
                        WHERE ticker = ANY(%s)
                        GROUP BY ticker""",
@@ -163,17 +204,27 @@ def get_stale_tickers(tickers: list[str], max_age_hours: int = _STALE_HOURS) -> 
         if not rows:
             return list(tickers)
 
+        from backend.services.market_calendar import (
+            last_completed_session, uses_us_session_calendar,
+        )
+        us_expected = last_completed_session()
+        # 24시간 자산은 어제까지 있으면 충분 (오늘 봉은 아직 진행 중)
+        other_expected = date.today() - timedelta(days=1)
+
         now_utc = datetime.now(tz=timezone.utc)
         fresh: set[str] = set()
-        for ticker, last_updated in rows:
+        for ticker, last_updated, last_date in rows:
             if last_updated is None:
                 continue
-            # last_updated 가 naive datetime 이면 UTC로 간주
             if last_updated.tzinfo is None:
                 last_updated = last_updated.replace(tzinfo=timezone.utc)
             age_h = (now_utc - last_updated).total_seconds() / 3600
-            if age_h < max_age_hours:
-                fresh.add(ticker)
+            if age_h >= max_age_hours:
+                continue
+            expected = us_expected if uses_us_session_calendar(ticker) else other_expected
+            if last_date is not None and last_date < expected:
+                continue   # 기록 시각은 최신이지만 데이터 날짜가 뒤처짐 → stale
+            fresh.add(ticker)
         return [t for t in tickers if t not in fresh]
     except Exception as e:
         logger.warning(f"DB get_stale_tickers 실패, 전체 stale 처리: {e}")
@@ -343,7 +394,10 @@ def prefetch_tickers(tickers: list[str], period: str = "2y"):
         if close_df.empty:
             logger.warning("prefetch: yfinance 빈 응답")
             return
-        close_df = close_df.ffill().dropna(axis=1, how="all")
+        # ffill 금지: ALWAYS_FETCH 는 미국 주식 + 암호화폐 + 환율 + 해외 지수를
+        # 한 배치로 받으므로 인덱스가 모든 캘린더의 합집합이 된다. 여기서 ffill 하면
+        # 미국 주식이 거래하지 않은 날짜에 전일 종가가 복제돼 DB에 영구 저장된다.
+        close_df = close_df.dropna(axis=1, how="all")
         if not close_df.empty:
             save_prices_to_db(close_df)
             logger.info(f"prefetch 완료: {close_df.shape[1]}개 티커 저장")

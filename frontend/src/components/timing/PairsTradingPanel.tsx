@@ -4,8 +4,10 @@ import {
   ComposedChart, Line, Area, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Legend, ReferenceLine,
 } from 'recharts'
+import { Star } from 'lucide-react'
 import { getPairsAuto } from '@/api'
 import { COLOR_DOWN } from './colors'
+import type { HoldingsMap } from '@/types'
 
 function PriceTooltip({ active, payload, label }: any) {
   if (!active || !payload?.length) return null
@@ -35,7 +37,11 @@ function SpreadTooltip({ active, payload, label }: any) {
   )
 }
 
-export default function PairsTradingPanel() {
+interface PairsTradingPanelProps {
+  holdings?: HoldingsMap
+}
+
+export default function PairsTradingPanel({ holdings = {} }: PairsTradingPanelProps) {
   const [tickerInput, setTickerInput]       = useState('')
   const [thresholdInput, setThresholdInput] = useState('5')
   const [ticker, setTicker]                 = useState<string | null>(null)
@@ -49,10 +55,28 @@ export default function PairsTradingPanel() {
     staleTime: 600_000,
   })
 
+  // 보유 종목 프리셋 — 평가금액(수량×평단) 큰 순으로 정렬해 자주 쓰는 종목이 앞에 오게 한다
+  const holdingTickers = useMemo(
+    () => Object.entries(holdings)
+      .filter(([t]) => t !== 'CASH')
+      .sort(([, a], [, b]) => b.q * b.avg - a.q * a.avg)
+      .map(([t]) => t),
+    [holdings],
+  )
+
   function submit() {
     const t  = tickerInput.trim().toUpperCase()
     const th = parseFloat(thresholdInput)
     if (t) { setTicker(t); setSelectedPair(null) }
+    if (!isNaN(th) && th > 0) setThreshold(th)
+  }
+
+  /** 프리셋 클릭 — 입력창도 함께 채워 현재 선택을 명확히 보여준다 */
+  function pickHolding(t: string) {
+    setTickerInput(t)
+    setTicker(t)
+    setSelectedPair(null)
+    const th = parseFloat(thresholdInput)
     if (!isNaN(th) && th > 0) setThreshold(th)
   }
 
@@ -105,6 +129,28 @@ export default function PairsTradingPanel() {
           탐색
         </button>
       </div>
+
+      {/* 보유 종목 프리셋 */}
+      {holdingTickers.length > 0 && (
+        <div>
+          <div className="flex items-center gap-1.5 mb-1.5">
+            <Star className="w-3 h-3 text-[#f59e0b]" />
+            <span className="text-[10px] text-[#64748b] font-bold tracking-widest uppercase">보유 종목</span>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {holdingTickers.map(t => (
+              <button key={t} onClick={() => pickHolding(t)}
+                className={`px-2.5 py-1 text-[11px] font-mono rounded border transition-colors ${
+                  ticker === t
+                    ? 'border-[#f59e0b] text-[#f59e0b] bg-[#f59e0b]/10'
+                    : 'border-[#1e2d40] text-[#64748b] hover:text-[#94a3b8]'
+                }`}>
+                {t}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {q.isLoading && <div className="text-sm text-[#64748b]">{ticker} 유사 종목 탐색 중… (최초 1회, 다소 소요)</div>}
       {q.isError   && <div className="text-sm text-[#ef4444]">{ticker}에 대한 데이터를 찾을 수 없습니다.</div>}

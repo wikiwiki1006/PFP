@@ -7,6 +7,7 @@ class MacroAnalysisRequest(BaseModel):
     event: str = Field(..., description="분석할 거시경제 이벤트")
     model: str = Field(default="claude-sonnet-4-6", description="사용할 Claude 모델")
     mode: str = Field(default="fast", description="fast(3) | standard(5) | full(9)")
+    provider: str = Field(default="claude", description="claude | gpt")
     portfolio: Optional[dict] = None
 
 

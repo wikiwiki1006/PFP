@@ -23,7 +23,10 @@ export function formatLargeNumber(value: number): string {
   return formatCurrency(value)
 }
 
-export function formatPct(value: number, decimals = 2): string {
+export function formatPct(value: number | null | undefined, decimals = 2): string {
+  // null/NaN 을 0%로 위장하지 않는다 — '계산 불가'와 '보합'은 다르다.
+  // (가드가 없으면 value.toFixed 에서 TypeError 가 나 페이지가 통째로 빈 화면이 된다.)
+  if (value == null || !Number.isFinite(value)) return '—'
   const sign = value >= 0 ? '+' : ''
   return `${sign}${value.toFixed(decimals)}%`
 }
@@ -35,13 +38,15 @@ export function formatNumber(value: number, decimals = 2): string {
   }).format(value)
 }
 
-export function colorForValue(value: number): string {
+export function colorForValue(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return 'text-[#64748b]'
   if (value > 0) return 'text-[#10b981]'
   if (value < 0) return 'text-[#ef4444]'
   return 'text-[#64748b]'
 }
 
-export function bgColorForValue(value: number): string {
+export function bgColorForValue(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return 'bg-[#64748b]/10 text-[#64748b]'
   if (value > 0) return 'bg-[#10b981]/10 text-[#10b981]'
   if (value < 0) return 'bg-[#ef4444]/10 text-[#ef4444]'
   return 'bg-[#64748b]/10 text-[#64748b]'

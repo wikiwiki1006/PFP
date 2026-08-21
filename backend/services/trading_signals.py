@@ -170,156 +170,9 @@ def pairs_trading_signal(
 # 5. 시장 국면 감지 (200MA 기반 — 실제 시장 판단 기준)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def detect_market_regime(
-    price: pd.Series,
-    short_window: int = 50,
-    long_window: int = 200,
-    slope_window: int = 20,
-) -> dict:
-    """
-    MA50/MA200 골든크로스 기반 시장 국면 감지.
-
-    Bull     : MA50 > MA200 + 1% (골든크로스 상태)
-    Bear     : MA50 < MA200 - 1% (데드크로스 상태)
-    Sideways : MA50 ≈ MA200 (±1% 이내 혼조 구간)
-
-    크로스 직전/직후의 짧은 혼조 구간을 자연스럽게 처리하며,
-    실제 가격 추세 시각과 국면 레이블이 잘 일치함.
-    데이터가 200일 미만이면 20/60 MA 단순 비교로 폴백.
-    """
-    price = price.dropna()
-
-    if len(price) < long_window:
-        return _regime_fallback(price)
-
-    ma_short = price.rolling(short_window).mean()
-    ma_long  = price.rolling(long_window).mean()
-    # 200MA 기울기 (slope_window 일 변화율) — 크로스 ±1% 구간의 타이브레이커
-    ma_slope = ma_long.diff(slope_window) / ma_long.shift(slope_window)
-
-    labels_list: list[str] = []
-    for i in range(len(price)):
-        ml = ma_long.iloc[i]
-        if pd.isna(ml):
-            labels_list.append("Sideways")
-            continue
-
-        ms  = float(ma_short.iloc[i]) if not pd.isna(ma_short.iloc[i]) else float(ml)
-        ml_ = float(ml)
-        sl  = float(ma_slope.iloc[i]) if not pd.isna(ma_slope.iloc[i]) else 0.0
-
-        # MA50/MA200 상대적 갭 비율
-        gap_pct = (ms - ml_) / ml_ if ml_ != 0 else 0.0
-
-        if gap_pct >= 0.01:        # 50MA가 200MA 대비 1% 이상 위 → Bull
-            labels_list.append("Bull")
-        elif gap_pct <= -0.01:     # 50MA가 200MA 대비 1% 이상 아래 → Bear
-            labels_list.append("Bear")
-        else:
-            # ±1% 이내 혼조 구간 — 200MA 기울기로 타이브레이크
-            if sl > 0.002:
-                labels_list.append("Bull")
-            elif sl < -0.002:
-                labels_list.append("Bear")
-            else:
-                labels_list.append("Sideways")
-
-    regime_labels  = pd.Series(labels_list, index=price.index)
-    current_regime = regime_labels.iloc[-1] if len(regime_labels) > 0 else "Unknown"
-
-    return {
-        "regime_labels":   regime_labels,
-        "regime_raw":      None,
-        "features":        None,
-        "cluster_centers": None,
-        "label_map":       None,
-        "current_regime":  current_regime,
-        "n_regimes":       3,
-    }
-
-
-def _regime_fallback(price: pd.Series) -> dict:
-    """200일 데이터 부족 시 20/60 MA 단순 비교로 대체."""
-    ma_short = price.rolling(20).mean()
-    ma_long  = price.rolling(60).mean()
-    labels   = pd.Series(
-        np.where(ma_short > ma_long * 1.01, "Bull",
-                 np.where(ma_short < ma_long * 0.99, "Bear", "Sideways")),
-        index=price.index,
-    )
-    valid = labels.dropna()
-    return {
-        "regime_labels":   valid,
-        "regime_raw":      None,
-        "features":        None,
-        "cluster_centers": None,
-        "label_map":       None,
-        "current_regime":  valid.iloc[-1] if len(valid) > 0 else "Unknown",
-        "n_regimes":       3,
-    }
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # 6. 최적 페어 탐색
 # ══════════════════════════════════════════════════════════════════════════════
-
-def find_best_pair(
-    ticker_a: str,
-    candidate_tickers: list[str],
-    period: str = "1y",
-    top_n: int = 5,
-) -> list[dict]:
-    import yfinance as yf
-
-    candidates  = [t for t in candidate_tickers if t != ticker_a]
-    all_tickers = list(set([ticker_a] + candidates))
-
-    try:
-        data  = yf.download(all_tickers, period=period, progress=False, auto_adjust=True)
-        close = data["Close"].ffill().dropna()
-    except Exception:
-        return []
-
-    if ticker_a not in close.columns:
-        return []
-
-    ret_a   = close[ticker_a].pct_change().dropna()
-    results = []
-
-    for t in candidates:
-        if t not in close.columns:
-            continue
-        try:
-            ret_b  = close[t].pct_change().dropna()
-            common = ret_a.index.intersection(ret_b.index)
-            if len(common) < 30:
-                continue
-            corr    = float(ret_a.loc[common].corr(ret_b.loc[common]))
-            coint_p = 1.0
-            try:
-                from statsmodels.tsa.stattools import coint as _coint
-                pa = close[ticker_a].dropna()
-                pb = close[t].dropna()
-                common2 = pa.index.intersection(pb.index)
-                if len(common2) >= 60:
-                    _, coint_p, _ = _coint(pa.loc[common2].values, pb.loc[common2].values)
-            except Exception:
-                pass
-
-            score    = abs(corr) * 0.7 + (1.0 - min(coint_p, 1.0)) * 0.3
-            abs_corr = abs(corr)
-            grade    = "S" if abs_corr >= 0.85 else "A" if abs_corr >= 0.70 else \
-                       "B" if abs_corr >= 0.55 else "C"
-
-            results.append({
-                "ticker": t, "correlation": round(corr, 3),
-                "coint_p": round(coint_p, 3), "score": round(score, 4), "grade": grade,
-            })
-        except Exception:
-            continue
-
-    return sorted(results, key=lambda x: x["score"], reverse=True)[:top_n]
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 7. 전수 스캔 (매수가 / 목표가 / 손절가 포함)
@@ -764,4 +617,165 @@ def pairs_auto_detail(
         "chart":         all_charts.get(best_ticker, []),
         "breaches":      all_breaches.get(best_ticker, []),
         "threshold_pct": threshold_pct,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 5-b. K-Means 기반 시장 국면 분류 (상승 / 횡보 / 하락 / 과열)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# 국면 라벨 — 프론트엔드와 공유하는 고정 문자열
+REGIME_UPTREND    = "Uptrend"
+REGIME_SIDEWAYS   = "Sideways"
+REGIME_DOWNTREND  = "Downtrend"
+REGIME_OVERHEATED = "Overheated"
+
+_KMEANS_FEATURES = [
+    "disparity20",   # 종가 / MA20        — 추세 대비 위치
+    "slope_ma5",     # MA5 5일 변화율      — 단기 추세 방향
+    "vol_ratio",     # 거래량 / 20일 평균  — 참여 강도
+    "atr_ratio",     # ATR14 / 종가        — 변동성 수준
+]
+# 시점 간 순서를 반영하기 위한 지연 피처 (5일 평균) — K-Means 는 순서를 모르므로
+# 직전 구간의 상태를 함께 넣어 하루짜리 노이즈로 국면이 튀는 것을 막는다.
+_LAG_FEATURES = [f"{c}_lag5" for c in _KMEANS_FEATURES]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 5-c. 카우프만 효율성 비율(ER) 기반 국면 판단
+# ══════════════════════════════════════════════════════════════════════════════
+
+REGIME_BULL     = "Bull"
+REGIME_BEAR     = "Bear"
+# 횡보는 위(REGIME_SIDEWAYS)와 동일한 문자열을 재사용한다.
+
+ER_DEFAULT_WINDOW    = 20     # 약 1개월 거래일 — 국면 판단에 적당한 평활 수준
+ER_DEFAULT_THRESHOLD = 0.30   # 사용자 지정 기본 임계값
+
+
+def efficiency_ratio(price: pd.Series, window: int = ER_DEFAULT_WINDOW) -> pd.Series:
+    """카우프만 효율성 비율.
+
+        ER = |기간 내 순변동| / 기간 내 일별 절대변동의 합
+
+    분자는 시작점→끝점의 직선 거리, 분모는 실제로 이동한 총 경로다.
+    한 방향으로 곧게 가면 두 값이 같아져 ER→1, 위아래로 요동치며 제자리면 ER→0.
+    즉 '추세의 강도'가 아니라 **'움직임의 방향성(효율)'**을 재는 지표다.
+
+    분모가 0인 구간(가격이 전혀 안 움직인 날들)은 방향성을 정의할 수 없으므로 0 으로 둔다.
+    """
+    p = price.astype(float)
+    net   = (p - p.shift(window)).abs()               # 순변동 (직선 거리)
+    path  = p.diff().abs().rolling(window).sum()      # 총 경로 (실제 이동거리)
+    er = net / path.replace(0.0, np.nan)
+    return er.fillna(0.0).clip(0.0, 1.0)
+
+
+
+def _backdate_trend_starts(
+    price: pd.Series, labels: pd.Series, window: int,
+) -> pd.Series:
+    """감지된 추세 구간을 실제 시작점(직전 저점/고점)까지 소급한다.
+
+    ER 은 후행 지표라 추세가 확인되는 시점이 실제 시작보다 늦다.
+    Bull 이 처음 확인된 날에서 최대 window 만큼 거슬러 올라가 **최저가 지점**을
+    찾고, 그 사이 '횡보'로 찍혀 있던 날들을 Bull 로 다시 칠한다.
+    (Bear 는 최고가 지점 기준.)
+
+    미래 데이터를 쓰지 않는다 — 이미 지나간 구간을 되돌아보며 라벨을 고칠 뿐이라
+    과거 시점의 판단을 앞당겨 왜곡하는 look-ahead 가 아니다.
+    다만 **오늘 라벨은 여전히 후행**이다(소급할 미래가 없으므로). 이는 어떤
+    추세 지표에서도 피할 수 없는 한계다.
+    """
+    out = labels.copy()
+    vals = price.values
+    arr  = labels.values
+    n = len(arr)
+
+    i = 0
+    while i < n:
+        lab = arr[i]
+        if lab == REGIME_SIDEWAYS:
+            i += 1
+            continue
+        # 추세 구간의 끝 찾기
+        j = i
+        while j + 1 < n and arr[j + 1] == lab:
+            j += 1
+
+        # 소급 가능한 범위: 직전 횡보 구간 안, 최대 window 봉
+        lo = max(0, i - window)
+        k = i - 1
+        while k >= lo and arr[k] == REGIME_SIDEWAYS:
+            k -= 1
+        seg_start = k + 1
+        if seg_start >= i:
+            i = j + 1
+            continue
+
+        # 전역 극점까지 무작정 거슬러 가면 횡보 구간 전체가 추세로 칠해진다.
+        # 추세가 실제로 '시작된' 지점 = 확인 시점(i)에서 뒤로 걸으며 가격이
+        # 단조롭게 낮아지는(Bull) / 높아지는(Bear) 동안만 인정한다.
+        # 되돌림이 나오면 거기서 멈춘다 — 그 지점이 직전 스윙 저점/고점이다.
+        pivot = i
+        for m in range(i - 1, seg_start - 1, -1):
+            better = vals[m] < vals[pivot] if lab == REGIME_BULL else vals[m] > vals[pivot]
+            if better:
+                pivot = m
+            else:
+                break
+        if pivot < i:
+            out.iloc[pivot:i] = lab
+        i = j + 1
+
+    return out
+
+def detect_regime_er(
+    price: pd.Series,
+    window: int = ER_DEFAULT_WINDOW,
+    threshold: float = ER_DEFAULT_THRESHOLD,
+    backdate: bool = True,
+) -> dict:
+    """ER 기반 일자별 국면 분류 (상승 / 횡보 / 하락).
+
+    판정
+      ① ER < threshold                → 횡보 (방향성 없이 요동)
+      ② ER ≥ threshold, 순변동 > 0    → 상승
+      ③ ER ≥ threshold, 순변동 < 0    → 하락
+
+    K-Means 방식 대비 장점: 학습·군집이 없어 결정적이고(같은 입력=같은 결과)
+    종목·기간에 무관하게 임계값의 의미가 동일하다. 계산도 훨씬 가볍다.
+
+    backdate=True (기본) — 감지된 추세를 **실제 시작점까지 소급**한다.
+    ER 은 후행 창(t-window ~ t)을 쓰므로, 상승이 시작돼도 창의 대부분이 아직
+    직전 횡보 구간이라 임계값을 넘기까지 수 거래일이 걸린다(실측 6거래일).
+    그대로 두면 그래프에서 국면 색이 실제 전환점보다 오른쪽으로 밀려 보인다.
+    """
+    p = price.dropna().astype(float)
+    if len(p) < window + 2:
+        raise ValueError(f"ER 계산에 필요한 데이터 부족 ({len(p)}행, 최소 {window + 2}행)")
+
+    er        = efficiency_ratio(p, window)
+    net_delta = p - p.shift(window)          # 부호 있는 순변동 → 방향 결정
+
+    labels = pd.Series(REGIME_SIDEWAYS, index=p.index, dtype=object)
+    trending = er >= threshold
+    labels[trending & (net_delta > 0)] = REGIME_BULL
+    labels[trending & (net_delta < 0)] = REGIME_BEAR
+    # 워밍업 구간(rolling 미충족)은 판단 불가 → 횡보로 두되 통계에서 빠지도록 잘라낸다
+    valid = er.notna() & net_delta.notna()
+    labels = labels[valid]
+    er_valid = er[valid]
+
+    if backdate and len(labels):
+        labels = _backdate_trend_starts(p.loc[labels.index], labels, window)
+
+    return {
+        "regime_labels":  labels,
+        "current_regime": str(labels.iloc[-1]) if len(labels) else "Unknown",
+        "current_er":     round(float(er_valid.iloc[-1]), 4) if len(er_valid) else None,
+        "er_series":      er_valid,
+        "window":         window,
+        "threshold":      threshold,
+        "n_regimes":      3,
     }
