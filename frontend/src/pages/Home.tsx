@@ -33,7 +33,7 @@ const MODULES = [
     to: '/timing',
     icon: Zap,
     color: '#ef4444',
-    label: 'TIMING ENGINE',
+    label: '트레이딩 신호',
     desc: ['매크로 저승사자 레이더', '페어 트레이딩 Z-score 신호', '볼린저 밴드 평균 회귀', 'K-means 시장 국면 감지'],
     cta: 'OPEN ENGINE →',
   },

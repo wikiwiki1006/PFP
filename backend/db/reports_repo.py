@@ -120,22 +120,29 @@ def find_fresh_shared_report(
 
 
 def list_reports(
-    user_id: str = "default",
+    user_id: str,
     report_type: Optional[str] = None,
     limit: int = 30,
 ) -> list[dict]:
-    """DB에서 레포트 목록 조회.
+    """DB에서 **본인이 만든** 레포트 목록 조회.
 
-    공용(scope='shared') 리포트는 작성자와 무관하게 모든 사용자에게 보인다 —
-    종목·산업 리서치는 누가 만들었든 내용이 같으므로 공유하는 것이 목적이다.
-    개인(scope='private') 리포트는 본인 것만 보인다.
+    scope 와 무관하게 작성자 본인 것만 돌려준다.
+
+    예전에는 공용(scope='shared') 리포트를 작성자와 무관하게 전부 포함했다.
+    그 결과 '과거 레포트' 목록에 남이 만든 리포트가 섞여 보였다 — 목록은
+    "내가 무엇을 분석했는가"의 기록인데 남의 활동이 노출되는 셈이었다.
+
+    공용 리포트의 재사용은 목록이 아니라 **조회 시점**에 일어난다:
+    사용자가 종목을 검색하거나 산업을 고르면 find_fresh_shared_report() 가
+    유효시간 내 공용 리포트를 찾아 그때만 보여준다. 그 경로가 공유의 유일한
+    통로이고, 여기서 다시 열어줄 이유가 없다.
     """
     if not is_available():
         return []
     try:
         sql = (
             "SELECT filename, report_type, metadata, created_at, scope, user_id "
-            "FROM reports WHERE (user_id=%s OR scope='shared')"
+            "FROM reports WHERE user_id=%s"
         )
         params: list = [user_id]
         if report_type:

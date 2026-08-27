@@ -19,7 +19,7 @@ export default function TimingEngine({ holdings }: TimingEngineProps) {
 
   return (
     <div className="h-full flex flex-col min-h-0">
-      <div className="flex items-center gap-1 px-2 pt-2 border-b border-[#1e2d40] flex-shrink-0 overflow-x-auto">
+      <div className="tab-row flex items-center gap-1 px-2 pt-2 border-b border-[#1e2d40] flex-shrink-0 overflow-x-auto">
         {TABS.map((t, i) => (
           <button
             key={t.label}

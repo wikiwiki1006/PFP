@@ -204,3 +204,24 @@ def us_price_cutoff(now: Optional[datetime] = None) -> date:
     if is_us_trading_day(d) and n.time() >= _MARKET_OPEN:
         return d
     return last_completed_session(n)
+
+
+def next_session_open(now: Optional[datetime] = None) -> date:
+    """다음(또는 진행 중인) 정규장이 열리는 거래일.
+
+    장이 닫혀 있는 동안 만든 결과를 "다음 장이 열릴 때까지" 재사용하려면,
+    그 사이 내내 같은 값이 나오는 기준이 필요하다. 날짜만 쓰면 월요일 저녁과
+    화요일 아침이 서로 다른 키가 되어, 밤새 만들어 둔 결과를 아침에 다시
+    만들게 된다. 다음 개장일을 기준으로 삼으면 둘 다 같은 키가 된다.
+
+    장중이거나 개장 전이면 오늘, 마감 후·휴장일이면 다음 거래일을 돌려준다.
+    """
+    n = now or now_et()
+    d = n.date()
+    if is_us_trading_day(d) and n.time() < _MARKET_CLOSE:
+        return d
+    for _ in range(1, 12):          # 연휴가 길어도 이 안에서 끝난다
+        d += timedelta(days=1)
+        if is_us_trading_day(d):
+            return d
+    return d

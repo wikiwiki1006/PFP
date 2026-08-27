@@ -51,7 +51,7 @@ def _get_live_prices(tickers: list[str]) -> dict[str, float]:
     yfinance 장애 중 모든 요청이 매번 재시도해 오히려 지연·차단이 심해진다.
     """
     import yfinance as yf
-    from backend.db.market_cache import _yf_lock
+    from backend.db.market_cache import _yf_sem
 
     now = _time.time()
     # ET 날짜가 바뀌면 전량 폐기 (어제 가격이 오늘 실시간으로 주입되는 것 방지)
@@ -78,7 +78,7 @@ def _get_live_prices(tickers: list[str]) -> dict[str, float]:
             end_dt = datetime.now(timezone.utc) + timedelta(hours=-4)
         start_dt = end_dt - timedelta(minutes=30)
         # 스케줄러의 배치 다운로드와 동일한 락·설정을 사용해 fd 고갈을 막는다
-        with _yf_lock:
+        with _yf_sem:
             data = yf.download(
                 need, start=start_dt, end=end_dt, interval="2m",
                 progress=False, auto_adjust=True, threads=False,

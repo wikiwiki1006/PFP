@@ -1,3 +1,6 @@
+@import './styles/light-theme.css';
+@import './styles/light-theme-manual.css';
+@import './styles/mobile.css';
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap');
 
 @tailwind base;
@@ -110,11 +113,19 @@
 .text-\[13px\]  { font-size: 16px !important; }
 .text-\[14px\]  { font-size: 17px !important; }
 
-/* ── 어두운 텍스트 색상 명도 향상 ────────────────────────────────────────────── */
-.text-\[#4a5568\]  { color: #94a3b8 !important; }
-.text-\[#475569\]  { color: #94a3b8 !important; }
-.text-\[#64748b\]  { color: #cbd5e1 !important; }
-.text-\[#94a3b8\]  { color: #e2e8f0 !important; }
-.text-\[#cbd5e1\]  { color: #f1f5f9 !important; }
-.text-\[#e2e8f0\]  { color: #ffffff  !important; }
-.text-\[#f1f5f9\]  { color: #ffffff  !important; }
+/* ── 다크 모드 텍스트 명도 향상 ──────────────────────────────────────────────
+ *
+ * 이 규칙들은 원래 '#' 이스케이프가 빠져 있어(`.text-\[#4a5568\]`) 셀렉터가
+ * 무효였고, 여태 아무 효과가 없었다. 이스케이프를 바로잡으면서 비로소 동작한다.
+ *
+ * 어두운 배경 위의 흐린 회색(#4a5568 등)은 대비가 낮아 읽기 어렵다 —
+ * 원 작성 의도대로 한 단계 밝게 올린다. 라이트 모드에는 적용하지 않는다
+ * (흰 배경에서는 오히려 대비가 떨어진다).
+ */
+[data-theme="dark"] .text-\[\#4a5568\]  { color: #94a3b8 !important; }
+[data-theme="dark"] .text-\[\#475569\]  { color: #94a3b8 !important; }
+[data-theme="dark"] .text-\[\#64748b\]  { color: #cbd5e1 !important; }
+[data-theme="dark"] .text-\[\#94a3b8\]  { color: #e2e8f0 !important; }
+[data-theme="dark"] .text-\[\#cbd5e1\]  { color: #f1f5f9 !important; }
+[data-theme="dark"] .text-\[\#e2e8f0\]  { color: #ffffff  !important; }
+[data-theme="dark"] .text-\[\#f1f5f9\]  { color: #ffffff  !important; }

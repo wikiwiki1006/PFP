@@ -11,10 +11,13 @@ import re
 import requests
 from datetime import datetime
 from pathlib import Path
+from typing import Callable, Optional
 
 import anthropic
 import yfinance as yf
 from dotenv import load_dotenv
+
+from backend.services.job_store import JobCancelled
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
@@ -93,28 +96,48 @@ _BENCHMARK_ETF_MAP: dict[str, str] = {
 
 # ── Claude 호출 ───────────────────────────────────────────────────────────────────
 
-def _call_claude(model: str, prompt: str, system: str, max_tokens: int) -> str:
-    """Claude 호출. 토큰 한도로 잘린 경우 후속 호출로 마무리 문장 복구."""
+def _call_claude(
+    model: str, prompt: str, system: str, max_tokens: int,
+    should_cancel: Optional[Callable[[], bool]] = None,
+) -> str:
+    """Claude 호출. 토큰 한도로 잘린 경우 후속 호출로 마무리 문장 복구.
+
+    스트리밍으로 받는다. 응답을 한 번에 기다리면 사용자가 중단을 눌러도
+    그 호출이 끝날 때까지(수십 초) 아무것도 멈출 수 없기 때문이다.
+    조각을 받을 때마다 취소를 확인하고, 취소면 JobCancelled 를 올려
+    with 블록을 빠져나가며 연결을 끊는다.
+    """
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    msg = client.messages.create(
+
+    def _check() -> None:
+        if should_cancel is not None and should_cancel():
+            raise JobCancelled()
+
+    def _stream(**kw) -> tuple[str, Optional[str]]:
+        parts: list[str] = []
+        _check()
+        with client.messages.stream(**kw) as st:
+            for piece in st.text_stream:
+                _check()
+                parts.append(piece)
+            stop_reason = st.get_final_message().stop_reason
+        return "".join(parts), stop_reason
+
+    text, stop_reason = _stream(
         model=model,
         max_tokens=max_tokens,
         system=system,
         messages=[{"role": "user", "content": prompt}],
     )
-    text = "".join(
-        block.text for block in msg.content
-        if getattr(block, "type", None) == "text"
-    )
 
-    if msg.stop_reason == "max_tokens" and text.strip():
+    if stop_reason == "max_tokens" and text.strip():
         # 끊긴 마지막 문장만 이어붙이는 호출이다.
         # 예전에는 원본 프롬프트(수천 토큰) + 잘린 응답(4096 토큰)을 통째로 재전송해,
         # 출력 200 토큰을 얻는 데 입력 9,000 토큰을 썼다 (전체 입력의 63%).
         # 문장을 잇는 데 필요한 것은 **끝부분 몇 줄뿐**이므로 꼬리만 보낸다.
         try:
             tail_ctx = text[-600:]
-            fix = client.messages.create(
+            tail, _ = _stream(
                 model=model,
                 max_tokens=200,
                 messages=[
@@ -127,24 +150,24 @@ def _call_claude(model: str, prompt: str, system: str, max_tokens: int) -> str:
                     )},
                 ],
             )
-            tail = "".join(
-                block.text for block in fix.content
-                if getattr(block, "type", None) == "text"
-            )
             if tail.strip():
                 text += tail
+        except JobCancelled:
+            raise
         except Exception:
             pass
 
     return text
 
 
-def _call_haiku(prompt: str, system: str = "", max_tokens: int = 2000) -> str:
-    return _call_claude("claude-haiku-4-5-20251001", prompt, system, max_tokens)
+def _call_haiku(prompt: str, system: str = "", max_tokens: int = 2000,
+                should_cancel: Optional[Callable[[], bool]] = None) -> str:
+    return _call_claude("claude-haiku-4-5-20251001", prompt, system, max_tokens, should_cancel)
 
 
-def _call_sonnet(prompt: str, system: str = "", max_tokens: int = 4096) -> str:
-    return _call_claude("claude-sonnet-4-6", prompt, system, max_tokens)
+def _call_sonnet(prompt: str, system: str = "", max_tokens: int = 4096,
+                 should_cancel: Optional[Callable[[], bool]] = None) -> str:
+    return _call_claude("claude-sonnet-4-6", prompt, system, max_tokens, should_cancel)
 
 
 
@@ -702,18 +725,32 @@ def _industry_prompt_part2(meta: dict) -> str:
 
 # ── 레포트 파이프라인 ─────────────────────────────────────────────────────────────
 
-def write_equity_report(ticker: str, model_tier: str = "basic") -> dict:
+def write_equity_report(
+    ticker: str, model_tier: str = "basic",
+    should_cancel: Optional[Callable[[], bool]] = None,
+) -> dict:
     """종목 리서치 레포트 생성.
     model_tier: "basic" → GPT-5.6 Sol 2-phase (각 4096 토큰)
                 "deep"  → Claude Haiku 2-phase (각 4096 토큰)
+
+    should_cancel 이 주어지면 각 단계 사이와 LLM 스트리밍 도중에 확인해,
+    사용자가 중단하면 JobCancelled 를 올리고 즉시 빠져나온다.
     """
     ticker = ticker.upper()
 
+    def _check() -> None:
+        if should_cancel is not None and should_cancel():
+            raise JobCancelled()
+
     # 1) yfinance 데이터
+    _check()
     company_name, yf_text, raw_dict = gather_equity_yfinance(ticker)
 
     # 2) Perplexity 뉴스
+    _check()
     news_text = gather_equity_perplexity(ticker, company_name)
+
+    _check()
 
     context_base = (
         f"【yfinance 실제 데이터】\n{yf_text}\n\n"
@@ -731,26 +768,15 @@ def write_equity_report(ticker: str, model_tier: str = "basic") -> dict:
         f"{news_text if news_text else '(no news data — rely on model knowledge)'}"
     )
 
-    if model_tier == "basic":
-        # Haiku 기본 분석: Haiku 구조화 + Haiku 2-phase 작성
-        p1 = _call_haiku(
-            f"{context_deep}\n\n{_equity_prompt_part1(ticker, company_name)}",
-            EQUITY_SYSTEM_PROMPT, max_tokens=4096,
-        )
-        p2 = _call_haiku(
-            f"{context_deep}\n\n{_equity_prompt_part2(ticker, company_name)}",
-            EQUITY_SYSTEM_PROMPT, max_tokens=4096,
-        )
-    else:
-        # Sonnet 심층 분석: Haiku 구조화 + Sonnet 2-phase 작성
-        p1 = _call_sonnet(
-            f"{context_deep}\n\n{_equity_prompt_part1(ticker, company_name)}",
-            EQUITY_SYSTEM_PROMPT, max_tokens=4096,
-        )
-        p2 = _call_sonnet(
-            f"{context_deep}\n\n{_equity_prompt_part2(ticker, company_name)}",
-            EQUITY_SYSTEM_PROMPT, max_tokens=4096,
-        )
+    _write = _call_haiku if model_tier == "basic" else _call_sonnet
+    p1 = _write(
+        f"{context_deep}\n\n{_equity_prompt_part1(ticker, company_name)}",
+        EQUITY_SYSTEM_PROMPT, max_tokens=4096, should_cancel=should_cancel,
+    )
+    p2 = _write(
+        f"{context_deep}\n\n{_equity_prompt_part2(ticker, company_name)}",
+        EQUITY_SYSTEM_PROMPT, max_tokens=4096, should_cancel=should_cancel,
+    )
     raw = p1.strip() + "\n\n" + p2.strip()
 
     sections = _parse_sections(raw)
@@ -764,20 +790,33 @@ def write_equity_report(ticker: str, model_tier: str = "basic") -> dict:
     }
 
 
-def write_industry_report(industry_id: str, model_tier: str = "basic") -> dict:
+def write_industry_report(
+    industry_id: str, model_tier: str = "basic",
+    should_cancel: Optional[Callable[[], bool]] = None,
+) -> dict:
     """산업 리서치 레포트 생성.
     model_tier: "basic" → GPT-5.6 Sol 2-phase (각 4096 토큰)
                 "deep"  → Claude Haiku 2-phase (각 4096 토큰)
+
+    should_cancel 은 write_equity_report 와 같은 역할이다.
     """
     if industry_id not in INDUSTRIES:
         raise ValueError(f"지원하지 않는 산업: {industry_id}")
     meta = INDUSTRIES[industry_id]
 
+    def _check() -> None:
+        if should_cancel is not None and should_cancel():
+            raise JobCancelled()
+
     # 1) yfinance 데이터
+    _check()
     yf_text, raw_dict = gather_industry_yfinance(meta)
 
     # 2) Perplexity 뉴스
+    _check()
     news_text = gather_industry_perplexity(meta)
+
+    _check()
 
     context = (
         f"【yfinance 실제 데이터】\n{yf_text}\n\n"
@@ -785,26 +824,15 @@ def write_industry_report(industry_id: str, model_tier: str = "basic") -> dict:
         f"{news_text if news_text else '(뉴스 데이터 없음 — 학습 지식 활용)'}"
     )
 
-    if model_tier == "basic":
-        # Haiku 기본 분석: 2-phase
-        p1 = _call_haiku(
-            f"{context}\n\n{_industry_prompt_part1(meta)}",
-            INDUSTRY_SYSTEM_PROMPT, max_tokens=4096,
-        )
-        p2 = _call_haiku(
-            f"{context}\n\n{_industry_prompt_part2(meta)}",
-            INDUSTRY_SYSTEM_PROMPT, max_tokens=4096,
-        )
-    else:
-        # Sonnet 심층 분석: 2-phase
-        p1 = _call_sonnet(
-            f"{context}\n\n{_industry_prompt_part1(meta)}",
-            INDUSTRY_SYSTEM_PROMPT, max_tokens=4096,
-        )
-        p2 = _call_sonnet(
-            f"{context}\n\n{_industry_prompt_part2(meta)}",
-            INDUSTRY_SYSTEM_PROMPT, max_tokens=4096,
-        )
+    _write = _call_haiku if model_tier == "basic" else _call_sonnet
+    p1 = _write(
+        f"{context}\n\n{_industry_prompt_part1(meta)}",
+        INDUSTRY_SYSTEM_PROMPT, max_tokens=4096, should_cancel=should_cancel,
+    )
+    p2 = _write(
+        f"{context}\n\n{_industry_prompt_part2(meta)}",
+        INDUSTRY_SYSTEM_PROMPT, max_tokens=4096, should_cancel=should_cancel,
+    )
     raw = p1.strip() + "\n\n" + p2.strip()
 
     sections = _parse_sections(raw)

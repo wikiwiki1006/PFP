@@ -1,0 +1,262 @@
+/*
+ * styles/mobile.css
+ * ─────────────────
+ * 세로로 긴 화면(휴대폰)용 보정.
+ *
+ * 이 사이트는 데스크탑 기준으로 만들어져 반응형 클래스가 거의 없다.
+ * 2,300줄짜리 화면 파일들에 sm:/md: 접두사를 손으로 붙이는 대신, 여기서
+ * 한 번에 잡는다 — 라이트 테마를 같은 방식으로 처리해 이미 검증된 접근이다.
+ *
+ * 규칙은 모두 max-width 미디어 쿼리 안에 있다. Tailwind 의 md:/lg: 변형은
+ * min-width 기준이라 서로 겹치지 않는다 — 즉 데스크탑 레이아웃은 이 파일의
+ * 어떤 규칙에도 영향받지 않는다.
+ *
+ * !important 가 필요한 이유: Tailwind 유틸리티가 이 파일보다 뒤에 오므로
+ * 같은 특이도면 유틸리티가 이긴다.
+ */
+
+/* dvh 를 모르는 구형 브라우저용 대비값. 아래 h-[100dvh] 가 유효하면 덮어쓴다. */
+@supports not (height: 100dvh) {
+  .h-\[100dvh\] { height: 100vh; }
+}
+
+/* ── 휴대폰 (~767px) ─────────────────────────────────────────────────────── */
+@media (max-width: 767px) {
+
+  /* 글씨 크기 ─────────────────────────────────────────────────────────────
+     text-[10px] 같은 절대 px 값은 루트 폰트 크기를 키워도 그대로 작다.
+     휴대폰에서는 읽히지 않으므로 최소선까지 올린다. 레이아웃이 터지지 않도록
+     과하게 키우지 않고, 아래 그리드 단순화로 확보한 가로 폭으로 흡수한다. */
+  .text-\[9px\]  { font-size: 11px !important; line-height: 1.45 !important; }
+  .text-\[10px\] { font-size: 12px !important; line-height: 1.45 !important; }
+  .text-\[11px\] { font-size: 12.5px !important; line-height: 1.5 !important; }
+  .text-\[12px\] { font-size: 13px !important; line-height: 1.5 !important; }
+  .text-\[13px\] { font-size: 13.5px !important; line-height: 1.5 !important; }
+
+  /* 긴 티커·숫자·영문이 칸을 밀어내지 않게 한다 */
+  body { overflow-wrap: break-word; }
+
+  /* 그리드 ────────────────────────────────────────────────────────────────
+     4열 이상은 휴대폰에서 글자가 뭉개지므로 2열로 낮춘다.
+     3열은 그대로 둔다 — 390px 에서 한 칸이 약 120px 이라 "상승 25%" 같은
+     짧은 지표는 충분히 읽히고, 2열로 낮추면 셋 중 하나만 아랫줄에 홀로 남아
+     오히려 어색해진다. 아주 좁은 화면(~380px)에서만 아래에서 1열로 내린다.
+     `grid-cols-2` 는 건드리지 않는다: 그 값을 쓴 화면은 이미 좁은 폭을
+     염두에 두고 고른 것이다. */
+  .grid-cols-4,
+  .grid-cols-5,
+  .grid-cols-6,
+  .grid-cols-7 {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+
+  /* 가로로 늘어놓은 것들 ───────────────────────────────────────────────────
+     화면 폭을 넘기면 잘려 나가므로 줄바꿈을 허용한다.
+
+     반드시 `main` 안으로 한정한다. 앱 골격(사이드바+본문 컬럼)까지 줄바꿈시키면
+     flex 줄의 높이가 내용 기준으로 잡히면서 화면 높이 제약이 무너지고,
+     하단 탭 바가 화면 밖으로 밀려난다 — 실제로 그렇게 깨졌었다. */
+  main .flex:not(.flex-col) { flex-wrap: wrap; }
+
+  /* 선택지 버튼 줄 (분석 모드·분석 등급) ───────────────────────────────────
+     내용 폭대로 두면 '빠름'은 좁고 '표준'은 넓어 줄이 들쭉날쭉해진다.
+     좁은 화면에서는 같은 폭으로 채우는 편이 훑어보기 쉽고 누르기도 쉽다. */
+  main .option-row { flex-wrap: wrap; }
+  main .option-row > button {
+    flex: 1 1 calc(50% - 0.5rem);
+    min-width: 0 !important;
+  }
+
+  /* 아이콘 + 제목 묶음은 절대 갈라지면 안 된다.
+     줄바꿈이 걸리면 아이콘만 윗줄에 홀로 남아 제목과 무관한 장식처럼 보인다
+     (실제로 '매크로 시나리오 분석' 화면이 그렇게 깨졌다).
+     안쪽 텍스트는 min-width:0 으로 알아서 접히게 두면 넘치지 않는다. */
+  main .flex.items-center:has(> svg:first-child) {
+    flex-wrap: nowrap !important;
+    /* 설명이 두 줄로 접히면 세로 가운데 정렬은 아이콘을 제목이 아니라
+       설명 옆에 놓는다. 첫 줄(제목)에 맞춘다. 한 줄일 때는 차이가 없다. */
+    align-items: flex-start;
+  }
+  main .flex.items-center:has(> svg:first-child) > :not(svg) { min-width: 0; }
+
+  /* 표 안의 버튼 묶음 ─────────────────────────────────────────────────────
+     셀 안에서 수정·삭제 아이콘이 줄바꿈되면 그 행만 세 줄 높이가 된다.
+     실제로 보유 종목 표의 행이 36px 대신 97px 이 되어 종목 사이가 텅 비었다.
+     표는 이미 가로로 스크롤되므로 셀 안에서 접을 이유가 없다. */
+  main td .flex,
+  main th .flex { flex-wrap: nowrap !important; }
+
+  /* 가로 스크롤로 보여주려던 것들은 줄바꿈하면 안 된다.
+     직계 자식(>)만 잡으면 안 된다 — 스크롤 컨테이너와 실제 flex 줄 사이에
+     래퍼가 끼어 있는 경우가 흔하고, 그때 줄바꿈이 살아나면 가로로 흘러야 할
+     지표 줄이 세로로 쌓여 화면 하나를 통째로 차지한다. */
+  main .overflow-x-auto .flex,
+  main .flex.flex-nowrap,
+  main .whitespace-nowrap.flex {
+    flex-wrap: nowrap !important;
+  }
+
+  /* 화면 제목 영역 ────────────────────────────────────────────────────────
+     아이콘 + 제목 + 설명이 세로로 100px 넘게 먹는다. 좁은 화면에서는
+     주 기능이 첫 화면에 보이는 편이 제목보다 중요하다. 제목은 남기되 눌러 담는다. */
+  main h1 { font-size: 15px !important; line-height: 1.25 !important; }
+  main h1 + p { font-size: 11.5px !important; line-height: 1.35 !important; }
+  main .p-5 { padding: 0.7rem !important; }
+  main .pb-3 { padding-bottom: 0.5rem !important; }
+  main .pt-3 { padding-top: 0.5rem !important; }
+
+  /* 섹터 비중 범례 ────────────────────────────────────────────────────────
+     원형 그래프와 나란히 놓이면 범례 칸이 180px 도 안 된다. 거기에 막대까지
+     넣으면 이름 칸에 40px 밖에 안 남아 '기술'이 '기'로 잘린다.
+     막대는 옆의 퍼센트와 원형 그래프에 이미 담긴 정보라 좁은 화면에서는 뺀다. */
+  main .sector-legend-bar { display: none !important; }
+
+  /* 포트폴리오 화면 구역 순서 ────────────────────────────────────────────
+     데스크탑은 좌우 2단(좌: 그래프·보유·섹터, 우: 브리핑)이라 세로로 쌓으면
+     브리핑이 맨 아래로 밀린다. 사용자가 자주 보는 순서와 맞지 않는다.
+
+     display:contents 로 좌측 패널을 '없는 것처럼' 만들면 그 자식들이 바깥
+     컨테이너의 직계 항목이 되어, 우측 패널과 한 줄에 놓고 order 로 자리를
+     정할 수 있다. 데스크탑에서는 이 규칙이 적용되지 않아 2단 그대로다. */
+  main .mobile-flatten { display: contents; }
+  main .m-order-1 { order: 1; }   /* 자산 그래프 */
+  main .m-order-2 { order: 2; }   /* 보유 종목 */
+  main .m-order-3 { order: 3; }   /* 전날 브리핑 · AI 피드백 · 뉴스 */
+  main .m-order-4 { order: 4; }   /* 섹터 비중 → 섹터 변동율 */
+  main .m-order-6 { order: 6; }   /* 실적/배당 · 시장지표 */
+
+  /* 상단 지표 알약 ────────────────────────────────────────────────────────
+     데스크탑 크기(22px 값 + 넓은 여백)로는 390px 화면에 한 개 반밖에 안 들어간다.
+     핵심 지표인데 옆으로 밀어야만 볼 수 있으면 안 보이는 것과 다름없다.
+     세 개가 한눈에 들어오는 크기로 줄인다 — 나머지는 옆으로 밀어서 본다. */
+  main .metric-pill {
+    padding-left: 0.8rem !important;
+    padding-right: 0.8rem !important;
+    padding-top: 0.45rem !important;
+    padding-bottom: 0.45rem !important;
+  }
+  main .metric-pill-label {
+    /* 9.5px 은 화면에서 읽히지 않는다. 자간을 줄여 폭은 유지하면서 키운다. */
+    font-size: 11px !important;
+    letter-spacing: 0 !important;
+  }
+  main .metric-pill-value { font-size: 15px !important; }
+
+  /* 탭 줄 ─────────────────────────────────────────────────────────────────
+     탭은 절대 여러 줄로 접히면 안 된다. 접히는 순간 "주식 리포트 / 산업 리포트 /
+     과거 레포트" 아래에 "매크로 링크"만 덩그러니 남아 고장난 것처럼 보이고,
+     세로 공간도 두 배로 먹는다. 한 줄로 두고 옆으로 밀어서 보게 한다. */
+  .tab-row {
+    flex-wrap: nowrap !important;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .tab-row::-webkit-scrollbar { display: none; }
+  .tab-row > button {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    /* 데스크탑 기준 좌우 여백은 좁은 화면에서 탭 네 개를 못 담는다 */
+    padding-left: 0.7rem !important;
+    padding-right: 0.7rem !important;
+  }
+
+  /* 고정 폭 ───────────────────────────────────────────────────────────────
+     화면보다 넓은 최소 폭은 그대로 두면 페이지 전체가 옆으로 밀린다. */
+  [class*="min-w-\["] { min-width: 0 !important; }
+  /* 단, 표는 좁히면 읽을 수 없다 — 최소 폭을 지키되 자기 안에서 스크롤시킨다 */
+  table[class*="min-w-\["] { min-width: 540px !important; }
+  .overflow-x-auto { -webkit-overflow-scrolling: touch; }
+
+  /* 표는 항상 자기 컨테이너 안에서만 가로 스크롤되게 한다 */
+  table { display: table; width: 100%; }
+
+  /* 여백 ─────────────────────────────────────────────────────────────────
+     데스크탑 기준 여백은 좁은 화면에서 내용 공간을 지나치게 잡아먹는다. */
+  .p-5  { padding: 0.85rem !important; }
+  .p-6  { padding: 1rem !important; }
+  .px-5 { padding-left: 0.85rem !important; padding-right: 0.85rem !important; }
+  .px-6 { padding-left: 1rem !important; padding-right: 1rem !important; }
+  .mx-5 { margin-left: 0.7rem !important; margin-right: 0.7rem !important; }
+  .gap-4 { gap: 0.6rem !important; }
+  .gap-6 { gap: 0.8rem !important; }
+
+  /* 누를 수 있는 것 ───────────────────────────────────────────────────────
+     손가락은 마우스 포인터보다 훨씬 뭉툭하다. 너무 작은 버튼은 옆 버튼이
+     눌리거나 아무것도 안 눌린다. 44px 은 손가락 접촉면의 실측 기준이다. */
+  button:not([role="switch"]):not(.tab-compact),
+  a[role="button"],
+  select {
+    min-height: 36px;
+  }
+  /* 아이콘만 있는 버튼은 폭도 함께 확보한다.
+     수정·삭제처럼 나란히 붙어 있는 아이콘 버튼이 18px 폭이면
+     옆 버튼이 눌린다 — 삭제 버튼에서 이건 실제 사고가 된다. */
+  button:has(> svg:only-child) {
+    min-width: 34px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  button > svg:only-child { min-width: 16px; min-height: 16px; }
+
+  /* 입력 ─────────────────────────────────────────────────────────────────
+     iOS 사파리는 글씨가 16px 보다 작은 입력창에 포커스가 가면 화면을 확대한다.
+     한 번 확대되면 사용자가 직접 되돌려야 해서 매우 거슬린다. */
+  input, select, textarea { font-size: 16px !important; }
+
+  /* 모달 ─────────────────────────────────────────────────────────────────
+     데스크탑용 큰 모달은 휴대폰 화면을 넘어간다. 화면 안에 넣고
+     내용이 길면 모달 안에서 스크롤되게 한다. */
+  [role="dialog"] > div {
+    max-height: 88vh;
+    overflow-y: auto;
+    width: 100%;
+  }
+
+  /* 좌우로 밀어 보는 차트 ─────────────────────────────────────────────────
+     캔들 차트는 화면 폭에 다 욱여넣으면 캔들 하나가 1~2px 이 되어 몸통과
+     꼬리를 구분할 수 없다. 화면보다 넓게 그려 두고 가로로 밀어서 보게 한다.
+     아래 recharts max-width 규칙이 이걸 다시 줄여버리므로 여기서 예외로 뺀다. */
+  main .chart-hscroll {
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    /* 세로 스크롤은 페이지에 넘기고 가로만 여기서 받는다 */
+    touch-action: pan-x pan-y;
+  }
+  main .chart-hscroll > .recharts-responsive-container {
+    /* recharts 가 인라인으로 min-width:0 을 넣기 때문에 !important 가 필요하다.
+       없으면 컨테이너가 화면 폭으로 줄어 캔들이 다시 뭉개진다. */
+    min-width: 900px !important;
+    max-width: none !important;
+  }
+  main .chart-hscroll .recharts-wrapper,
+  main .chart-hscroll .recharts-surface {
+    max-width: none !important;
+  }
+
+  /* 차트 ─────────────────────────────────────────────────────────────────
+     recharts 는 부모 폭을 재서 그린다. 부모가 화면을 넘지 않게만 해주면 된다. */
+  .recharts-responsive-container { max-width: 100% !important; }
+  .recharts-wrapper { max-width: 100% !important; }
+  /* 축 글씨는 위 규칙과 무관하게 SVG 라 따로 키운다 */
+  .recharts-cartesian-axis-tick-value { font-size: 11px !important; }
+  .recharts-legend-item-text { font-size: 11px !important; }
+
+  /* 페이지가 통째로 옆으로 밀리는 일은 없어야 한다 */
+  html, body { max-width: 100%; overflow-x: hidden; }
+}
+
+/* ── 아주 좁은 화면 (~380px) ─────────────────────────────────────────────── */
+@media (max-width: 380px) {
+  /* 이 폭에서는 2열도 글자가 두 줄로 접힌다. 지표는 한 줄에 하나씩. */
+  .grid-cols-3,
+  .grid-cols-4,
+  .grid-cols-5,
+  .grid-cols-6,
+  .grid-cols-7 {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+}

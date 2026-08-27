@@ -62,9 +62,17 @@ def _dsn() -> str:
     )
 
 
-def init_pool(minconn: int = 2, maxconn: int = 20) -> bool:
-    """연결 풀 초기화. 성공 시 True, 실패 시 False(파일 폴백)."""
+def init_pool(minconn: int = 2, maxconn: Optional[int] = None) -> bool:
+    """연결 풀 초기화. 성공 시 True, 실패 시 False(파일 폴백).
+
+    maxconn 기본값은 Cloud Run 의 인스턴스당 동시 요청 수(40)에 맞춘다.
+    이보다 작으면 요청은 스레드풀에 올라갔는데 커넥션이 없어 대기하게 되고,
+    동시 접속이 늘수록 그 대기가 그대로 응답 지연이 된다.
+    DB(Neon) 는 900 연결까지 받으므로 5 인스턴스 × 40 = 200 은 여유가 있다.
+    """
     global _pool
+    if maxconn is None:
+        maxconn = max(4, int(os.getenv("DB_POOL_MAX", "40")))
     if not _PSYCOPG2_OK:
         logger.warning("psycopg2 미설치 → 파일 폴백 모드")
         return False

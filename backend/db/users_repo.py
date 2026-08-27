@@ -82,7 +82,8 @@ def get_user(uid: str) -> Optional[dict]:
             with conn.cursor() as cur:
                 cur.execute(
                     """SELECT id, email, name, provider, email_verified, photo_url,
-                              created_at, last_login_at, disabled, username
+                              created_at, last_login_at, disabled, username, age,
+                              COALESCE(is_admin, FALSE)
                        FROM users WHERE id = %s""",
                     (uid,),
                 )
@@ -96,21 +97,36 @@ def get_user(uid: str) -> Optional[dict]:
             "last_login_at": r[7].isoformat() if r[7] else None,
             "disabled": bool(r[8]),
             "username": r[9],
+            "age": r[10],
+            "is_admin": bool(r[11]),
         }
     except Exception as e:
         logger.error(f"get_user({uid}) 실패: {e}")
         return None
 
 
-def update_profile(uid: str, name: Optional[str] = None) -> bool:
-    """표시이름 변경. 이메일은 Firebase Auth 쪽이 원본이라 여기서 바꾸지 않는다."""
-    if not is_available() or not uid or name is None:
+def update_profile(uid: str, name: Optional[str] = None,
+                   age: Optional[int] = None, clear_age: bool = False) -> bool:
+    """표시이름·나이 변경. 이메일은 Firebase Auth 쪽이 원본이라 여기서 바꾸지 않는다.
+
+    나이는 선택 항목이라 "안 보냄"(그대로 두기)과 "비움"(NULL 로 지우기)을
+    구분해야 한다. None 하나로는 둘을 표현할 수 없어 clear_age 를 따로 둔다.
+    """
+    if not is_available() or not uid:
+        return False
+    sets, args = [], []
+    if name is not None:
+        sets.append("name=%s"); args.append(name.strip()[:100])
+    if clear_age:
+        sets.append("age=NULL")
+    elif age is not None:
+        sets.append("age=%s"); args.append(int(age))
+    if not sets:
         return False
     try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("UPDATE users SET name=%s WHERE id=%s", (name.strip()[:100], uid))
-                return cur.rowcount > 0
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(f"UPDATE users SET {', '.join(sets)} WHERE id=%s", (*args, uid))
+            return cur.rowcount > 0
     except Exception as e:
         logger.error(f"update_profile({uid}) 실패: {e}")
         return False
@@ -212,4 +228,38 @@ def set_username(uid: str, username: str) -> bool:
             return cur.rowcount > 0
     except Exception as e:
         logger.warning(f"set_username({uid}, {username}) 실패: {e}")
+        return False
+
+
+def is_admin(uid: str) -> bool:
+    """관리자 계정인지. 권한은 DB 만을 근거로 판단한다 —
+    토큰의 custom claim 은 갱신 전까지 옛 값을 들고 있어, 권한을 회수해도
+    한동안 관리자로 통과할 수 있다."""
+    if not is_available() or not uid:
+        return False
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COALESCE(is_admin, FALSE) FROM users WHERE id = %s", (uid,))
+                r = cur.fetchone()
+        return bool(r and r[0])
+    except Exception as e:
+        logger.error(f"is_admin 조회 실패: {e}")
+        return False
+
+
+def set_admin(uid: str, value: bool = True) -> bool:
+    """관리자 권한 부여/회수. 시드 스크립트에서만 호출한다 —
+    HTTP 로 노출하면 권한 상승 경로가 된다."""
+    if not is_available() or not uid:
+        return False
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE users SET is_admin = %s WHERE id = %s", (value, uid))
+                changed = cur.rowcount
+            conn.commit()
+        return changed > 0
+    except Exception as e:
+        logger.error(f"set_admin 실패: {e}")
         return False

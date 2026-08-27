@@ -12,6 +12,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 from backend.services.auth import current_user, optional_user
+from backend.services.job_store import JobStore
 from fastapi import Depends, APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
@@ -29,7 +30,9 @@ from backend.services.optimizer import (
 router = APIRouter(prefix="/api/optimizer", tags=["optimizer"])
 
 # ── AI-Optimize 잡 스토어 (in-process, 재시작 시 초기화) ─────────────────────
-_OPT_JOBS: dict[str, dict] = {}
+# 잡 상태는 DB 에 둔다 — Cloud Run 은 인스턴스를 여러 개 띄우고 세션 고정이 없어서,
+# 메모리에 두면 폴링이 다른 인스턴스로 갈 때 잡을 찾지 못한다.
+_store = JobStore(kind="optimizer", max_jobs=50)
 
 
 
@@ -204,14 +207,13 @@ def start_ai_optimize_job(
     job_id = str(uuid.uuid4())
     # 비로그인 잡은 사용자가 직접 입력한 공개 티커만 다루므로 소유자가 없다.
     _owner = _auth["uid"] if _auth else None
-    _OPT_JOBS[job_id] = {"status": "running", "stage": 0, "stage_text": "준비 중...",
-                         "_owner": _owner}
+    _store.set(job_id, {"status": "running", "stage": 0, "stage_text": "준비 중..."},
+               owner=_owner)
 
     def _on_stage(n: int, text: str) -> None:
-        job = _OPT_JOBS.get(job_id)
-        if job and job["status"] == "running":
-            job["stage"] = n
-            job["stage_text"] = text
+        # 진행 단계는 사용자에게 보여줄 뿐이라, 이미 끝난 잡이면 굳이 덮지 않는다.
+        _store.update_if(job_id, "running",
+                         {"status": "running", "stage": n, "stage_text": text})
 
     def _run() -> None:
         try:
@@ -221,17 +223,15 @@ def start_ai_optimize_job(
                 holding_period_years=req.holding_period_years, weight_bounds=wb,
                 on_stage=_on_stage,
             )
-            if _OPT_JOBS.get(job_id, {}).get("status") == "running":
-                _OPT_JOBS[job_id] = {"status": "done", "stage": 3, "stage_text": "완료", "result": result,
-                                     "_owner": _owner}
+            _store.update_if(job_id, "running",
+                             {"status": "done", "stage": 3, "stage_text": "완료", "result": result})
         except ValueError as e:
-            if _OPT_JOBS.get(job_id, {}).get("status") == "running":
-                _OPT_JOBS[job_id] = {"status": "error", "stage": 0, "stage_text": "오류", "detail": str(e),
-                                     "_owner": _owner}
+            _store.update_if(job_id, "running",
+                             {"status": "error", "stage": 0, "stage_text": "오류", "detail": str(e)})
         except Exception as e:
-            if _OPT_JOBS.get(job_id, {}).get("status") == "running":
-                _OPT_JOBS[job_id] = {"status": "error", "stage": 0, "stage_text": "오류", "detail": f"최적화 오류: {e}",
-                                     "_owner": _owner}
+            _store.update_if(job_id, "running",
+                             {"status": "error", "stage": 0, "stage_text": "오류",
+                              "detail": f"최적화 오류: {e}"})
 
     threading.Thread(target=_run, daemon=True).start()
     return {"job_id": job_id}
@@ -240,18 +240,15 @@ def start_ai_optimize_job(
 @router.get("/ai-optimize-job/{job_id}")
 def get_ai_optimize_job(job_id: str, _auth: Optional[dict] = Depends(optional_user)):
     """잡 상태 조회 (본인 잡 또는 비로그인 잡)."""
-    job = _OPT_JOBS.get(job_id)
-    # 남의 잡이면 존재 여부조차 알리지 않는다.
-    if not job or job.get("_owner") not in (None, (_auth or {}).get("uid")):
+    # 남의 잡이면 존재 여부조차 알리지 않는다 (get 이 None 을 돌려준다).
+    job = _store.get(job_id, owner=(_auth or {}).get("uid"))
+    if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return {k: v for k, v in job.items() if k != "_owner"}
+    return job
 
 
 @router.delete("/ai-optimize-job/{job_id}")
 def cancel_ai_optimize_job(job_id: str, _auth: Optional[dict] = Depends(optional_user)):
     """잡 취소 (본인 잡 또는 비로그인 잡)."""
-    job = _OPT_JOBS.get(job_id)
-    if job and job.get("_owner") in (None, (_auth or {}).get("uid")):
-        _OPT_JOBS[job_id] = {"status": "cancelled", "stage": 0, "stage_text": "취소됨",
-                             "_owner": job.get("_owner")}
+    _store.cancel(job_id, owner=(_auth or {}).get("uid"))
     return {"ok": True}

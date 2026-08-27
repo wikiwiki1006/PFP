@@ -14,11 +14,12 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from backend.services.auth import current_user
+from backend.services.auth import (ai_feature_user, current_user,
+                                   enforce_deep_limit, resolve_model_tier)
 from fastapi import Depends, APIRouter, HTTPException, Header
 from pydantic import BaseModel
 
-from backend.services.job_store import JobStore
+from backend.services.job_store import JobCancelled, JobStore
 from backend.db.portfolio_repo import get_holdings
 from backend.db.reports_repo import (
     save_report, list_reports, get_report_content,
@@ -26,7 +27,6 @@ from backend.db.reports_repo import (
 )
 from backend.services.report_writer import INDUSTRIES, write_equity_report, write_industry_report
 from backend.services.daily_report import generate_daily_report
-from backend.services.telegram_sender import send_file_bytes, send_message
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
@@ -36,7 +36,7 @@ router = APIRouter(prefix="/api/reports", tags=["reports"])
 # ── 백그라운드 잡 스토어 ──────────────────────────────────────────────────────────
 # { job_id: { "status": "pending"|"done"|"error"|"cancelled", "result"?: dict, "message"?: str, "_ts": float } }
 
-_store = JobStore(max_jobs=50)
+_store = JobStore(kind="reports", max_jobs=50)
 
 
 def _cached_shared_result(
@@ -65,7 +65,6 @@ def _cached_shared_result(
         "raw":            hit["content"],
         "sections":       sections,
         "file_path":      hit["filename"],
-        "telegram_sent":  False,
         "model_tier":     meta.get("model_tier", "basic"),
         "cache_tier":     model_tier,
         # 캐시 재사용임을 화면에서 알 수 있도록 출처 정보를 함께 내려보낸다
@@ -91,6 +90,15 @@ def _cached_shared_result(
     return result
 
 
+def _record_deep_use(uid: str, kind: str) -> None:
+    """심층 분석 사용 기록. 실패해도 생성은 계속한다 — 기록은 부가 기능이다."""
+    try:
+        from backend.db import usage_repo
+        usage_repo.record_use(uid, kind)
+    except Exception:
+        pass
+
+
 def _job_set(job_id: str, data: dict, owner: str | None = None) -> None:
     _store.set(job_id, data, owner=owner)
 
@@ -102,7 +110,7 @@ def _job_get(job_id: str, owner: str | None = None) -> dict | None:
 # ── 데일리 브리프 ─────────────────────────────────────────────────────────────────
 
 @router.post("/daily-brief")
-async def daily_brief(_auth: dict = Depends(current_user)):
+async def daily_brief(_auth: dict = Depends(ai_feature_user)):
     uid = _auth["uid"]
     holdings = get_holdings(uid)
     if not holdings:
@@ -151,13 +159,12 @@ def get_daily_brief_file(filename: str, _auth: dict = Depends(current_user)):
 class EquityReportRequest(BaseModel):
     ticker: str
     company_name: str = ""   # 하위 호환 유지용 — 내부적으로 무시됨
-    send_telegram: bool = False
 
 
 @router.post("/equity-research")
 async def equity_research(
     req: EquityReportRequest,
-    _auth: dict = Depends(current_user),
+    _auth: dict = Depends(ai_feature_user),
 ):
     uid = _auth["uid"]
     ticker = req.ticker.upper()
@@ -177,20 +184,12 @@ async def equity_research(
                           "sections": sections, "model_tier": "basic"},
                 user_id=uid, scope="shared", subject_key=ticker)
 
-    telegram_sent = False
-    if req.send_telegram and raw:
-        telegram_sent = send_file_bytes(
-            raw.encode("utf-8"), f"LENS_{ticker}_{date_str}.md",
-            caption=f"📊 LENS CAPITAL RESEARCH\n\n{ticker} — {company_name}\n레포트가 완성되었습니다.",
-        )
-
     return {
         "ticker":        ticker,
         "company_name":  company_name,
         "sections":      sections,
         "raw":           raw,
         "file_path":     filename,
-        "telegram_sent": telegram_sent,
     }
 
 
@@ -198,7 +197,6 @@ async def equity_research(
 
 class IndustryReportRequest(BaseModel):
     industry_id: str
-    send_telegram: bool = False
 
 
 @router.get("/industries")
@@ -220,7 +218,7 @@ def list_industries():
 @router.post("/industry-research")
 async def industry_research(
     req: IndustryReportRequest,
-    _auth: dict = Depends(current_user),
+    _auth: dict = Depends(ai_feature_user),
 ):
     uid = _auth["uid"]
     if req.industry_id not in INDUSTRIES:
@@ -242,20 +240,11 @@ async def industry_research(
                           "model_tier": "basic"},
                 user_id=uid, scope="shared", subject_key=req.industry_id)
 
-    telegram_sent = False
-    if req.send_telegram and raw:
-        meta = INDUSTRIES[req.industry_id]
-        telegram_sent = send_file_bytes(
-            raw.encode("utf-8"), filename,
-            caption=f"📊 LENS CAPITAL RESEARCH\n\n{meta['name_kr']} 산업 레포트가 완성되었습니다.",
-        )
-
     return {
         "industry_id":   req.industry_id,
         "sections":      sections,
         "raw":           raw,
         "file_path":     filename,
-        "telegram_sent": telegram_sent,
     }
 
 
@@ -264,21 +253,21 @@ async def industry_research(
 class EquityResearchStartRequest(BaseModel):
     ticker: str
     model_tier: str = "basic"   # "basic" = Haiku 전용 / "deep" = Haiku+Sonnet
-    send_telegram: bool = False
 
 
 @router.post("/equity-research/start")
 def equity_research_start(
     req: EquityResearchStartRequest,
-    _auth: dict = Depends(current_user),
+    _auth: dict = Depends(ai_feature_user),
 ):
     """종목 레포트 백그라운드 잡 시작. 즉시 {job_id} 반환."""
     if not req.ticker.strip():
         raise HTTPException(status_code=400, detail="티커를 입력하세요.")
 
     ticker         = req.ticker.strip().upper()
-    model_tier     = req.model_tier if req.model_tier in ("basic", "deep") else "basic"
-    send_telegram  = req.send_telegram
+    model_tier     = resolve_model_tier(req.model_tier, _auth)
+    if model_tier == "deep":
+        enforce_deep_limit(_auth, "equity_research")
     uid            = _auth["uid"]
     job_id         = str(uuid.uuid4())
 
@@ -286,20 +275,29 @@ def equity_research_start(
     # 같은 종목이면 결과가 동일하므로 중복 생성(비용·시간)을 피한다.
     cached = _cached_shared_result("equity_research", ticker, model_tier)
     if cached is not None:
-        _job_set(job_id, {"status": "done", "result": cached})
+        _job_set(job_id, {"status": "done", "result": cached}, owner=uid)
         return {"job_id": job_id, "cached": True}
 
-    _job_set(job_id, {"status": "pending"})
+    _job_set(job_id, {"status": "pending"}, owner=uid)
+    should_cancel = _store.cancel_token(job_id)
+    if model_tier == "deep":
+        # 캐시로 돌려준 경우는 위에서 이미 반환됐다 — 여기 왔다는 건 실제로 만든다는 뜻.
+        _record_deep_use(uid, "equity_research")
 
     def _run() -> None:
         try:
-            write_result = write_equity_report(ticker, model_tier=model_tier)
+            write_result = write_equity_report(ticker, model_tier=model_tier,
+                                               should_cancel=should_cancel)
             company_name = write_result.get("company_name", ticker)
             raw          = write_result.get("raw", "")
 
             date_str = datetime.now().strftime("%Y%m%d_%H%M")
             slug     = re.sub(r"[^\w]", "", ticker)
             filename = f"lens_{slug}_{date_str}.md"
+            # 생성 직후~저장 사이의 짧은 틈에 취소됐을 수 있다.
+            # 취소한 리포트를 저장하면 공용 캐시로 남아 다른 사용자에게도 노출된다.
+            if should_cancel():
+                return
             save_report(
                 filename, raw,
                 report_type="equity_research",
@@ -314,27 +312,15 @@ def equity_research_start(
                 subject_key=ticker,
             )
 
-            if send_telegram and raw:
-                try:
-                    send_file_bytes(
-                        raw.encode("utf-8"), filename,
-                        caption=f"📊 LENS CAPITAL RESEARCH\n\n{ticker} — {company_name}\n레포트가 완성되었습니다.",
-                    )
-                except Exception:
-                    pass
-
-            current = _job_get(job_id)
-            if current and current.get("status") == "cancelled":
-                return
 
             result = {**write_result, "report_type": "equity", "file_path": filename}
-            _job_set(job_id, {"status": "done", "result": result})
+            # pending 일 때만 done 으로 바꾼다 — 취소된 잡을 되살리지 않는다.
+            _store.update_if(job_id, "pending", {"status": "done", "result": result})
 
+        except JobCancelled:
+            return   # 취소는 실패가 아니다. 상태는 이미 cancelled 로 바뀌어 있다.
         except Exception as exc:
-            current = _job_get(job_id)
-            if current and current.get("status") == "cancelled":
-                return
-            _job_set(job_id, {"status": "error", "message": str(exc)})
+            _store.update_if(job_id, "pending", {"status": "error", "message": str(exc)})
 
     threading.Thread(target=_run, daemon=True).start()
     return {"job_id": job_id}
@@ -345,13 +331,12 @@ def equity_research_start(
 class IndustryResearchStartRequest(BaseModel):
     industry_id: str
     model_tier: str = "basic"   # "basic" = Haiku 전용 / "deep" = Haiku+Sonnet
-    send_telegram: bool = False
 
 
 @router.post("/industry-research/start")
 def industry_research_start(
     req: IndustryResearchStartRequest,
-    _auth: dict = Depends(current_user),
+    _auth: dict = Depends(ai_feature_user),
 ):
     """산업 레포트 백그라운드 잡 시작. 즉시 {job_id} 반환."""
     if not req.industry_id.strip():
@@ -360,28 +345,35 @@ def industry_research_start(
         raise HTTPException(status_code=400, detail=f"지원하지 않는 산업: {req.industry_id}")
 
     industry_id   = req.industry_id
-    model_tier    = req.model_tier if req.model_tier in ("basic", "deep") else "basic"
-    send_telegram = req.send_telegram
+    model_tier    = resolve_model_tier(req.model_tier, _auth)
+    if model_tier == "deep":
+        enforce_deep_limit(_auth, "industry_research")
     uid           = _auth["uid"]
     job_id        = str(uuid.uuid4())
 
     # 공용 캐시 확인 — 산업은 변화 속도가 느려 72시간까지 재사용
     cached = _cached_shared_result("industry_research", industry_id, model_tier)
     if cached is not None:
-        _job_set(job_id, {"status": "done", "result": cached})
+        _job_set(job_id, {"status": "done", "result": cached}, owner=uid)
         return {"job_id": job_id, "cached": True}
 
-    _job_set(job_id, {"status": "pending"})
+    _job_set(job_id, {"status": "pending"}, owner=uid)
+    should_cancel = _store.cancel_token(job_id)
+    if model_tier == "deep":
+        _record_deep_use(uid, "industry_research")
 
     def _run() -> None:
         try:
-            write_result = write_industry_report(industry_id, model_tier=model_tier)
+            write_result = write_industry_report(industry_id, model_tier=model_tier,
+                                                 should_cancel=should_cancel)
             raw          = write_result.get("raw", "")
             meta         = INDUSTRIES[industry_id]
 
             date_str = datetime.now().strftime("%Y%m%d_%H%M")
             ind_name = meta["name_en"].replace(" ", "_")
             filename = f"lens_industry_{ind_name}_{date_str}.md"
+            if should_cancel():
+                return
             save_report(
                 filename, raw,
                 report_type="industry_research",
@@ -396,27 +388,14 @@ def industry_research_start(
                 subject_key=industry_id,
             )
 
-            if send_telegram and raw:
-                try:
-                    send_file_bytes(
-                        raw.encode("utf-8"), filename,
-                        caption=f"📊 LENS CAPITAL RESEARCH\n\n{meta['name_kr']} 산업 레포트가 완성되었습니다.",
-                    )
-                except Exception:
-                    pass
-
-            current = _job_get(job_id)
-            if current and current.get("status") == "cancelled":
-                return
 
             result = {**write_result, "report_type": "industry", "file_path": filename}
-            _job_set(job_id, {"status": "done", "result": result})
+            _store.update_if(job_id, "pending", {"status": "done", "result": result})
 
+        except JobCancelled:
+            return
         except Exception as exc:
-            current = _job_get(job_id)
-            if current and current.get("status") == "cancelled":
-                return
-            _job_set(job_id, {"status": "error", "message": str(exc)})
+            _store.update_if(job_id, "pending", {"status": "error", "message": str(exc)})
 
     threading.Thread(target=_run, daemon=True).start()
     return {"job_id": job_id}
@@ -435,13 +414,16 @@ def get_report_job_status(job_id: str, _auth: dict = Depends(current_user)):
 
 @router.delete("/job/{job_id}")
 def cancel_report_job(job_id: str, _auth: dict = Depends(current_user)):
-    """실행 중인 레포트 잡 취소 (본인 잡만)."""
-    job = _job_get(job_id, owner=_auth["uid"])
-    if job is None:
+    """실행 중인 레포트 잡 취소 (본인 잡만).
+
+    _store.cancel() 은 상태를 바꾸는 동시에 취소 신호를 올린다. 작업 스레드는
+    그 신호를 보고 LLM 스트리밍을 끊고 빠져나온다 — 상태만 바꾸던 예전 방식은
+    화면에서만 멈춘 것처럼 보이고 생성은 끝까지 진행됐다.
+    """
+    prev = _store.cancel(job_id, owner=_auth["uid"])
+    if prev is None:
         raise HTTPException(status_code=404, detail="잡을 찾을 수 없습니다.")
-    if job["status"] == "pending":
-        _job_set(job_id, {"status": "cancelled"})
-    return {"ok": True, "status": job.get("status")}
+    return {"ok": True, "status": prev}
 
 
 # ── 레포트 이력 (전체) ───────────────────────────────────────────────────────────
@@ -458,9 +440,11 @@ def report_history(_auth: dict = Depends(current_user)):
             "mtime":      r.get("created_at"),
             "created_at": r.get("created_at"),
             "model_tier": (r.get("metadata") or {}).get("model_tier", "basic"),
-            # 공용 리포트는 다른 사용자가 만든 것도 목록에 포함된다 — 구분해서 내려보낸다
+            # 목록에는 본인이 만든 것만 담긴다(list_reports 참고).
+            # shared 는 "내 리포트가 공용으로도 재사용된다"는 표시일 뿐,
+            # 남의 리포트라는 뜻이 아니다.
             "shared":     r.get("shared", False),
-            "mine":       r.get("mine", True),
+            "mine":       True,
         }
         for r in rows
     ]
@@ -474,24 +458,5 @@ def get_report_file(filename: str, _auth: dict = Depends(current_user)):
     return {"content": content, "name": filename}
 
 
-# ── 텔레그램 ──────────────────────────────────────────────────────────────────────
-
-class TelegramMessageRequest(BaseModel):
-    text: str
 
 
-@router.post("/telegram/message")
-def telegram_message(req: TelegramMessageRequest, _auth: dict = Depends(current_user)):
-    # 인증이 없으면 아무나 운영자 채팅방으로 메시지를 밀어넣을 수 있다.
-    ok = send_message(req.text)
-    return {"ok": ok}
-
-
-@router.get("/telegram/status")
-def telegram_status(_auth: dict = Depends(current_user)):
-    import os
-    return {
-        "configured":    bool(os.getenv("TELEGRAM_BOT_TOKEN")) and bool(os.getenv("TELEGRAM_CHAT_ID")),
-        "bot_token_set": bool(os.getenv("TELEGRAM_BOT_TOKEN")),
-        "chat_id_set":   bool(os.getenv("TELEGRAM_CHAT_ID")),
-    }

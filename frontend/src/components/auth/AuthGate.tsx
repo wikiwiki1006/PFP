@@ -12,7 +12,6 @@
 import { useState, type ReactNode } from 'react'
 import { Lock, LogIn, UserPlus } from 'lucide-react'
 import { useAuth } from '@/lib/AuthContext'
-import AuthModal from './AuthModal'
 
 interface Props {
   /** 로그인 상태에서 보여줄 내용. 안내만 띄우고 싶으면 생략한다. */
@@ -25,14 +24,7 @@ interface Props {
 }
 
 export default function AuthGate({ children, feature = '이 기능', description, compact }: Props) {
-  const { isAuthed, loading } = useAuth()
-  const [modal, setModal] = useState<'login' | 'signup' | null>(null)
-
-  // 분기와 무관하게 같은 자리에 둔다 — 로그인 성공으로 분기가 바뀔 때
-  // 모달이 리마운트되면 완료 팝업과 오류 문구가 사라진다.
-  const authModal = (
-    <AuthModal open={modal !== null} initialMode={modal ?? 'login'} onClose={() => setModal(null)} />
-  )
+  const { isAuthed, loading, openAuth } = useAuth()
 
   // 세션 복원 중에는 안내를 띄우지 않는다 — 로그인 상태인데도 잠깐 깜빡인다.
   if (loading) {
@@ -43,18 +35,18 @@ export default function AuthGate({ children, feature = '이 기능', description
     )
   }
 
-  if (isAuthed) return <>{children ?? null}{authModal}</>
+  if (isAuthed) return <>{children ?? null}</>
 
   const buttons = (
     <div className="flex flex-wrap items-center gap-2">
       <button
-        onClick={() => setModal('login')}
+        onClick={() => openAuth('login')}
         className="inline-flex items-center gap-1.5 rounded-lg bg-[#3b82f6] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[#2f6fe0]"
       >
         <LogIn size={15} /> 로그인
       </button>
       <button
-        onClick={() => setModal('signup')}
+        onClick={() => openAuth('signup')}
         className="inline-flex items-center gap-1.5 rounded-lg border border-[#2d3f56] px-4 py-2 text-sm font-medium text-[#94a3b8] transition hover:border-[#3d5270] hover:bg-[#0d1526]"
       >
         <UserPlus size={15} /> 회원가입
@@ -87,7 +79,6 @@ export default function AuthGate({ children, feature = '이 기능', description
         </div>
       )}
 
-      {authModal}
     </>
   )
 }

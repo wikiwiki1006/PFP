@@ -14,14 +14,17 @@
  * 남지 않는다.
  */
 import { useEffect, useRef, useState } from 'react'
-import { X, Mail, Lock, Loader2, AlertCircle, CheckCircle2, Check } from 'lucide-react'
+import {
+  X, Mail, Lock, Loader2, AlertCircle, CheckCircle2, Check,
+  User as UserIcon, Cake,
+} from 'lucide-react'
 import {
   loginWithGoogle, loginWithCustomToken, authErrorMessage, setRememberMe, abortSignIn,
   discardSignIn,
 } from '@/lib/firebase'
 import { checkPassword, checkEmail, checkPasswordConfirm } from '@/lib/credentials'
-import ConfirmDialog from './ConfirmDialog'
 import { useAuth } from '@/lib/AuthContext'
+import { useTour } from '@/lib/TourContext'
 import { api } from '@/api'
 
 type Mode = 'login' | 'signup' | 'reset'
@@ -58,7 +61,11 @@ export default function AuthModal({ open, onClose, initialMode = 'login' }: Prop
   const [providers, setProviders] = useState<Providers | null>(null)
   const [mailState, setMailState] = useState<'idle' | 'checking' | 'ok' | 'taken'>('idle')
   const [mailReason, setMailReason] = useState('')
+  const { start: startTour } = useTour()
   const [signedUpAs, setSignedUpAs] = useState<string | null>(null)
+  // 가입 완료 화면의 선택 입력
+  const [nickname, setNickname] = useState('')
+  const [age, setAge]           = useState('')
   // 로그인 상태 유지 — 끄면 탭을 닫는 순간 로그아웃된다(공용 PC 대비).
   const [remember, setRemember] = useState(true)
   const firstFieldRef = useRef<HTMLInputElement>(null)
@@ -109,17 +116,105 @@ export default function AuthModal({ open, onClose, initialMode = 'login' }: Prop
   // 또 `signedUpAs !== null` 로 비교한다 — 이메일을 주지 않는 카카오 가입은
   // 빈 문자열이라 truthy 검사로는 걸러진다.
   if (signedUpAs !== null) {
+    const badNick = nickname.trim().length > 20 ? '닉네임은 20자 이하로 입력해 주세요.' : ''
+    const ageNum  = age.trim() ? Number(age) : null
+    const badAge  = ageNum !== null && (!Number.isInteger(ageNum) || ageNum < 1 || ageNum > 120)
+      ? '나이는 1~120 사이 숫자로 입력해 주세요.' : ''
+
+    const finish = async (save: boolean) => {
+      if (save) {
+        if (badNick || badAge) { setError(badNick || badAge); return }
+        const payload: Record<string, unknown> = {}
+        if (nickname.trim()) payload.name = nickname.trim()
+        if (ageNum !== null) payload.age = ageNum
+        if (Object.keys(payload).length) {
+          setBusy('profile')
+          try {
+            await api.patch('/api/auth/me', payload)
+            await refreshProfile()
+          } catch (e) {
+            setBusy(null); setError(apiError(e, '저장하지 못했습니다.')); return
+          }
+          setBusy(null)
+        }
+      }
+      setSignedUpAs(null)
+      onClose()
+      // 가입 직후 한 번만 — 화면별 기능을 순서대로 안내하고
+      // 마지막에 포트폴리오 등록으로 이어 준다.
+      startTour()
+    }
+
     return (
-      <ConfirmDialog
-        open
-        alert
-        tone="success"
-        title="회원가입이 완료되었습니다"
-        message={signedUpAs ? `${signedUpAs} 으로 로그인되었습니다.` : '로그인되었습니다.'}
-        confirmText="시작하기"
-        onConfirm={() => { setSignedUpAs(null); onClose() }}
-        onCancel={() => { setSignedUpAs(null); onClose() }}
-      />
+      <div
+        className="pointer-events-auto fixed inset-0 z-[110] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+        role="dialog" aria-modal="true" aria-label="회원가입 완료"
+      >
+        <div className="w-full max-w-md rounded-2xl border border-[#1e2d40] bg-[#060b14] p-6 shadow-2xl">
+          <div className="flex flex-col items-center text-center">
+            <CheckCircle2 size={28} className="mb-3 text-[#10b981]" />
+            <h2 className="text-lg font-semibold text-[#e2e8f0]">회원가입이 완료되었습니다</h2>
+            <p className="mt-1.5 text-sm text-[#7d8ca3]">
+              {signedUpAs ? `${signedUpAs} 으로 로그인되었습니다.` : '로그인되었습니다.'}
+            </p>
+          </div>
+
+          {/* 선택 입력 — 건너뛰어도 가입은 이미 끝난 상태다 */}
+          <div className="mt-5 space-y-3 rounded-lg border border-[#1e2d40] bg-[#0d1526] p-4">
+            <p className="text-[11px] text-[#4a5568]">
+              아래는 선택 입력입니다. 나중에 계정 설정에서 바꿀 수 있습니다.
+            </p>
+            <div>
+              <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-[#4a5568]">
+                닉네임
+              </label>
+              <Field
+                icon={<UserIcon size={15} />}
+                type="text"
+                placeholder="화면에 표시할 이름"
+                value={nickname}
+                onChange={setNickname}
+                autoComplete="nickname"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-[#4a5568]">
+                나이
+              </label>
+              <Field
+                icon={<Cake size={15} />}
+                type="number"
+                placeholder="예: 32"
+                value={age}
+                onChange={setAge}
+              />
+            </div>
+            {(badNick || badAge) && (
+              <p className="text-[11px] text-[#ef4444]">{badNick || badAge}</p>
+            )}
+          </div>
+
+          {error && <div className="mt-3"><ErrorBox text={error} /></div>}
+
+          <div className="mt-5 flex gap-2">
+            <button
+              onClick={() => finish(false)}
+              disabled={!!busy}
+              className="flex-1 rounded-lg border border-[#2d3f56] px-4 py-2.5 text-sm font-medium text-[#94a3b8] transition hover:bg-[#0d1526] disabled:opacity-50"
+            >
+              건너뛰기
+            </button>
+            <button
+              onClick={() => finish(true)}
+              disabled={!!busy}
+              className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-[#10b981] px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[#059669] disabled:opacity-50"
+            >
+              {busy === 'profile' && <Loader2 size={15} className="animate-spin" />}
+              시작하기
+            </button>
+          </div>
+        </div>
+      </div>
     )
   }
 

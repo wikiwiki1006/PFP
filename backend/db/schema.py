@@ -29,10 +29,64 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS photo_url     TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS disabled      BOOLEAN DEFAULT FALSE;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS username      TEXT;
+-- 닉네임·나이는 가입 후 선택 입력이다. 필수로 두면 가입 단계가 길어지고,
+-- 나이는 없어도 서비스가 동작하므로 NULL 을 허용한다.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS age           SMALLINT;
+-- 관리자 권한. 일반 가입 경로로는 절대 설정되지 않고, 시드 스크립트로만 부여한다.
+-- 권한을 토큰(Firebase custom claims)이 아니라 DB 에 두는 이유는, 토큰은 갱신 전까지
+-- 옛 값을 들고 있어 권한 회수가 즉시 반영되지 않기 때문이다.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin      BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(LOWER(email)) WHERE email IS NOT NULL;
 -- 아이디는 로그인 식별자다. 대소문자를 구분하면 'Foo' 와 'foo' 가 다른 계정이 되어
 -- 사용자가 혼란스럽고 사칭에도 쓰일 수 있으므로, 소문자 기준으로 유일성을 건다.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(LOWER(username)) WHERE username IS NOT NULL;
+
+-- 사이트 전역 설정 (관리자만 변경).
+--   AI 기능은 호출마다 외부 API 비용이 나간다. 비용이 급증하거나 키를 갈아끼우는
+--   동안 서비스를 통째로 내리지 않고 기능만 끌 수 있어야 해서 스위치를 둔다.
+--   키-값 한 줄짜리 테이블이라 설정이 늘어도 마이그레이션이 필요 없다.
+CREATE TABLE IF NOT EXISTS site_settings (
+    key        TEXT PRIMARY KEY,
+    value      JSONB NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_by TEXT
+);
+
+-- 심층 분석 사용 기록.
+--   관리자가 '24시간 1회' 제한을 켰을 때 판단 근거가 된다. 잡 저장소는 메모리라
+--   서버가 재시작되면 사라지고, reports 테이블은 취소·실패한 시도를 남기지 않아
+--   횟수 계산에 쓸 수 없다. 그래서 시도 자체를 따로 기록한다.
+--   used_at 에 인덱스를 두는 이유는 조회가 늘 "최근 N시간" 범위이기 때문이다.
+CREATE TABLE IF NOT EXISTS deep_analysis_usage (
+    id       BIGSERIAL PRIMARY KEY,
+    user_id  TEXT NOT NULL,
+    kind     TEXT NOT NULL,           -- equity_research | industry_research | macro_scenario
+    used_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_deep_usage_user_time
+    ON deep_analysis_usage(user_id, used_at DESC);
+
+-- 백그라운드 잡 상태.
+--   전에는 프로세스 메모리에만 있었다. Cloud Run 은 인스턴스를 여러 개 띄우고
+--   세션 고정도 없어서, 생성은 A 인스턴스에서 도는데 폴링이 B 로 가면
+--   "잡을 찾을 수 없습니다" 가 떴다 — 사용자에게는 리포트가 증발한 것으로 보인다.
+--   DB 에 두면 어느 인스턴스가 받아도 같은 상태를 본다. 재시작도 견딘다.
+--
+--   cancelled 를 status 와 별도 컬럼으로 두는 이유: 작업 스레드는 이 값만
+--   짧은 주기로 확인하면 되고, 결과(result)까지 매번 읽어 올 필요가 없다.
+CREATE TABLE IF NOT EXISTS jobs (
+    id         TEXT PRIMARY KEY,
+    kind       TEXT NOT NULL,              -- reports | macro | optimizer
+    user_id    TEXT,
+    status     TEXT NOT NULL,              -- pending | done | error | cancelled
+    result     JSONB,
+    message    TEXT,
+    cancelled  BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+-- 오래된 잡 청소용
+CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
 
 -- 개인 데이터는 사용자 삭제 시 함께 지워져야 한다 (탈퇴 요구 대응).
 -- 기존 테이블에 FK 가 없으므로 소급 적용한다.

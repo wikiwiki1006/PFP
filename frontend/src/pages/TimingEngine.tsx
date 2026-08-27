@@ -21,8 +21,8 @@ export default function TimingEngine() {
       <div className="flex-shrink-0 flex items-center gap-2 p-5 pb-3">
         <Zap className="w-4 h-4 text-[#ef4444]" />
         <div>
-          <h1 className="text-base font-bold text-[#e2e8f0]">TIMING ENGINE</h1>
-          <p className="text-[11px] text-[#4a5568]">효율성 비율 시장 국면 · 볼린저 밴드 스캔 · 이동평균 · 페어 트레이딩</p>
+          <h1 className="text-base font-bold text-[#e2e8f0]">트레이딩 신호</h1>
+          <p className="text-[11px] text-[#4a5568]">종목 추세, 급등/급락 신호, 유사 종목 분석 정보를 제공합니다.</p>
         </div>
       </div>
       <div className="flex-1 min-h-0 mx-5 mb-5 border border-[#1e2d40] rounded-lg overflow-hidden bg-[#0b0f1a]">

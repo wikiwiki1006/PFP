@@ -13,6 +13,7 @@ import {
 import { onAuthStateChanged } from 'firebase/auth'
 import { useQueryClient } from '@tanstack/react-query'
 import { auth, logout as fbLogout, type User } from './firebase'
+import AuthModal from '@/components/auth/AuthModal'
 import { api } from '@/api'
 
 export interface Profile {
@@ -48,6 +49,16 @@ interface AuthState {
   unregistered: boolean
   logout: () => Promise<void>
   refreshProfile: () => Promise<'ok' | 'unregistered' | 'error'>
+  /**
+   * 로그인/회원가입 모달 열기.
+   *
+   * 모달은 앱 루트에 **딱 하나만** 존재한다. 예전에는 필요한 컴포넌트마다
+   * 하나씩 렌더했는데, 그 컴포넌트들이 로그인 상태에 따라 분기하면서 모달이
+   * 트리에서 다른 위치로 옮겨 갔다. React 는 위치가 바뀌면 같은 컴포넌트라도
+   * 언마운트하고 새로 마운트하므로, 그때마다 내부 상태(오류 문구, 가입 완료
+   * 팝업)가 초기화돼 사라졌다. 위치를 고정하는 것이 유일한 확실한 해법이다.
+   */
+  openAuth: (mode?: 'login' | 'signup') => void
 }
 
 const Ctx = createContext<AuthState | null>(null)
@@ -72,6 +83,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [profile, setProfile] = useState<Profile | null>(null)
   const [loading, setLoading] = useState(true)
   const [unregistered, setUnregistered] = useState(false)
+  const [authModal, setAuthModal] = useState<'login' | 'signup' | null>(null)
   const qc = useQueryClient()
 
   const syncProfile = useCallback(async (): Promise<'ok' | 'unregistered' | 'error'> => {
@@ -125,6 +137,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     clearPersonalCache()
   }, [qc])
 
+  const openAuth = useCallback((mode: 'login' | 'signup' = 'login') => {
+    setAuthModal(mode)
+  }, [])
+
   const value = useMemo<AuthState>(() => ({
     user, profile, loading,
     // 서버가 프로필을 내준 경우에만 로그인으로 본다 (가입 확인 완료).
@@ -132,9 +148,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     unregistered,
     logout,
     refreshProfile: syncProfile,
-  }), [user, profile, loading, unregistered, logout, syncProfile])
+    openAuth,
+  }), [user, profile, loading, unregistered, logout, syncProfile, openAuth])
 
-  return <Ctx.Provider value={value}>{children}</Ctx.Provider>
+  return (
+    <Ctx.Provider value={value}>
+      {children}
+      {/* 앱 전체에서 유일한 인증 모달. 이 위치는 절대 바뀌지 않으므로
+          로그인 상태가 변해도 리마운트되지 않는다. */}
+      <AuthModal
+        open={authModal !== null}
+        initialMode={authModal ?? 'login'}
+        onClose={() => setAuthModal(null)}
+      />
+    </Ctx.Provider>
+  )
 }
 
 export function useAuth(): AuthState {

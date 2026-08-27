@@ -48,7 +48,7 @@ class SafeJSONResponse(JSONResponse):
             separators=(",", ":"),
         ).encode("utf-8")
 
-from backend.routers import portfolio, market, macro, signals, optimizer, reports, ticker, auth
+from backend.routers import admin, portfolio, market, macro, signals, optimizer, reports, ticker, auth
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -96,6 +96,8 @@ app.add_middleware(
 )
 
 # ── 라우터 등록 ────────────────────────────────────────────────────────────────
+app.include_router(admin.router)
+app.include_router(admin.public_router)
 app.include_router(auth.router)
 app.include_router(portfolio.router)
 app.include_router(market.router)
@@ -120,6 +122,17 @@ def on_startup():
         return
 
     init_schema()
+
+    # 완료된 잡은 DB 에 계속 쌓인다. 폴링은 길어야 몇 분이면 끝나므로
+    # 하루 지난 것은 지운다. 기동 때 한 번이면 충분하다 — 인스턴스가 자주
+    # 교체되는 환경이라 별도 스케줄러보다 이쪽이 확실하다.
+    try:
+        from backend.routers.reports import _store as _reports_store
+        n = _reports_store.purge_stale()
+        if n:
+            logger.info(f"오래된 잡 {n}건 정리")
+    except Exception as e:
+        logger.warning(f"잡 정리 건너뜀: {e}")
 
     # 서버리스(Cloud Run 등)에서는 요청이 없으면 인스턴스가 0으로 내려가므로
     # 백그라운드 스레드 스케줄러가 신뢰성 있게 돌지 않는다. 그런 환경에서는

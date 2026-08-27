@@ -312,12 +312,12 @@ def _update_snapshot():
     import math
     import yfinance as yf
     from backend.services.market_data import SNAPSHOT_TICKERS
-    from backend.db.market_cache import save_snapshot, save_prices_to_db, _yf_lock
+    from backend.db.market_cache import save_snapshot, save_prices_to_db, _yf_sem
 
     from backend.services.price_series import daily_change
 
     try:
-        with _yf_lock:
+        with _yf_sem:
             # period="7d": SNAPSHOT_TICKERS 는 미국 지수 + 해외 지수 + 암호화폐 + 선물이
             # 섞여 있어 인덱스가 캘린더 합집합이 된다. 2일치로는 대부분의 티커에
             # 유효 관측치가 1개뿐이라 직전 종가를 못 찾고 변동률이 전부 0%가 됐다.
@@ -397,7 +397,7 @@ def _update_sp500_prices():
     """
     S&P 500 전 종목(~500개) 2년치 종가를 market_prices DB에 저장.
 
-    - 배치 50개, 배치 사이 2초 슬립 → _yf_lock 해제 구간에 사용자 요청 처리 가능
+    - 배치 50개, 배치 사이 2초 슬립 → _yf_sem 슬롯을 놓는 구간에 사용자 요청 처리 가능
     - stale 티커만 수집 (max_age_hours=20) → 이미 신선한 티커는 yfinance 미호출
     - 완료 후 pairs 사전 계산(_precompute_pairs) 연속 실행
     """
@@ -515,7 +515,7 @@ def refresh_user_prices(tickers: list[str]):
     사용자가 새로고침 버튼을 눌렀을 때 개인 포트폴리오 티커의 최신 가격 강제 수집.
     """
     import yfinance as yf
-    from backend.db.market_cache import save_prices_to_db, save_snapshot, _yf_lock
+    from backend.db.market_cache import save_prices_to_db, save_snapshot, _yf_sem
     from backend.services.market_data import _cache   # in-memory 캐시 무효화용
 
     if not tickers:
@@ -523,7 +523,7 @@ def refresh_user_prices(tickers: list[str]):
     try:
         import math
         from backend.services.market_data import canonical_period
-        with _yf_lock:
+        with _yf_sem:
             # 5d 로 받아 저장하면 updated_at 만 새로 찍혀 '신선' 판정이 나고,
             # 그 티커는 깊은 이력 백필을 영영 못 받는다 → 항상 표준 깊이로 수집.
             data = yf.download(

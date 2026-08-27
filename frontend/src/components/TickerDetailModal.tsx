@@ -16,12 +16,23 @@ import {
 import { X, Search, TrendingUp, TrendingDown, Minus } from 'lucide-react'
 import { getTickerDetail, searchTickers } from '@/api'
 import type { TickerDetail, OHLCVPoint } from '@/types'
+import { useTheme } from '@/lib/ThemeContext'
 
 // ── 색상 팔레트 ──────────────────────────────────────────────────────────────
-const C = {
+/**
+ * 이 파일은 색을 전부 인라인 style 로 넣는다. 인라인 style 은 CSS 클래스
+ * 재정의가 닿지 않으므로, light-theme.css 로는 라이트 모드를 만들 수 없다.
+ * 그래서 팔레트 자체를 테마별로 나눈다.
+ *
+ * 라이트 값은 light-theme.css 가 같은 다크 색에 매기는 값과 일치시켰다.
+ * 어긋나면 이 모달만 사이트의 나머지와 다른 톤으로 보인다.
+ */
+const DARK = {
   up:     '#10b981',
   down:   '#ef4444',
   flat:   '#94a3b8',
+  warn:   '#f59e0b',
+  accent: '#3b82f6',
   ma20:   '#f59e0b',
   ma50:   '#3b82f6',
   ma200:  '#a855f7',
@@ -41,6 +52,74 @@ const C = {
   border: '#1e2d40',
   text:   '#e2e8f0',
   muted:  '#94a3b8',
+  dim:    '#64748b',
+  inputBg:'#0b1220',
+  track:  '#1e2d40',
+  hover:  '#1e2d40',
+  chipBg: '#1e3a5f',
+  chipText:'#93c5fd',
+  btn:    '#1d4ed8',
+  backdrop:'rgba(0,0,0,0.85)',
+}
+
+// 흰 배경에서는 형광에 가까운 색이 글자로 읽히지 않는다. 상승/하락/경고는
+// 한 톤 어둡게 잡아 큰 면적(차트 채움)과 작은 글자 모두에서 버티게 했다.
+const LIGHT: typeof DARK = {
+  up:     '#059669',
+  down:   '#dc2626',
+  flat:   '#4b5563',
+  warn:   '#d97706',
+  accent: '#2563eb',
+  ma20:   '#d97706',
+  ma50:   '#2563eb',
+  ma200:  '#9333ea',
+  bbUpper:'#94a3b8',
+  bbLower:'#94a3b8',
+  bbFill: 'rgba(100,116,139,0.10)',
+  stochK: '#d97706',
+  stochD: '#2563eb',
+  vol:    '#c7d7ea',
+  volUp:  '#059669',
+  volDn:  '#dc2626',
+  var:    '#2563eb',
+  varFill:'rgba(220,38,38,0.22)',
+  grid:   '#e3e9f2',
+  bg:     '#ffffff',
+  panel:  '#f6f8fb',
+  border: '#dfe5ee',
+  text:   '#111827',
+  muted:  '#4b5563',
+  dim:    '#5b6a80',
+  inputBg:'#f1f4f9',
+  track:  '#dfe5ee',
+  hover:  '#e6ebf3',
+  chipBg: '#dbeafe',
+  chipText:'#1d4ed8',
+  btn:    '#1d4ed8',
+  backdrop:'rgba(15,23,42,0.45)',
+}
+
+/** 좁은 화면인지. 이 파일은 색과 크기를 전부 인라인 style 로 넣기 때문에
+ *  CSS 미디어 쿼리가 닿지 않는다 — 분기를 JS 에서 해야 한다.
+ *  기준값 768px 은 Tailwind 의 md 와 같아서 나머지 화면과 어긋나지 않는다. */
+function useIsMobile(): boolean {
+  const [m, setM] = useState(() =>
+    typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches)
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 767px)')
+    const on = () => setM(mq.matches)
+    mq.addEventListener('change', on)
+    return () => mq.removeEventListener('change', on)
+  }, [])
+  return m
+}
+
+type Palette = typeof DARK
+
+/** 현재 테마의 팔레트. 컴포넌트 안에서만 쓸 수 있다. */
+function usePalette(): Palette {
+  const { theme } = useTheme()
+  return theme === 'light' ? LIGHT : DARK
 }
 
 const PERIODS = ['1m', '3m', '6m', '1y', '2y', '5y'] as const
@@ -57,11 +136,11 @@ const fvol = (v: number) => {
   if (v >= 1e3) return `${(v / 1e3).toFixed(0)}K`
   return `${v}`
 }
-const perfColor = (v: number | null | undefined) =>
+const perfColor = (v: number | null | undefined, C: Palette) =>
   v == null ? C.muted : v >= 0 ? C.up : C.down
 
 // ── 캔들스틱 SVG 레이어 (offset 기반 직접 픽셀 계산 — recharts 내부 scale 의존 없음) ──
-function makeCandleRenderer(visData: OHLCVPoint[], priceDomain: [number, number]) {
+function makeCandleRenderer(visData: OHLCVPoint[], priceDomain: [number, number], C: Palette) {
   return function CandlestickLayer({ offset }: any) {
     if (!offset || !visData?.length) return null
     const { left, top, width, height } = offset
@@ -99,6 +178,7 @@ function makeCandleRenderer(visData: OHLCVPoint[], priceDomain: [number, number]
 
 // ── Quant 게이지 (반원 SVG) ───────────────────────────────────────────────────
 const QuantGauge = ({ score }: { score: number }) => {
+  const C = usePalette()
   const r = 52, sw = 12
   const cx = 70, cy = 70
   const startAngle = Math.PI
@@ -111,9 +191,9 @@ const QuantGauge = ({ score }: { score: number }) => {
   })
 
   const segments = [
-    { from: 0,   to: 0.33, color: '#ef4444' },
-    { from: 0.33,to: 0.67, color: '#f59e0b' },
-    { from: 0.67,to: 1.0,  color: '#10b981' },
+    { from: 0,   to: 0.33, color: C.down },
+    { from: 0.33,to: 0.67, color: C.warn },
+    { from: 0.67,to: 1.0,  color: C.up },
   ]
 
   const arcPath = (fromPct: number, toPct: number) => {
@@ -128,12 +208,12 @@ const QuantGauge = ({ score }: { score: number }) => {
   const needleAngle = Math.PI - needlePct * Math.PI
   const nx = cx + (r - 10) * Math.cos(needleAngle)
   const ny = cy - (r - 10) * Math.sin(needleAngle)
-  const needleColor = score >= 67 ? '#10b981' : score >= 33 ? '#f59e0b' : '#ef4444'
+  const needleColor = score >= 67 ? C.up : score >= 33 ? C.warn : C.down
 
   return (
     <svg width={140} height={80} viewBox="0 0 140 80">
       {/* Background track */}
-      <path d={arcPath(0, 1)} fill="none" stroke="#1e2d40" strokeWidth={sw} strokeLinecap="round" />
+      <path d={arcPath(0, 1)} fill="none" stroke={C.track} strokeWidth={sw} strokeLinecap="round" />
       {/* Colored segments */}
       {segments.map((s, i) => (
         <path key={i} d={arcPath(s.from, s.to)} fill="none"
@@ -151,7 +231,8 @@ const QuantGauge = ({ score }: { score: number }) => {
 
 // ── Panic 점수 바 ─────────────────────────────────────────────────────────────
 const PanicBar = ({ score }: { score: number }) => {
-  const color = score <= 25 ? '#ef4444' : score <= 50 ? '#f59e0b' : '#10b981'
+  const C = usePalette()
+  const color = score <= 25 ? C.down : score <= 50 ? C.warn : C.up
   return (
     <div>
       <div className="flex justify-between mb-1">
@@ -159,7 +240,7 @@ const PanicBar = ({ score }: { score: number }) => {
         <span style={{ fontSize: 10, color: C.muted }}>50</span>
         <span style={{ fontSize: 10, color: C.muted }}>100</span>
       </div>
-      <div style={{ height: 8, background: '#1e2d40', borderRadius: 4, overflow: 'hidden' }}>
+      <div style={{ height: 8, background: C.track, borderRadius: 4, overflow: 'hidden' }}>
         <div style={{ height: '100%', width: `${score}%`, background: color, borderRadius: 4, transition: 'width 0.5s' }} />
       </div>
     </div>
@@ -168,42 +249,42 @@ const PanicBar = ({ score }: { score: number }) => {
 
 // ── VaR 히스토그램 ─────────────────────────────────────────────────────────────
 const VarChart = ({ dist, var95 }: { dist: { x: number; count: number }[]; var95: number | null }) => {
+  const C = usePalette()
   if (!dist.length) return <div style={{ color: C.muted, fontSize: 11 }}>데이터 없음</div>
 
   // 백엔드가 이미 퍼센트 단위(-3.78 = -3.78%)로 내려준다.
   // 여기서 또 100을 곱하면 축이 -378% 로 표시된다.
   const data = dist.map(d => ({
     ...d,
-    fill: var95 != null && d.x <= var95 ? '#ef4444' : '#1e3a5f',
+    fill: var95 != null && d.x <= var95 ? C.down : C.vol,
     displayX: d.x.toFixed(1),
   }))
 
+  // 라벨은 부모가 'Warning: 95% VaR = …' 로 이미 보여준다. 여기서 또 그리면
+  // 같은 값이 두 번 나올 뿐 아니라, 높이 100px 짜리 상자 안에 차트(100%)와
+  // 라벨을 함께 넣은 탓에 라벨이 상자 밖으로 밀려 아래 문구와 겹쳤다.
   return (
     <div style={{ height: 100 }}>
       <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={data} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
+        <BarChart data={data} margin={{ top: 4, right: 6, left: 6, bottom: 0 }}>
           <XAxis dataKey="displayX" tick={{ fill: C.muted, fontSize: 8 }} interval={9}
             tickFormatter={v => `${v}%`} />
           <YAxis hide />
           {var95 != null && (
-            <ReferenceLine x={var95.toFixed(1)} stroke="#ef4444" strokeDasharray="3 2" />
+            <ReferenceLine x={var95.toFixed(1)} stroke={C.down} strokeDasharray="3 2" />
           )}
           <Bar dataKey="count" isAnimationActive={false}>
             {data.map((d, i) => <Cell key={i} fill={d.fill} />)}
           </Bar>
         </BarChart>
       </ResponsiveContainer>
-      {var95 != null && (
-        <div style={{ fontSize: 10, color: '#ef4444', textAlign: 'center', marginTop: 2 }}>
-          95% VaR: {var95.toFixed(2)}%
-        </div>
-      )}
     </div>
   )
 }
 
 // ── 커스텀 툴팁 ───────────────────────────────────────────────────────────────
 const CandleTooltip = ({ active, payload, label }: any) => {
+  const C = usePalette()
   if (!active || !payload?.length) return null
   const d = payload[0]?.payload as OHLCVPoint
   if (!d) return null
@@ -211,7 +292,7 @@ const CandleTooltip = ({ active, payload, label }: any) => {
 
   return (
     <div style={{
-      background: '#0b1220', border: `1px solid ${C.border}`, borderRadius: 6,
+      background: C.inputBg, border: `1px solid ${C.border}`, borderRadius: 6,
       padding: '8px 12px', fontSize: 11, color: C.text, minWidth: 160,
     }}>
       <div style={{ color: C.muted, marginBottom: 4 }}>{label}</div>
@@ -245,6 +326,8 @@ interface Props {
 }
 
 export default function TickerDetailModal({ initialTicker, onClose }: Props) {
+  const C = usePalette()
+  const isMobile = useIsMobile()
   const [ticker,   setTicker]   = useState(initialTicker || '')
   const [query,    setQuery]    = useState(initialTicker || '')
   const [period,   setPeriod]   = useState<Period>('1y')
@@ -281,7 +364,25 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
 
   useEffect(() => { if (ticker) load(ticker, period) }, [ticker, period, load])
 
-  // ── 마우스 휠 줌 + 드래그 팬 (investing.com 스타일) ───────────────────
+  // ── 줌 · 팬 ────────────────────────────────────────────────────────────
+  // 예전에는 mousedown/mousemove 만 붙어 있어 휴대폰에서는 차트가 아예
+  // 움직이지 않았다. 포인터 이벤트는 마우스와 터치를 같은 방식으로 주므로
+  // 하나로 둘 다 처리한다. 두 손가락 간격 변화로 확대/축소도 받는다.
+  const zoomBy = useCallback((factor: number) => {
+    if (!data) return
+    const total = data.ohlcv.length
+    const center = (viewStart + viewEnd) / 2
+    const half   = ((viewEnd - viewStart) / 2) * factor
+    const ns = Math.max(0,     Math.floor(center - half))
+    const ne = Math.min(total, Math.ceil(center  + half))
+    if (ne - ns >= 10) { setViewStart(ns); setViewEnd(ne) }
+  }, [data, viewStart, viewEnd])
+
+  const resetZoom = useCallback(() => {
+    if (!data) return
+    setViewStart(0); setViewEnd(data.ohlcv.length)
+  }, [data])
+
   useEffect(() => {
     const el = chartRef.current
     if (!el || !data) return
@@ -289,45 +390,83 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
 
     const onWheel = (e: WheelEvent) => {
       e.preventDefault()
-      const factor = e.deltaY > 0 ? 1.15 : 0.85
-      const center = (viewStart + viewEnd) / 2
-      const half   = ((viewEnd - viewStart) / 2) * factor
-      const ns = Math.max(0,     Math.floor(center - half))
-      const ne = Math.min(total, Math.ceil(center  + half))
-      if (ne - ns >= 10) { setViewStart(ns); setViewEnd(ne) }
+      zoomBy(e.deltaY > 0 ? 1.15 : 0.85)
     }
 
-    const onMouseDown = (e: MouseEvent) => {
-      isPanning.current = true
-      panRef.current = { x: e.clientX, start: viewStart, end: viewEnd }
-      el.style.cursor = 'grabbing'
+    // 화면에 닿아 있는 포인터들. 두 개가 되면 핀치로 본다.
+    const pts = new Map<number, { x: number; y: number }>()
+    let pinchStart: { dist: number; start: number; end: number } | null = null
+
+    const spread = () => {
+      const v = [...pts.values()]
+      return Math.hypot(v[0].x - v[1].x, v[0].y - v[1].y)
     }
-    const onMouseMove = (e: MouseEvent) => {
+
+    const onDown = (e: PointerEvent) => {
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY })
+      if (pts.size === 2) {
+        pinchStart = { dist: spread(), start: viewStart, end: viewEnd }
+        isPanning.current = false
+        panRef.current = null
+      } else if (pts.size === 1) {
+        isPanning.current = true
+        panRef.current = { x: e.clientX, start: viewStart, end: viewEnd }
+        el.style.cursor = 'grabbing'
+      }
+    }
+
+    const onMove = (e: PointerEvent) => {
+      if (!pts.has(e.pointerId)) return
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY })
+
+      if (pts.size === 2 && pinchStart) {
+        const d = spread()
+        if (d > 0 && pinchStart.dist > 0) {
+          const range  = pinchStart.end - pinchStart.start
+          const center = (pinchStart.start + pinchStart.end) / 2
+          const half   = (range / 2) * (pinchStart.dist / d)
+          const ns = Math.max(0,     Math.floor(center - half))
+          const ne = Math.min(total, Math.ceil(center  + half))
+          if (ne - ns >= 10) { setViewStart(ns); setViewEnd(ne) }
+        }
+        e.preventDefault()
+        return
+      }
+
       if (!isPanning.current || !panRef.current) return
       const range = panRef.current.end - panRef.current.start
       const dx = panRef.current.x - e.clientX
+      // 손가락이 살짝 흔들린 정도로는 반응하지 않게 한다 — 세로 스크롤과 겹친다.
+      if (Math.abs(dx) < 4) return
       const shift = Math.round(dx / el.offsetWidth * range)
       const ns = Math.max(0, Math.min(total - range, panRef.current.start + shift))
       setViewStart(ns)
       setViewEnd(ns + range)
     }
-    const onMouseUp = () => {
-      isPanning.current = false
-      panRef.current = null
-      el.style.cursor = 'default'
+
+    const onUp = (e: PointerEvent) => {
+      pts.delete(e.pointerId)
+      if (pts.size < 2) pinchStart = null
+      if (pts.size === 0) {
+        isPanning.current = false
+        panRef.current = null
+        el.style.cursor = 'default'
+      }
     }
 
     el.addEventListener('wheel', onWheel, { passive: false })
-    el.addEventListener('mousedown', onMouseDown)
-    window.addEventListener('mousemove', onMouseMove)
-    window.addEventListener('mouseup', onMouseUp)
+    el.addEventListener('pointerdown', onDown)
+    window.addEventListener('pointermove', onMove, { passive: false })
+    window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onUp)
     return () => {
       el.removeEventListener('wheel', onWheel)
-      el.removeEventListener('mousedown', onMouseDown)
-      window.removeEventListener('mousemove', onMouseMove)
-      window.removeEventListener('mouseup', onMouseUp)
+      el.removeEventListener('pointerdown', onDown)
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onUp)
     }
-  }, [data, viewStart, viewEnd])
+  }, [data, viewStart, viewEnd, zoomBy])
 
   // ── 자동완성 ─────────────────────────────────────────────────────────────
   const onQueryChange = (v: string) => {
@@ -373,7 +512,7 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
   }, [visData, showMA])
 
   // 캔들스틱 레이어: priceDomain이 바뀔 때마다 재생성 (클로저로 최신 데이터 캡처)
-  const CandleLayer = useMemo(() => makeCandleRenderer(visData, priceDomain), [visData, priceDomain])
+  const CandleLayer = useMemo(() => makeCandleRenderer(visData, priceDomain, C), [visData, priceDomain, C])
 
   // ── 날짜 라벨 (밀집도에 따라 자동 조절) ─────────────────────────────────
   const xInterval = Math.max(1, Math.floor(visData.length / 6))
@@ -386,15 +525,21 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
     <div
       style={{
         position: 'fixed', inset: 0, zIndex: 9999,
-        background: 'rgba(0,0,0,0.85)',
+        background: C.backdrop,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
       }}
       onClick={e => { if (e.target === e.currentTarget) onClose() }}
     >
       <div style={{
-        width: '95vw', height: '92vh', background: C.bg,
-        border: `1px solid ${C.border}`, borderRadius: 10,
-        display: 'flex', flexDirection: 'column', overflow: 'hidden',
+        // 좁은 화면에서 95vw×92vh 는 내용을 우겨넣기만 하고 읽히지 않는다.
+        // 전체화면으로 열고 본문을 세로로 흘려 스크롤하게 한다.
+        width: isMobile ? '100vw' : '95vw',
+        height: isMobile ? '100dvh' : '92vh',
+        background: C.bg,
+        border: isMobile ? 'none' : `1px solid ${C.border}`,
+        borderRadius: isMobile ? 0 : 10,
+        display: 'flex', flexDirection: 'column',
+        overflow: 'hidden',
       }}>
 
         {/* ── 헤더 바 ────────────────────────────────────────────────────── */}
@@ -403,6 +548,11 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
           borderBottom: `1px solid ${C.border}`,
           background: C.panel,
           display: 'flex', alignItems: 'center', gap: 10,
+          // 좁은 화면에서는 검색창+기간 버튼이 한 줄에 안 들어간다.
+          // 옆으로 미는 대신 줄바꿈한다 — 모달 안에서는 세로 스크롤 하나로 통일한다.
+          flexWrap: isMobile ? 'wrap' : 'nowrap',
+          rowGap: isMobile ? 6 : undefined,
+          overflowX: 'visible',
         }}>
           {/* 검색창 */}
           <div style={{ position: 'relative', display: 'flex', alignItems: 'center', gap: 0 }}>
@@ -414,14 +564,14 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
               onBlur={() => setTimeout(() => setShowSug(false), 150)}
               placeholder="티커 검색 (예: AAPL)"
               style={{
-                background: '#0b1220', border: `1px solid ${C.border}`,
+                background: C.inputBg, border: `1px solid ${C.border}`,
                 borderRadius: '6px 0 0 6px', color: C.text, padding: '5px 10px',
                 fontSize: 12, width: 160, outline: 'none',
               }}
             />
             <button onClick={onSearch}
               style={{
-                background: '#1d4ed8', border: 'none', borderRadius: '0 6px 6px 0',
+                background: C.btn, border: 'none', borderRadius: '0 6px 6px 0',
                 color: '#fff', padding: '5px 10px', cursor: 'pointer', display: 'flex',
               }}>
               <Search size={13} />
@@ -429,7 +579,7 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
             {showSug && suggests.length > 0 && (
               <div style={{
                 position: 'absolute', top: '100%', left: 0, zIndex: 100,
-                background: '#0b1220', border: `1px solid ${C.border}`, borderRadius: 6,
+                background: C.inputBg, border: `1px solid ${C.border}`, borderRadius: 6,
                 minWidth: 220, overflow: 'hidden', marginTop: 2,
               }}>
                 {suggests.map(s => (
@@ -438,7 +588,7 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                       padding: '7px 12px', cursor: 'pointer', fontSize: 12,
                       display: 'flex', gap: 8, alignItems: 'center',
                     }}
-                    onMouseEnter={e => (e.currentTarget.style.background = '#1e2d40')}
+                    onMouseEnter={e => (e.currentTarget.style.background = C.hover)}
                     onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                   >
                     <span style={{ color: C.text, fontFamily: 'monospace', fontWeight: 700 }}>{s.ticker}</span>
@@ -450,14 +600,14 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
           </div>
 
           {/* 기간 버튼 */}
-          <div style={{ display: 'flex', gap: 4 }}>
+          <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
             {PERIODS.map(p => (
               <button key={p} onClick={() => setPeriod(p)}
                 style={{
                   padding: '3px 9px', borderRadius: 4, fontSize: 11,
-                  border: `1px solid ${period === p ? '#3b82f6' : C.border}`,
-                  background: period === p ? '#1e3a5f' : 'transparent',
-                  color: period === p ? '#93c5fd' : C.muted,
+                  border: `1px solid ${period === p ? C.accent : C.border}`,
+                  background: period === p ? C.chipBg : 'transparent',
+                  color: period === p ? C.chipText : C.muted,
                   cursor: 'pointer', fontWeight: period === p ? 700 : 400,
                 }}>
                 {p.toUpperCase()}
@@ -477,9 +627,9 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
             <button onClick={() => setShowBB(v => !v)}
               style={{
                 padding: '3px 10px', borderRadius: 4, fontSize: 11,
-                border: `1px solid ${showBB ? '#64748b' : C.border}`,
+                border: `1px solid ${showBB ? C.dim : C.border}`,
                 background: showBB ? 'rgba(100,116,139,0.15)' : 'transparent',
-                color: showBB ? '#94a3b8' : C.muted, cursor: 'pointer',
+                color: C.muted, cursor: 'pointer',
               }}>BB</button>
           </div>
 
@@ -490,10 +640,10 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                 {data.ticker}
               </span>
               <span style={{ color: C.muted, fontSize: 12 }}>{data.info.name}</span>
-              <span style={{ color: perfColor(data.risk.change_pct), fontSize: 13, fontWeight: 700, fontFamily: 'monospace' }}>
+              <span style={{ color: perfColor(data.risk.change_pct, C), fontSize: 13, fontWeight: 700, fontFamily: 'monospace' }}>
                 ${fn(data.risk.current_price)}
               </span>
-              <span style={{ color: perfColor(data.risk.change_pct), fontSize: 12 }}>
+              <span style={{ color: perfColor(data.risk.change_pct, C), fontSize: 12 }}>
                 {fp(data.risk.change_pct)}
               </span>
             </div>
@@ -510,7 +660,7 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
         {loading && (
           <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: C.muted }}>
             <div style={{ textAlign: 'center' }}>
-              <div style={{ width: 36, height: 36, border: '3px solid #1e2d40', borderTopColor: '#3b82f6', borderRadius: '50%', animation: 'spin 0.8s linear infinite', margin: '0 auto 12px' }} />
+              <div style={{ width: 36, height: 36, border: `3px solid ${C.track}`, borderTopColor: C.accent, borderRadius: '50%', animation: 'spin 0.8s linear infinite', margin: '0 auto 12px' }} />
               데이터 로드 중…
             </div>
           </div>
@@ -529,16 +679,36 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
 
         {/* ── 메인 콘텐츠 ─────────────────────────────────────────────────── */}
         {!loading && !error && data && (
-          <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+          <div style={{
+            flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column',
+            // 모바일에서는 내용이 화면보다 길다 — 잘라내지 말고 세로로 스크롤시킨다.
+            // 가로 스크롤은 만들지 않는다: 한 화면에서 두 방향으로 밀어야 하면
+            // 어느 쪽으로 움직여야 할지 헷갈리고 오조작이 잦다.
+            overflowY: isMobile ? 'auto' : 'visible',
+            overflowX: isMobile ? 'hidden' : 'visible',
+            WebkitOverflowScrolling: 'touch',
+          }}>
 
             {/* 차트 + 우측 패널 */}
-            <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
+            <div style={{
+              flex: isMobile ? '0 0 auto' : 1,
+              minHeight: isMobile ? undefined : 0,
+              display: 'flex', flexDirection: isMobile ? 'column' : 'row',
+            }}>
 
               {/* ─── 차트 컬럼 (70%) ──────────────────────────────────────── */}
-              <div ref={chartRef} style={{ flex: '0 0 70%', display: 'flex', flexDirection: 'column', borderRight: `1px solid ${C.border}` }}>
+              <div ref={chartRef} style={{
+                flex: isMobile ? '0 0 auto' : '0 0 70%',
+                width: isMobile ? '100%' : undefined,
+                display: 'flex', flexDirection: 'column',
+                borderRight: isMobile ? 'none' : `1px solid ${C.border}`,
+                borderBottom: isMobile ? `1px solid ${C.border}` : 'none',
+                // 세로 스크롤은 브라우저에 맡기고 가로 드래그만 우리가 받는다.
+                touchAction: 'pan-y',
+              }}>
 
                 {/* 메인 캔들 차트 */}
-                <div style={{ flex: '0 0 55%', borderBottom: `1px solid ${C.border}` }}>
+                <div style={{ flex: isMobile ? '0 0 auto' : '0 0 55%', height: isMobile ? 300 : undefined, borderBottom: `1px solid ${C.border}` }}>
                   <ResponsiveContainer width="100%" height="100%">
                     <ComposedChart
                       data={visData}
@@ -586,7 +756,13 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
 
                 {/* MA 범례 */}
                 {showMA && (
-                  <div style={{ padding: '2px 12px', display: 'flex', gap: 14, borderBottom: `1px solid ${C.border}` }}>
+                  <div style={{
+                    padding: '2px 12px', display: 'flex', gap: 14,
+                    // MA 범례 넷 + 확대 버튼 셋이 390px 에 한 줄로 안 들어간다.
+                    // 줄바꿈을 허용하지 않으면 버튼이 화면 밖으로 밀려 눌리지 않는다.
+                    flexWrap: 'wrap', rowGap: 6, alignItems: 'center',
+                    borderBottom: `1px solid ${C.border}`,
+                  }}>
                     {[['MA20', C.ma20], ['MA50', C.ma50], ['MA200', C.ma200]].map(([l, c]) => (
                       <div key={l} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10 }}>
                         <div style={{ width: 20, height: 2, background: c as string, borderRadius: 1 }} />
@@ -599,14 +775,31 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                         <span style={{ color: C.muted }}>BB(20,2)</span>
                       </div>
                     )}
-                    <div style={{ marginLeft: 'auto', fontSize: 9, color: C.muted }}>
-                      스크롤로 확대/축소
-                    </div>
+                    {/* 휴대폰에는 스크롤 휠이 없다. 핀치도 되지만 한 손으로는
+                        어려우므로 확실히 눌리는 버튼을 함께 둔다. */}
+                    {isMobile ? (
+                      <div style={{ marginLeft: 'auto', display: 'flex', gap: 6, flexShrink: 0 }}>
+                        {([['−', () => zoomBy(1.3), '축소'],
+                           ['+', () => zoomBy(0.7), '확대'],
+                           ['⤢', resetZoom, '전체 보기']] as const).map(([label, fn, aria]) => (
+                          <button key={aria} onClick={fn} aria-label={aria}
+                            style={{
+                              minWidth: 34, minHeight: 30, borderRadius: 6,
+                              background: C.inputBg, border: `1px solid ${C.border}`,
+                              color: C.text, fontSize: 14, lineHeight: 1, cursor: 'pointer',
+                            }}>{label}</button>
+                        ))}
+                      </div>
+                    ) : (
+                      <div style={{ marginLeft: 'auto', fontSize: 9, color: C.muted }}>
+                        스크롤로 확대/축소 · 드래그로 이동
+                      </div>
+                    )}
                   </div>
                 )}
 
                 {/* 거래량 */}
-                <div style={{ flex: '0 0 22%', borderBottom: `1px solid ${C.border}` }}>
+                <div style={{ flex: isMobile ? '0 0 auto' : '0 0 22%', height: isMobile ? 130 : undefined, borderBottom: `1px solid ${C.border}` }}>
                   <div style={{ padding: '2px 6px', fontSize: 10, color: C.muted }}>Volume</div>
                   <ResponsiveContainer width="100%" height="80%">
                     <BarChart data={visData} margin={{ top: 0, right: 12, left: 0, bottom: 0 }}>
@@ -622,21 +815,21 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                 </div>
 
                 {/* 스토케스틱 */}
-                <div style={{ flex: 1, minHeight: 0 }}>
+                <div style={{ flex: isMobile ? '0 0 auto' : 1, height: isMobile ? 130 : undefined, minHeight: 0 }}>
                   <div style={{ padding: '2px 6px', fontSize: 10, color: C.muted }}>Stochastic(14,3,3)</div>
                   <ResponsiveContainer width="100%" height="80%">
                     <LineChart data={visData} margin={{ top: 0, right: 12, left: 0, bottom: 0 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke={C.grid} opacity={0.3} />
                       <XAxis dataKey="date" tick={axisStyle} interval={xInterval} tickFormatter={v => v?.slice(5)} />
                       <YAxis domain={[0, 100]} tick={axisStyle} width={60} />
-                      <ReferenceLine y={80} stroke="#ef4444" strokeDasharray="3 2" strokeWidth={0.8} />
-                      <ReferenceLine y={20} stroke="#10b981" strokeDasharray="3 2" strokeWidth={0.8} />
+                      <ReferenceLine y={80} stroke={C.down} strokeDasharray="3 2" strokeWidth={0.8} />
+                      <ReferenceLine y={20} stroke={C.up} strokeDasharray="3 2" strokeWidth={0.8} />
                       <Line dataKey="stoch_k" stroke={C.stochK} strokeWidth={1.5}
                         dot={false} isAnimationActive={false} connectNulls />
                       <Line dataKey="stoch_d" stroke={C.stochD} strokeWidth={1.5}
                         dot={false} isAnimationActive={false} connectNulls strokeDasharray="4 2" />
                       <Tooltip formatter={(v: any) => [typeof v === 'number' ? v.toFixed(1) : v, '']}
-                        contentStyle={{ background: '#0b1220', border: `1px solid ${C.border}`, fontSize: 10 }} />
+                        contentStyle={{ background: C.inputBg, border: `1px solid ${C.border}`, color: C.text, fontSize: 10 }} />
                     </LineChart>
                   </ResponsiveContainer>
                   <div style={{ padding: '0 6px', display: 'flex', gap: 10, fontSize: 9 }}>
@@ -651,7 +844,12 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
               </div>
 
               {/* ─── 우측 패널 (30%) ──────────────────────────────────────── */}
-              <div style={{ flex: '0 0 30%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+              <div style={{
+                flex: isMobile ? '0 0 auto' : '0 0 30%',
+                width: isMobile ? '100%' : undefined,
+                display: 'flex', flexDirection: 'column',
+                overflow: isMobile ? 'visible' : 'hidden',
+              }}>
 
                 {/* 퀀트 스코어보드 */}
                 <div style={{ padding: '10px 14px', borderBottom: `1px solid ${C.border}` }}>
@@ -669,7 +867,7 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                           {([['모멘텀','momentum'],['추세','trend'],['퀄리티','quality'],['밸류','value']] as const).map(([ko,k]) => {
                             const v = (data.quant.factors as any)?.[k]
                             if (v == null) return null
-                            const col = v >= 67 ? C.up : v >= 34 ? '#f59e0b' : C.down
+                            const col = v >= 67 ? C.up : v >= 34 ? C.warn : C.down
                             return (
                               <div key={k} style={{ textAlign: 'center' }}>
                                 <div style={{ fontSize: 9, color: C.muted }}>{ko}</div>
@@ -685,7 +883,7 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
 
                 {/* 시장 국면 + 옵티마이저 */}
                 <div style={{ padding: '10px 14px', borderBottom: `1px solid ${C.border}` }}>
-                  <div style={{ fontSize: 10, color: '#f59e0b', fontWeight: 700, marginBottom: 6 }}>
+                  <div style={{ fontSize: 10, color: C.warn, fontWeight: 700, marginBottom: 6 }}>
                     시장 국면: <span style={{ color: C.text }}>{data.quant.regime}</span>
                     {data.quant.regime_er != null && (
                       <span style={{ color: C.muted, fontWeight: 400, marginLeft: 6 }}>
@@ -720,12 +918,12 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                           Beta 익스포저: <span style={{ color: C.text }}>{n(o.beta_exposure, 'x')}</span>
                         </div>
                         {o.note && (
-                          <div style={{ fontSize: 9, color: '#f59e0b', marginTop: 4 }}>{o.note}</div>
+                          <div style={{ fontSize: 9, color: C.warn, marginTop: 4 }}>{o.note}</div>
                         )}
                       </>
                     )
                   })()}
-                  <div style={{ fontSize: 9, color: '#64748b', marginTop: 4, fontStyle: 'italic' }}>
+                  <div style={{ fontSize: 9, color: C.dim, marginTop: 4, fontStyle: 'italic' }}>
                     (주) 수학적 기반 참고 추천으로, 강제 포지션이 아닙니다.
                   </div>
                 </div>
@@ -737,7 +935,7 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                   </div>
                   <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, marginBottom: 8 }}>
                     <span style={{ fontSize: 10, color: C.muted }}>패닉 상태 점수:</span>
-                    <span style={{ fontSize: 22, fontWeight: 700, color: '#ef4444', fontFamily: 'monospace' }}>
+                    <span style={{ fontSize: 22, fontWeight: 700, color: C.down, fontFamily: 'monospace' }}>
                       {data.quant.panic_score ?? '—'}
                     </span>
                     <span style={{ fontSize: 11, color: C.muted }}>/100</span>
@@ -756,7 +954,7 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                       })}
                     </div>
                   )}
-                  <div style={{ fontSize: 10, color: '#ef4444', marginTop: 6, fontWeight: 600 }}>
+                  <div style={{ fontSize: 10, color: C.down, marginTop: 6, fontWeight: 600 }}>
                     시그널 상태: {data.quant.panic_status}
                   </div>
                 </div>
@@ -779,11 +977,18 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
             {/* ─── 하단 정보 바 ──────────────────────────────────────────────── */}
             <div style={{
               flexShrink: 0, display: 'flex',
+              // 세 칸을 나란히 두면 390px 에서 한 칸이 120px 남짓이라
+              // '산업 Consumer Electronics' 같은 값이 글자마다 접힌다.
+              flexDirection: isMobile ? 'column' : 'row',
               borderTop: `1px solid ${C.border}`, background: C.panel,
             }}>
 
               {/* 펀드 정보 */}
-              <div style={{ flex: 1, padding: '10px 14px', borderRight: `1px solid ${C.border}` }}>
+              <div style={{
+                flex: 1, padding: '10px 14px',
+                borderRight: isMobile ? 'none' : `1px solid ${C.border}`,
+                borderBottom: isMobile ? `1px solid ${C.border}` : 'none',
+              }}>
                 <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
                   <span>ℹ</span> 펀드 정보
                 </div>
@@ -796,9 +1001,12 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                   ['P/E',         data.info.pe != null ? fn(data.info.pe, 1) : 'N/A'],
                   ['배당수익률',  `${fn(data.info.div_yield, 2)}%`],
                 ].map(([k, v]) => (
-                  <div key={k} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3, fontSize: 11 }}>
-                    <span style={{ color: C.muted }}>{k}</span>
-                    <span style={{ color: C.text, fontWeight: k === '티커' ? 700 : 400, fontFamily: k === '티커' ? 'monospace' : undefined }}>
+                  <div key={k} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 3, fontSize: 11 }}>
+                    {/* 라벨은 짧다. 줄바꿈을 허용하면 '산업'이 '산/업'으로 쪼개진다. */}
+                    <span style={{ color: C.muted, whiteSpace: 'nowrap', flexShrink: 0 }}>{k}</span>
+                    <span style={{ color: C.text, textAlign: 'right', minWidth: 0,
+                                   fontWeight: k === '티커' ? 700 : 400,
+                                   fontFamily: k === '티커' ? 'monospace' : undefined }}>
                       {v}
                     </span>
                   </div>
@@ -806,7 +1014,11 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
               </div>
 
               {/* 성과 */}
-              <div style={{ flex: 1, padding: '10px 14px', borderRight: `1px solid ${C.border}` }}>
+              <div style={{
+                flex: 1, padding: '10px 14px',
+                borderRight: isMobile ? 'none' : `1px solid ${C.border}`,
+                borderBottom: isMobile ? `1px solid ${C.border}` : 'none',
+              }}>
                 <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
                   <TrendingUp size={11} /> 성과
                 </div>
@@ -820,7 +1032,7 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                 ].map(([k, v]) => (
                   <div key={k as string} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3, fontSize: 11 }}>
                     <span style={{ color: C.muted }}>{k}</span>
-                    <span style={{ color: perfColor(v as number | null), fontFamily: 'monospace', fontWeight: 600 }}>
+                    <span style={{ color: perfColor(v as number | null, C), fontFamily: 'monospace', fontWeight: 600 }}>
                       {fp(v as number | null)}
                     </span>
                   </div>
@@ -854,7 +1066,7 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                   <div key={k as string} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3, fontSize: 11 }}>
                     <span style={{ color: C.muted }}>{k}</span>
                     {k === '등락률' ? (
-                      <span style={{ color: perfColor(data.risk.change_pct), fontFamily: 'monospace', fontWeight: 600 }}>
+                      <span style={{ color: perfColor(data.risk.change_pct, C), fontFamily: 'monospace', fontWeight: 600 }}>
                         {fp(data.risk.change_pct)}
                       </span>
                     ) : (

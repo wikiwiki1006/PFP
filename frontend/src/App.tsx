@@ -2,6 +2,9 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import Layout from './components/Layout'
 import { AuthProvider } from './lib/AuthContext'
+import { ThemeProvider } from './lib/ThemeContext'
+import { TourProvider } from './lib/TourContext'
+import TourOverlay from './components/onboarding/TourOverlay'
 import AlphaTerminal from './pages/AlphaTerminal'
 import MacroScenario from './pages/MacroScenario'
 import Optimizer from './pages/Optimizer'
@@ -21,10 +24,18 @@ const queryClient = new QueryClient({
 
 export default function App() {
   return (
+    <ThemeProvider>
     <QueryClientProvider client={queryClient}>
-      {/* AuthProvider 가 QueryClient 안쪽에 있어야 로그아웃 시 캐시를 비울 수 있다. */}
-      <AuthProvider>
-        <BrowserRouter>
+      {/* 중첩 순서에 이유가 있다:
+          · AuthProvider 는 QueryClient 안쪽 — 로그아웃 시 캐시를 비운다.
+          · TourProvider 는 BrowserRouter 안쪽 — 단계마다 화면을 옮기려면
+            useNavigate 가 필요하다.
+          · AuthProvider 는 TourProvider 안쪽 — AuthProvider 가 렌더하는
+            가입 완료 모달이 가입 직후 투어를 시작한다. 반대로 두면
+            useTour 가 프로바이더를 못 찾아 앱 전체가 백지가 된다. */}
+      <BrowserRouter>
+        <TourProvider>
+        <AuthProvider>
           <Routes>
             {/* 카카오 OAuth 착지점 — 팝업 안에서만 열리므로 레이아웃 밖에 둔다 */}
             <Route path="/auth/kakao/callback" element={<KakaoCallback />} />
@@ -43,8 +54,11 @@ export default function App() {
               <Route path="timing" element={<TimingEngine />} />
             </Route>
           </Routes>
-        </BrowserRouter>
-      </AuthProvider>
+        <TourOverlay />
+        </AuthProvider>
+        </TourProvider>
+      </BrowserRouter>
     </QueryClientProvider>
+    </ThemeProvider>
   )
 }

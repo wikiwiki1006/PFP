@@ -54,7 +54,7 @@ def scan_universe(
     30~60초 소요. 결과는 인메모리 캐시.
     """
     import yfinance as yf
-    from backend.db.market_cache import _yf_lock
+    from backend.db.market_cache import _yf_sem
 
     # 비로그인 사용자는 표준 유니버스만 스캔한다 (남의 보유 종목이 섞이면 안 된다).
     extra    = []
@@ -76,7 +76,7 @@ def scan_universe(
         try:
             for i in range(0, len(universe), BATCH):
                 batch = universe[i : i + BATCH]
-                with _yf_lock:
+                with _yf_sem:
                     data = yf.download(
                         batch, period="6mo", progress=False,
                         auto_adjust=True, threads=False
@@ -438,8 +438,8 @@ def _fetch_ohlc(ticker: str) -> "pd.DataFrame | None":
         # 2. yfinance 다운로드 (3y — technical-chart는 최근 3년만 표시)
         try:
             import yfinance as yf
-            from backend.db.market_cache import _yf_lock
-            with _yf_lock:
+            from backend.db.market_cache import _yf_sem
+            with _yf_sem:
                 raw = yf.download(ticker, period="3y", progress=False, auto_adjust=True, threads=False)
             if raw.empty:
                 return None
@@ -536,7 +536,7 @@ def pairs_auto(
 
     def _compute():
         import yfinance as yf
-        from backend.db.market_cache import _yf_lock
+        from backend.db.market_cache import _yf_sem
 
         universe   = get_sp500_universe()
         candidates = [t for t in universe if t != ticker][:200]
@@ -545,7 +545,7 @@ def pairs_auto(
         # 기준 종목이 S&P500 유니버스에 없어서 DB에 없는 경우 yfinance로 직접 취득
         if ticker not in close_df.columns:
             try:
-                with _yf_lock:
+                with _yf_sem:
                     raw = yf.download(ticker, period="2y", progress=False,
                                       auto_adjust=True, threads=False)
                 if not raw.empty:
@@ -572,12 +572,12 @@ def pairs_auto(
             return str(cached_s)
         try:
             import yfinance as yf
-            from backend.db.market_cache import _yf_lock, save_common as _save
-            with _yf_lock:
+            from backend.db.market_cache import _yf_sem, save_common as _save
+            with _yf_sem:
                 info = yf.Ticker(t).fast_info
             sector = getattr(info, "sector", None) or ""
             if not sector:
-                with _yf_lock:
+                with _yf_sem:
                     full_info = yf.Ticker(t).info
                 sector = full_info.get("sector", "Unknown")
             if sector:

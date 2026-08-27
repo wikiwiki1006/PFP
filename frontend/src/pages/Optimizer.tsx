@@ -47,7 +47,7 @@ const OPT_CARDS = [
     subtitle: '과거 데이터 기반 Max Sharpe',
     color: '#3b82f6',
     basis: '과거 실적',
-    desc: '과거 수익률 데이터로 샤프비율을 최대화하는 비중 (AI 뷰 미반영). 기대수익도 과거 실적 기준이라 다른 카드와 잣대가 다릅니다.',
+    desc: '과거 수익률 데이터로 샤프비율을 최대화하는 비중 (AI 뷰 미반영).',
   },
   {
     key: 'hrp' as const,
@@ -55,7 +55,7 @@ const OPT_CARDS = [
     subtitle: 'HRP · 계층적 리스크 패리티',
     color: '#10b981',
     basis: 'BL 사후',
-    desc: '상관관계로 자산을 군집화한 뒤 클러스터 간·내부로 리스크를 나눠 배분합니다. 공분산 역행렬을 쓰지 않아 안정적이고, 비슷한 성격의 종목에 비중이 쏠리지 않아 자연스러운 헤지가 됩니다.',
+    desc: '상관관계로 자산을 군집화한 뒤 클러스터 간·내부로 리스크를 나눠 배분합니다. 비슷한 성격의 종목에 비중이 쏠리지 않아 자연스러운 헤지가 됩니다.',
   },
   {
     key: 'target_return' as const,
@@ -825,7 +825,7 @@ export default function Optimizer() {
         <div>
           <h1 className="text-xl font-bold text-[#e2e8f0]">포트폴리오 최적화</h1>
           <p className="text-xs text-[#64748b] mt-0.5">
-            AI + <GlossaryTip term="Black-Litterman" /> · Max Sharpe · Min Volatility · Target Return
+            종목들을 입력하면(2개 이상) 선호도에 따른 최적화 포트폴리오를 추천합니다. AI 분석 뷰를 통해 종목별 기대수익과 신뢰도를 확인할 수 있습니다.
           </p>
         </div>
       </div>
@@ -877,7 +877,7 @@ export default function Optimizer() {
               </button>
             )}
           </div>
-          <p className="text-[10px] text-[#374151] mt-1">Enter / Space / 쉼표로 추가. 비워두면 보유 종목 자동 사용.</p>
+          <p className="text-[10px] text-[#374151] mt-1">Enter로 추가. 미기입 시 보유 종목 자동 사용.</p>
         </div>
 
         {/* Options — 데이터 기간은 투자기간에 따라 백엔드가 자동 결정하므로 입력받지 않는다 */}
@@ -885,12 +885,12 @@ export default function Optimizer() {
           {/* Target return */}
           <div>
             <label className="text-xs text-[#64748b] uppercase tracking-wider block mb-2">
-              목표 수익률: <span className="text-[#f59e0b] font-mono font-bold">{targetReturn}%</span>
+              목표 수익률: <span className="text-[#8b5cf6] font-mono font-bold">{targetReturn}%</span>
             </label>
             <input type="range" min={1} max={50} step={1} value={targetReturn}
               disabled={isRunning}
               onChange={e => setTargetReturn(+e.target.value)}
-              className="w-full accent-[#f59e0b] disabled:opacity-50" />
+              className="w-full accent-[#8b5cf6] disabled:opacity-50" />
           </div>
 
           {/* Holding period — 이 값이 참조 데이터 기간까지 결정한다 */}

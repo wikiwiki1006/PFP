@@ -15,13 +15,35 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
+import os
 import threading
 
 import pandas as pd
 
 from backend.db import get_conn, is_available
 
-_yf_lock = threading.Lock()  # yfinance SQLite 캐시 동시접근 방지
+# yfinance 동시 다운로드 허용 수.
+#
+# 예전에는 Lock 이었다. yfinance 가 내부적으로 SQLite(타임존·쿠키 캐시)를 쓰고
+# 동시 접근에서 "database is locked" 가 나며, threads=True 로 두면 fd 가 금방
+# 고갈되기 때문이다. 다만 배타 락은 **모든 사용자의 시세 조회를 한 줄로 세운다** —
+# A 가 받는 동안 B 는 통째로 기다린다. 동시 접속이 늘면 그대로 병목이 된다.
+#
+# 세마포어로 바꿔 여러 건이 동시에 나가되 총량은 묶어 둔다. 배치 안에서는
+# 여전히 threads=False 라 배치 하나가 여는 소켓 수는 그대로다.
+# 값은 환경변수로 조절할 수 있게 해 두었다 — 인스턴스 사양이 바뀌면 같이 조정한다.
+_YF_CONCURRENCY = max(1, int(os.getenv("YF_CONCURRENCY", "4")))
+_yf_sem = threading.BoundedSemaphore(_YF_CONCURRENCY)
+
+# 타임존 캐시를 쓰기 가능한 곳으로 고정한다. 지정하지 않으면 홈 디렉터리에
+# 만들려 하는데, 컨테이너에서는 그게 실패하거나 인스턴스마다 달라진다.
+_TZ_CACHE_DIR = os.getenv("YF_TZ_CACHE_DIR", "/tmp/py-yfinance")
+try:
+    import yfinance as _yf_mod
+    os.makedirs(_TZ_CACHE_DIR, exist_ok=True)
+    _yf_mod.set_tz_cache_location(_TZ_CACHE_DIR)
+except Exception:  # 캐시를 못 쓰면 매번 조회할 뿐 동작에는 지장이 없다
+    pass
 
 
 def _yf_download_batched(
@@ -32,9 +54,11 @@ def _yf_download_batched(
     **kwargs,
 ) -> pd.DataFrame:
     """
-    대량 티커를 batch_size 단위로 나눠 순차 다운로드.
-    각 배치는 _yf_lock 획득 + threads=False로 실행해 fd 고갈을 방지한다.
-    inter_batch_sleep > 0 이면 배치 사이에 슬립 — 사용자 요청이 _yf_lock을 획득할 기회를 준다.
+    대량 티커를 batch_size 단위로 나눠 다운로드.
+    각 배치는 _yf_sem 슬롯을 잡고 threads=False 로 실행해 fd 고갈을 방지한다.
+    슬롯이 여러 개라 서로 다른 요청의 배치는 동시에 나간다.
+    inter_batch_sleep > 0 이면 배치 사이에 슬립 — 스케줄러처럼 티커가 많은 작업이
+    슬롯을 계속 붙들지 않게 해, 사용자 요청이 끼어들 틈을 준다.
     반환값은 Close 가격만 포함하는 DataFrame.
     """
     import yfinance as yf
@@ -42,7 +66,7 @@ def _yf_download_batched(
     for i in range(0, len(tickers), batch_size):
         batch = tickers[i : i + batch_size]
         try:
-            with _yf_lock:
+            with _yf_sem:
                 data = yf.download(
                     batch, period=period, progress=False,
                     auto_adjust=True, threads=False, **kwargs

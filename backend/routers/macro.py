@@ -14,7 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from backend.services.auth import current_user
+from backend.services.auth import (ai_feature_user, current_user,
+                                   enforce_deep_limit, resolve_model_tier)
 from fastapi import Depends, APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
@@ -28,7 +29,7 @@ from backend.services.ai_analysis import (
     ANALYSIS_MODES,
     MODEL_OPTIONS,
 )
-from backend.services.job_store import JobStore
+from backend.services.job_store import JobCancelled, JobStore
 from backend.db.reports_repo import save_report, list_reports, get_report_content
 from backend.services.market_data import (
     get_close_df,
@@ -43,7 +44,7 @@ router = APIRouter(prefix="/api/macro", tags=["macro"])
 
 # ── 백그라운드 분석 잡 스토어 ─────────────────────────────────────────────────
 # { job_id: { "status": "pending"|"done"|"error", "result"?: dict, "message"?: str, "_ts": float } }
-_store = JobStore(max_jobs=50)
+_store = JobStore(kind="macro", max_jobs=50)
 
 
 def _job_set(job_id: str, data: dict, owner: str | None = None) -> None:
@@ -86,7 +87,7 @@ def _load_trade_log() -> list:
 @router.post("/analyze")
 def analyze_macro(
     req: MacroAnalysisRequest,
-    _auth: dict = Depends(current_user),
+    _auth: dict = Depends(ai_feature_user),
 ):
     """
     9-에이전트 거시경제 이벤트 분석 (백그라운드 잡).
@@ -98,6 +99,7 @@ def analyze_macro(
 
     job_id = str(uuid.uuid4())
     _job_set(job_id, {"status": "pending"}, owner=_auth["uid"])
+    should_cancel = _store.cancel_token(job_id)
 
     # 스레드에 전달할 값을 미리 캡처 (req 객체가 스레드 내에서 변경될 수 있으므로)
     ev           = req.event
@@ -107,15 +109,26 @@ def analyze_macro(
     req_provider = req.provider if hasattr(req, "provider") else "claude"
     uid          = _auth["uid"]
 
+    # 심층 분석이 잠겨 있으면 sonnet 요청을 basic(haiku)으로 낮춘다.
+    tier = resolve_model_tier("deep" if "sonnet" in req_model else "basic", _auth)
+    if tier == "deep":
+        enforce_deep_limit(_auth, "macro_scenario")
+        try:
+            from backend.db import usage_repo
+            usage_repo.record_use(uid, "macro_scenario")
+        except Exception:
+            pass
+
     def _run() -> None:
         try:
             portfolio = req_port or _load_holdings(uid)
             agent_results = run_macro_agents(
                 event=ev,
                 portfolio=portfolio,
-                model_key="sonnet" if "sonnet" in req_model else "haiku",
+                model_key="sonnet" if tier == "deep" else "haiku",
                 mode=req_mode,
                 provider=req_provider,
+                should_cancel=should_cancel,
             )
 
             verdict_cards = None
@@ -136,6 +149,9 @@ def analyze_macro(
             date_str   = datetime.now().strftime("%Y%m%d_%H%M")
             event_slug = re.sub(r"[^\w가-힣]", "_", ev[:30]).strip("_")
             filename   = f"macro_{date_str}_{event_slug}.json"
+            # 취소한 분석을 과거 목록에 남기지 않는다.
+            if should_cancel():
+                return
             # 매크로 시나리오는 **개인 전용**이다.
             # 사용자가 입력한 이벤트/프롬프트에 종속된 결과라 다른 사용자와 공유할 수 없고,
             # 프롬프트 내용 자체가 사생활일 수 있으므로 scope='private' 를 명시한다.
@@ -148,15 +164,12 @@ def analyze_macro(
                 scope="private",
             )
 
-            current = _job_get(job_id)
-            if current and current.get("status") == "cancelled":
-                return
-            _job_set(job_id, {"status": "done", "result": result})
+            # pending 일 때만 done 으로 바꾼다 — 취소된 잡을 되살리지 않는다.
+            _store.update_if(job_id, "pending", {"status": "done", "result": result})
+        except JobCancelled:
+            return   # 취소는 실패가 아니다. 상태는 이미 cancelled 다.
         except Exception as exc:
-            current = _job_get(job_id)
-            if current and current.get("status") == "cancelled":
-                return
-            _job_set(job_id, {"status": "error", "message": str(exc)})
+            _store.update_if(job_id, "pending", {"status": "error", "message": str(exc)})
 
     threading.Thread(target=_run, daemon=True).start()
     return {"job_id": job_id}
@@ -173,13 +186,15 @@ def get_job_status(job_id: str, _auth: dict = Depends(current_user)):
 
 @router.delete("/job/{job_id}")
 def cancel_job(job_id: str, _auth: dict = Depends(current_user)):
-    """실행 중인 분석 잡 취소 (본인 잡만)."""
-    job = _job_get(job_id, owner=_auth["uid"])
-    if job is None:
+    """실행 중인 분석 잡 취소 (본인 잡만).
+
+    _store.cancel() 이 상태 변경과 취소 신호를 함께 처리한다 — 신호가 없으면
+    9개 에이전트가 끝까지 돌아 화면에서만 멈춘 것처럼 보인다.
+    """
+    prev = _store.cancel(job_id, owner=_auth["uid"])
+    if prev is None:
         raise HTTPException(status_code=404, detail="잡을 찾을 수 없습니다.")
-    if job["status"] == "pending":
-        _job_set(job_id, {"status": "cancelled"})
-    return {"ok": True, "status": job.get("status")}
+    return {"ok": True, "status": prev}
 
 
 @router.get("/reports")
@@ -232,10 +247,28 @@ class LiveMetrics(BaseModel):
 @router.post("/analyst-feedback/auto")
 def analyst_feedback_auto(
     live: LiveMetrics = LiveMetrics(),
-    _auth: dict = Depends(current_user),
+    _auth: dict = Depends(ai_feature_user),
 ):
-    """포트폴리오 섹터 기반 AI 피드백 생성."""
+    """포트폴리오 섹터 기반 AI 피드백 생성.
+
+    장이 닫혀 있는 동안에는 값이 변하지 않는다. 그때마다 새로 만들면 같은 답을
+    받으려고 LLM 비용과 20~30초를 다시 쓰게 되므로, 다음 장이 열릴 때까지
+    한 번 만든 결과를 재사용한다. 장중에는 지표가 실시간으로 움직이므로
+    누를 때마다 새로 만든다.
+    """
     uid = _auth["uid"]
+
+    from backend.db.reports_repo import get_analysis, save_analysis
+    from backend.services.market_calendar import is_us_market_open, next_session_open
+
+    market_open = is_us_market_open()
+    # 장 마감 후 저녁과 다음 날 아침이 같은 키를 갖도록 '다음 개장일'로 묶는다.
+    cache_key = f"until_{next_session_open().isoformat()}"
+
+    if not market_open:
+        cached = get_analysis("analyst_feedback", cache_key, user_id=uid)
+        if cached:
+            return {**cached, "from_cache": True}
     from backend.db.portfolio_repo import (
         get_holdings as _db_get_holdings,
         get_trade_log as _db_get_trade_log,
@@ -307,7 +340,11 @@ def analyst_feedback_auto(
         sector_summary=portfolio_sector_summary,
         is_portfolio_sectors=True,
     )
-    return {"feedback": text, "metrics_snapshot": metrics}
+    result = {"feedback": text, "metrics_snapshot": metrics}
+    if not market_open:
+        # TTL 은 넉넉히 잡되, 실제 만료는 cache_key 가 바뀌는 시점에 일어난다.
+        save_analysis("analyst_feedback", cache_key, result, ttl_hours=96, user_id=uid)
+    return {**result, "from_cache": False}
 
 
 # ── 데일리 브리프 ─────────────────────────────────────────────────────────────
@@ -315,7 +352,7 @@ def analyst_feedback_auto(
 @router.post("/daily-brief")
 def daily_brief(
     portfolio: Optional[dict] = None,
-    _auth: dict = Depends(current_user),
+    _auth: dict = Depends(ai_feature_user),
 ):
     """오늘의 포트폴리오 브리프 마크다운 생성 (Claude Sonnet)."""
     holdings  = portfolio or _load_holdings(_auth["uid"])

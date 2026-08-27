@@ -7,6 +7,7 @@ import {
 import { getTechnicalChart } from '@/api'
 import type { TechnicalChartPoint } from '@/types'
 import { COLOR_UP, COLOR_DOWN } from './colors'
+import { useTheme } from '@/lib/ThemeContext'
 
 // ── debounce hook ─────────────────────────────────────────────────────────────
 function useDebounced<T>(value: T, ms = 700): T {
@@ -187,6 +188,13 @@ interface BollingerChartProps {
 }
 
 export default function BollingerChart({ ticker, height = 420 }: BollingerChartProps) {
+
+  // 차트 위에 '배경색으로 덧칠'하는 요소들이 있다(아래 밴드 마스킹, 마커 테두리).
+  // 이 색이 패널 배경과 어긋나면 그 부분만 다른 색 판으로 보인다 —
+  // 라이트 모드에서 검은 영역이 남던 원인이 이것이다.
+  // 값은 light-theme.css 가 bg-[#0b0f1a] 에 적용하는 색과 반드시 같아야 한다.
+  const { theme } = useTheme()
+  const panelBg = theme === 'light' ? '#f6f8fb' : '#0b0f1a'
 
   // ── BB params (trigger API refetch when debounced) ────────────────────────
   const [bbPeriod,       setBBPeriod]       = useState(20)
@@ -459,7 +467,11 @@ export default function BollingerChart({ ticker, height = 420 }: BollingerChartP
       )}
 
       {/* ── chart ───────────────────────────────────────────────────────── */}
+      {/* 휴대폰 폭에 1년치 캔들을 다 넣으면 하나가 1~2px 이 되어 형태를 알아볼 수
+          없다. 좁은 화면에서는 차트를 화면보다 넓게 그리고 좌우로 밀어 보게 한다
+          (chart-hscroll — 실제 폭 지정은 styles/mobile.css). */}
       {q.data && (
+        <div className="chart-hscroll">
         <ResponsiveContainer width="100%" height={height}>
           <ComposedChart
             data={displayData}
@@ -487,7 +499,7 @@ export default function BollingerChart({ ticker, height = 420 }: BollingerChartP
             {showBands && (
               <Area type="monotone" dataKey="lower"
                 stroke="#334155" strokeWidth={1}
-                fill="#0b0f1a" fillOpacity={1}
+                fill={panelBg} fillOpacity={1}
                 dot={false} isAnimationActive={false} legendType="none" />
             )}
 
@@ -519,7 +531,7 @@ export default function BollingerChart({ ticker, height = 420 }: BollingerChartP
             {maCrosses.map((cp, i) => (
               <ReferenceDot key={`cross-${i}`} x={cp.date} y={cp.price}
                 r={5} fill={cp.type === 'golden' ? '#fbbf24' : '#a855f7'}
-                stroke="#0b0f1a" strokeWidth={1.5} />
+                stroke={panelBg} strokeWidth={1.5} />
             ))}
 
             {/* TP line */}
@@ -540,6 +552,7 @@ export default function BollingerChart({ ticker, height = 420 }: BollingerChartP
             )}
           </ComposedChart>
         </ResponsiveContainer>
+        </div>
       )}
 
       {/* ── bottom legend ───────────────────────────────────────────────── */}

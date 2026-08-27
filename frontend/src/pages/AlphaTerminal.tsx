@@ -24,6 +24,7 @@ import TickerDetailModal from '@/components/TickerDetailModal'
 import { FinancialTips } from '@/components/FinancialTips'
 import LockedPreview, { AuthOverlay } from '@/components/auth/LockedPreview'
 import SetupWizard from '@/components/portfolio/SetupWizard'
+import { useTour } from '@/lib/TourContext'
 import ConfirmDialog from '@/components/auth/ConfirmDialog'
 import { useDemoQuery } from '@/lib/useDemoQuery'
 import { useAuth } from '@/lib/AuthContext'
@@ -151,9 +152,9 @@ function Marquee({ snapshot }: { snapshot: any }) {
 // ── Metric Pill ───────────────────────────────────────────────────────────────
 function Pill({ label, value, color }: { label: string; value: string; color?: string }) {
   return (
-    <div className="text-center px-6 py-3 border-r border-[#1e2d40] last:border-r-0 flex-shrink-0">
-      <div className="text-[14px] text-[#94a3b8] font-bold tracking-widest uppercase">{label}</div>
-      <div className="text-[22px] font-mono font-bold mt-0.5 tabular-nums" style={{ color: color || '#e2e8f0' }}>{value}</div>
+    <div className="metric-pill text-center px-6 py-3 border-r border-[#1e2d40] last:border-r-0 flex-shrink-0">
+      <div className="metric-pill-label text-[14px] text-[#94a3b8] font-bold tracking-widest uppercase">{label}</div>
+      <div className="metric-pill-value text-[22px] font-mono font-bold mt-0.5 tabular-nums" style={{ color: color || '#e2e8f0' }}>{value}</div>
     </div>
   )
 }
@@ -167,15 +168,19 @@ function Clock() {
   }, [])
   const kr = now.toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
   const ny = now.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
+  // 모바일에서는 오른쪽에 세로로 세우면 폭을 40% 넘게 먹는다.
+  // 아래쪽에 가로 한 줄로 눕혀 본문 폭을 돌려준다.
   return (
-    <div className="flex-shrink-0 border-l border-[#1e2d40] flex flex-col justify-center items-end gap-2 px-5 py-3">
-      <div className="flex items-center gap-3">
-        <span className="text-[11px] text-[#94a3b8] font-bold tracking-wide">서울</span>
-        <span className="text-[16px] font-mono font-bold text-[#e2e8f0] tabular-nums">{kr}</span>
+    <div className="hidden md:flex w-full md:w-auto flex-shrink-0 border-t md:border-t-0 md:border-l border-[#1e2d40]
+                    flex-row md:flex-col justify-end items-center md:items-end
+                    gap-3 md:gap-2 px-3 md:px-5 py-1 md:py-3">
+      <div className="flex items-center gap-1.5 md:gap-3">
+        <span className="text-[9px] md:text-[11px] text-[#64748b] md:text-[#94a3b8] font-bold tracking-wide">서울</span>
+        <span className="text-[11px] md:text-[16px] font-mono font-semibold md:font-bold text-[#94a3b8] md:text-[#e2e8f0] tabular-nums">{kr}</span>
       </div>
-      <div className="flex items-center gap-3">
-        <span className="text-[11px] text-[#94a3b8] font-bold tracking-wide">뉴욕</span>
-        <span className="text-[16px] font-mono font-bold text-[#cbd5e1] tabular-nums">{ny}</span>
+      <div className="flex items-center gap-1.5 md:gap-3">
+        <span className="text-[9px] md:text-[11px] text-[#64748b] md:text-[#94a3b8] font-bold tracking-wide">뉴욕</span>
+        <span className="text-[11px] md:text-[16px] font-mono font-semibold md:font-bold text-[#94a3b8] md:text-[#cbd5e1] tabular-nums">{ny}</span>
       </div>
     </div>
   )
@@ -747,6 +752,11 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
   const [view, setView] = useState<'holdings' | 'history'>('holdings')
   // 등록 마법사 — 'new' 는 기존 포트폴리오를 지우고 새로 만드는 경우다.
   const [wizard, setWizard] = useState<null | 'first' | 'new'>(null)
+  // 투어 마지막 단계에서 '등록 시작'을 누르면 곧바로 등록 마법사를 연다.
+  const { wantsSetup, clearWantsSetup } = useTour()
+  useEffect(() => {
+    if (wantsSetup) { setWizard('new'); clearWantsSetup() }
+  }, [wantsSetup, clearWantsSetup])
 
   // '아직 아무것도 없음' 판정. 종목이 없고 현금도 0일 때만 최초 등록으로 본다 —
   // 현금만 넣어 둔 사용자에게 "등록하기"를 띄우면 기존 입력을 지우라는 뜻이 된다.
@@ -754,8 +764,12 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
   const cashQty = Number(rawHoldings?.CASH?.q ?? 0)
   const isEmptyPortfolio = isAuthed && nonCash.length === 0 && cashQty === 0
 
-  // 잔고 부족 안내 — 조용히 0으로 깎지 않고 팝업으로 막는다.
+  // 알림·확인 팝업. 브라우저 기본 alert/confirm 은 앱과 생김새가 따로 놀고
+  // 라이트 모드에서 특히 이질적이라 쓰지 않는다.
   const [cashAlert, setCashAlert] = useState('')
+  const [confirmDlg, setConfirmDlg] = useState<
+    { title: string; message?: string; onOk: () => void } | null
+  >(null)
 
   const afterSetup = () => {
     setWizard(null)
@@ -872,12 +886,12 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
   const updateMut = useMutation({
     mutationFn: ({ ticker, q, avg, sector }: any) => updateHolding(ticker, { q, avg, sector }),
     onSuccess: _invalidateAll,
-    onError: (e: any) => alert(`편집 실패: ${e?.response?.data?.detail || e.message}`),
+    onError: (e: any) => setCashAlert(`편집 실패: ${e?.response?.data?.detail || e.message}`),
   })
   const deleteMut = useMutation({
     mutationFn: (ticker: string) => deleteHolding(ticker),
     onSuccess: _invalidateAll,
-    onError: (e: any) => alert(`삭제 실패: ${e?.response?.data?.detail || e.message}`),
+    onError: (e: any) => setCashAlert(`삭제 실패: ${e?.response?.data?.detail || e.message}`),
   })
   const tradeMut = useMutation({
     mutationFn: (f: typeof form) => postTrade({ ticker: f.ticker, type: f.type as any, q: f.q, price: f.price, date: f.date }),
@@ -912,13 +926,13 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
     }),
     // 거래 수정 → holdings도 재계산됨 (백엔드 _recalculate_holding_from_trades)
     onSuccess: () => { setEditTradeId(null); _invalidateAll() },
-    onError: (e: any) => alert(`거래 수정 실패: ${e?.response?.data?.detail || e.message}`),
+    onError: (e: any) => setCashAlert(`거래 수정 실패: ${e?.response?.data?.detail || e.message}`),
   })
   const deleteTradeMut = useMutation({
     mutationFn: (id: number) => deleteTrade(id),
     // 거래 삭제 → holdings도 재계산됨 (백엔드 _recalculate_holding_from_trades)
     onSuccess: _invalidateAll,
-    onError: (e: any) => alert(`거래 삭제 실패: ${e?.response?.data?.detail || e.message}`),
+    onError: (e: any) => setCashAlert(`거래 삭제 실패: ${e?.response?.data?.detail || e.message}`),
   })
   // SELL 인라인 폼 열기 — 현재 보유수량 + 현재가 자동 설정
   const openSell = async (h: any) => {
@@ -1034,10 +1048,20 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
       </div>
 
       <ConfirmDialog
+        open={!!confirmDlg}
+        tone="danger"
+        title={confirmDlg?.title ?? ''}
+        message={confirmDlg?.message}
+        confirmText="삭제"
+        onConfirm={() => { confirmDlg?.onOk(); setConfirmDlg(null) }}
+        onCancel={() => setConfirmDlg(null)}
+      />
+
+      <ConfirmDialog
         open={!!cashAlert}
         alert
         tone="danger"
-        title="거래를 진행할 수 없습니다"
+        title="확인해 주세요"
         message={cashAlert}
         confirmText="확인"
         onConfirm={() => setCashAlert('')}
@@ -1126,11 +1150,11 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
                                 // 입력칸을 비우면 +'' === 0 이 되어 수량 0·평단 0 이 그대로 저장된다.
                                 // 저장 전에 막고 편집 상태를 유지해 값을 되찾을 수 있게 한다.
                                 if (!Number.isFinite(v.q) || v.q <= 0) {
-                                  alert('수량은 0보다 커야 합니다.')
+                                  setCashAlert('수량은 0보다 커야 합니다.')
                                   return
                                 }
                                 if (!Number.isFinite(v.avg) || v.avg < 0) {
-                                  alert('평단가가 올바르지 않습니다.')
+                                  setCashAlert('평단가가 올바르지 않습니다.')
                                   return
                                 }
                                 setEditTicker(null)
@@ -1197,8 +1221,11 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
                             </button>
                             <button type="button"
                               onClick={() => {
-                                if (window.confirm(`${h.ticker} 보유를 삭제하시겠습니까?`))
-                                  deleteMut.mutate(h.ticker)
+                                setConfirmDlg({
+                                  title: `${h.ticker} 보유를 삭제할까요?`,
+                                  message: '해당 종목의 거래 이력도 함께 삭제되며, 사용된 현금은 되돌아옵니다.',
+                                  onOk: () => deleteMut.mutate(h.ticker),
+                                })
                               }}
                               className="text-[#94a3b8] hover:text-[#ef4444] transition-colors">
                               <Trash2 className="w-3.5 h-3.5" />
@@ -1463,7 +1490,11 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
                             setEditTradeVals({ date: t.date, q: t.q, price: t.price || 0, memo: t.memo || '' })
                           }} className="text-[#94a3b8] hover:text-[#3b82f6]"><Edit3 className="w-3 h-3" /></button>
                           <button
-                            onClick={() => { if (confirm('삭제하시겠습니까?')) deleteTradeMut.mutate(t.id) }}
+                            onClick={() => setConfirmDlg({
+                              title: '이 거래를 삭제할까요?',
+                              message: '삭제하면 보유 수량과 현금 잔고가 다시 계산됩니다.',
+                              onOk: () => deleteTradeMut.mutate(t.id),
+                            })}
                             className="text-[#94a3b8] hover:text-[#ef4444]"><Trash2 className="w-3 h-3" /></button>
                         </div>
                       </td>
@@ -1591,7 +1622,7 @@ function SectorsPanel({
                 style={{ color: active === i ? '#cbd5e1' : '#94a3b8' }}>
                 {toKoSector(s.name)}
               </span>
-              <div className="w-12 h-2 bg-[#1e2d40] rounded-full overflow-hidden flex-shrink-0">
+              <div className="sector-legend-bar w-12 h-2 bg-[#1e2d40] rounded-full overflow-hidden flex-shrink-0">
                 <div className="h-full rounded-full transition-all duration-300"
                   style={{
                     width: `${Math.min(100, (s.value / (data[0]?.value || 1)) * 100)}%`,
@@ -1599,7 +1630,7 @@ function SectorsPanel({
                     opacity: active === i ? 1 : 0.5,
                   }} />
               </div>
-              <span className="text-[12px] font-mono font-bold w-9 text-right flex-shrink-0 tabular-nums"
+              <span className="text-[12px] font-mono font-bold w-12 text-right flex-shrink-0 tabular-nums whitespace-nowrap"
                 style={{ color: active === i ? s.fill : '#94a3b8' }}>
                 {s.value}%
               </span>
@@ -1642,7 +1673,7 @@ function SectorPerfPanel({ sectorTableQ }: { sectorTableQ: any }) {
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-2.5 border-b border-[#1e2d40] flex-shrink-0 bg-[#070d18]">
         <span className="text-[11px] text-[#cbd5e1] font-bold tracking-[3px] uppercase">섹터 변동율</span>
-        <div className="flex gap-0.5">
+        <div className="tab-row flex gap-0.5">
           {PERF_PERIODS.map(p => (
             <button key={p.key} onClick={() => setPeriod(p.key)}
               className={cn(
@@ -1670,7 +1701,7 @@ function SectorPerfPanel({ sectorTableQ }: { sectorTableQ: any }) {
               const barW = (Math.abs(s.val) / maxAbs) * 100
               return (
                 <div key={s.etf} className="flex items-center gap-2">
-                  <span className="text-[10px] text-[#94a3b8] w-[52px] text-right flex-shrink-0 font-medium truncate">
+                  <span className="text-[10px] text-[#94a3b8] w-[60px] text-right flex-shrink-0 font-medium truncate">
                     {s.name}
                   </span>
                   <div className="flex-1 h-[14px] bg-[#0a1422] rounded-sm overflow-hidden">
@@ -1684,12 +1715,12 @@ function SectorPerfPanel({ sectorTableQ }: { sectorTableQ: any }) {
                     />
                   </div>
                   <span className={cn(
-                    'text-[10px] font-mono font-bold w-[42px] text-right flex-shrink-0 tabular-nums',
+                    'text-[10px] font-mono font-bold w-[50px] text-right flex-shrink-0 tabular-nums whitespace-nowrap',
                     pos ? 'text-[#10b981]' : 'text-[#ef4444]'
                   )}>
                     {pos ? '+' : ''}{s.val.toFixed(1)}%
                   </span>
-                  <span className="text-[9px] text-[#1e3a5f] w-[26px] flex-shrink-0 font-mono">{s.etf}</span>
+                  <span className="text-[9px] text-[#1e3a5f] w-[34px] flex-shrink-0 font-mono whitespace-nowrap">{s.etf}</span>
                 </div>
               )
             })}
@@ -1719,6 +1750,7 @@ function DailyBriefPanel() {
   const [generating,  setGenerating]  = useState(false)
   const [showHist,    setShowHist]    = useState(false)
   const [pdfBusy,     setPdfBusy]     = useState(false)
+  const [pdfError,    setPdfError]    = useState('')
   const [progress,    setProgress]    = useState(0)
   const [elapsedMs,   setElapsedMs]   = useState(0)
   const contentRef                    = useRef<HTMLDivElement>(null)
@@ -1852,7 +1884,7 @@ function DailyBriefPanel() {
       pdf.save(`${fname}.pdf`)
     } catch (err) {
       console.error('[PDF]', err)
-      alert('PDF 생성 중 오류가 발생했습니다.')
+      setPdfError('PDF 생성 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.')
     } finally {
       setPdfBusy(false)
     }
@@ -1886,6 +1918,16 @@ function DailyBriefPanel() {
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
+      <ConfirmDialog
+        open={!!pdfError}
+        alert
+        tone="danger"
+        title="PDF를 만들지 못했습니다"
+        message={pdfError}
+        confirmText="확인"
+        onConfirm={() => setPdfError('')}
+        onCancel={() => setPdfError('')}
+      />
       <div className="flex-shrink-0 flex gap-2 p-3 border-b border-[#1e2d40]">
         <button onClick={() => genMut.mutate()} disabled={isActivelyGenerating}
           className="flex-1 flex items-center justify-center gap-2 py-2 bg-[#10b981]/12 border border-[#10b981]/30 text-[#10b981] text-[11px] font-bold rounded hover:bg-[#10b981]/20 disabled:opacity-50 transition-colors">
@@ -2035,8 +2077,12 @@ export default function AlphaTerminal() {
 
   const m = metricsQ.data
 
+  // 모바일에서는 화면 높이에 가두지 않는다. h-full + overflow-hidden 이면
+  // 내용이 잘려 나가고, 잘린 만큼은 스크롤할 대상 자체가 사라져 페이지가
+  // 아예 안 내려간다 — 실제로 그렇게 막혀 있었다.
+  // 데스크탑은 기존대로 화면에 맞추고 패널별로 스크롤한다.
   return (
-    <div className="flex flex-col h-full bg-[#0b0f1a] overflow-hidden">
+    <div className="flex flex-col md:h-full bg-[#0b0f1a] md:overflow-hidden">
 
       {/* ── Ticker Detail Modal ── */}
       {tickerModal && (
@@ -2047,7 +2093,9 @@ export default function AlphaTerminal() {
       )}
 
       {/* ── Metrics bar ── */}
-      <div className="flex-shrink-0 bg-[#060b14] border-b border-[#1e2d40] flex items-stretch">
+      {/* 모바일: 지표 줄과 시계를 세로로 쌓되 각자 제 높이만 쓴다.
+          items-stretch 를 그대로 두면 한 줄이 통째로 늘어나 헤더만 193px 을 먹었다. */}
+      <div data-tour="metrics" className="flex-shrink-0 bg-[#060b14] border-b border-[#1e2d40] flex flex-col md:flex-row md:items-stretch">
         <div className="flex flex-1 min-w-0 overflow-x-auto">
           {/* 실패를 '0원 포트폴리오'로 위장하지 않는다 — 조회 실패와 빈 포트폴리오는 다르다 */}
           {metricsQ.isError && isEmptyPortfolioError(metricsQ.error) && <EmptyHoldings compact />}
@@ -2087,7 +2135,7 @@ export default function AlphaTerminal() {
       <Marquee snapshot={snapQ.data} />
 
       {/* ── 종목 검색 바 (Marquee 아래) ── */}
-      <div className="flex-shrink-0 bg-[#060b14] border-b border-[#1e2d40] px-4 py-2" style={{ position: 'relative' }}>
+      <div data-tour="search" className="flex-shrink-0 bg-[#060b14] border-b border-[#1e2d40] px-4 py-2" style={{ position: 'relative' }}>
         <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
           <input
             value={searchQuery}
@@ -2123,11 +2171,12 @@ export default function AlphaTerminal() {
             <span className="text-white text-[11px] font-bold">검색</span>
           </button>
           {showTopSugs && searchSugs.length > 0 && (
-            <div style={{
-              position: 'absolute', top: '100%', left: 0, zIndex: 1000,
-              background: '#0b1220', border: '1px solid #1e2d40', borderRadius: 6,
-              minWidth: 300, marginTop: 2, overflow: 'hidden',
-            }}>
+            <div
+              className="bg-[#0b1220] border border-[#1e2d40]"
+              style={{
+                position: 'absolute', top: '100%', left: 0, zIndex: 1000,
+                borderRadius: 6, minWidth: 300, marginTop: 2, overflow: 'hidden',
+              }}>
               {searchSugs.map(s => (
                 <div key={s.ticker}
                   onMouseDown={() => { setTickerModal(s.ticker); setSearchQuery(''); setSearchSugs([]); setShowTopSugs(false) }}
@@ -2143,27 +2192,31 @@ export default function AlphaTerminal() {
 
       {/* ── Main layout ── */}
       {/* relative: 로그인 안내를 이 영역 한가운데에 띄우기 위한 기준점 */}
-      <div className="relative flex flex-1 min-h-0">
+      {/* 모바일에서는 좌우로 나눌 폭이 없다. 세로로 쌓고 바깥(main)에서 스크롤한다 —
+          좁은 화면에서 스크롤 영역을 안쪽에 또 만들면 어디를 밀어야 할지 헷갈린다. */}
+      <div className="relative flex flex-col md:flex-row md:flex-1 md:min-h-0">
         <AuthOverlay />
 
         {/* ═══ LEFT PANEL ═══ */}
-        <div className="overflow-y-auto border-r border-[#1e2d40] flex-1 min-w-0">
+        <div className="mobile-flatten md:overflow-y-auto border-b md:border-b-0 md:border-r border-[#1e2d40] flex-1 min-w-0">
 
-          {/* A: Equity Curve — 개인 자산 추이 */}
+          {/* A: Equity Curve — 개인 자산 추이 (모바일 1번째) */}
+          <div data-tour="equity" className="m-order-1">
           <LockedPreview silent>
             <EquityCurve curveQ={curveQ} />
           </LockedPreview>
+          </div>
 
-          {/* B: Holdings */}
-          <div className="border-b border-[#1e2d40]" style={{ height: '460px' }}>
+          {/* B: Holdings (모바일 2번째) */}
+          <div data-tour="holdings" className="m-order-2 border-b border-[#1e2d40] md:h-[460px]">
             <LockedPreview silent>
               <HoldingsPanel holdQ={holdQ} rawHoldings={rawHoldQ.data || {}} onTickerClick={t => setTickerModal(t)} />
             </LockedPreview>
           </div>
 
-          {/* B2: Sectors + Sector Performance */}
-          <div className="border-b border-[#1e2d40] flex" style={{ height: '300px' }}>
-            <div className="border-r border-[#1e2d40]" style={{ width: '50%' }}>
+          {/* B2: 섹터 비중 + 섹터 변동율 (모바일 4·5번째) */}
+          <div className="m-order-4 border-b border-[#1e2d40] flex flex-col md:flex-row md:h-[300px]">
+            <div className="border-b md:border-b-0 md:border-r border-[#1e2d40] w-full md:w-1/2 h-[260px] md:h-auto">
               <LockedPreview silent>
                 <SectorsPanel
                   sectorData={sectorQ.data || {}}
@@ -2171,7 +2224,7 @@ export default function AlphaTerminal() {
                 />
               </LockedPreview>
             </div>
-            <div style={{ width: '50%' }}>
+            <div className="w-full md:w-1/2 h-[300px] md:h-auto">
               {/* 공개 데이터지만, 옆 칸(보유 비중)과 한 행이라 함께 흐리게 처리한다 */}
               <LockedPreview silent>
                 <SectorPerfPanel sectorTableQ={sectorTableQ} />
@@ -2179,9 +2232,9 @@ export default function AlphaTerminal() {
             </div>
           </div>
 
-          {/* C: Tabbed bottom */}
-          <div style={{ minHeight: '300px' }}>
-            <div className="flex bg-[#060b14] border-b border-[#1e2d40] sticky top-0 z-10">
+          {/* C: 실적/배당·시장지표 (모바일 6번째) */}
+          <div className="m-order-6" style={{ minHeight: '300px' }}>
+            <div className="tab-row flex bg-[#060b14] border-b border-[#1e2d40] sticky top-0 z-10">
               {BOT_TABS.map((t, i) => (
                 <button key={t} onClick={() => setBotTab(i)}
                   className={cn('px-5 py-2.5 text-[11px] font-bold tracking-widest transition-colors uppercase',
@@ -2240,9 +2293,9 @@ export default function AlphaTerminal() {
         </div>
 
         {/* ═══ RIGHT PANEL — always visible ═══ */}
-        <div className="flex min-h-0 flex-shrink-0" style={{ width: '30%', minWidth: '260px' }}>
+        <div data-tour="brief" className="m-order-3 flex min-h-0 flex-shrink-0 w-full md:w-[30%] md:min-w-[260px] min-h-[420px] md:min-h-0">
           <div className="flex flex-col min-h-0 flex-1 overflow-hidden">
-            <div className="flex-shrink-0 bg-[#060b14] border-b border-[#1e2d40] flex">
+            <div className="tab-row flex-shrink-0 bg-[#060b14] border-b border-[#1e2d40] flex">
               {RIGHT_TABS.map((t, i) => (
                 <button key={t} onClick={() => setRightTab(i)}
                   className={cn('flex-1 py-2.5 text-[10px] font-bold tracking-widest uppercase transition-colors',
@@ -2253,7 +2306,7 @@ export default function AlphaTerminal() {
               ))}
             </div>
 
-            <div className="flex-1 min-h-0 overflow-hidden">
+            <div className="flex-1 md:min-h-0 md:overflow-hidden">
             {rightTab === 0 && (
               <LockedPreview silent>
                 <DailyBriefPanel />

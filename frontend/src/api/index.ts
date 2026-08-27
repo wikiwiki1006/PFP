@@ -256,12 +256,12 @@ export const cancelMacroJob = async (jobId: string): Promise<{ ok: boolean }> =>
   (await api.delete(`/api/macro/job/${jobId}`)).data
 
 export const startEquityReport = async (body: {
-  ticker: string; model_tier?: string; send_telegram?: boolean
+  ticker: string; model_tier?: string
 }): Promise<{ job_id: string }> =>
   (await api.post('/api/reports/equity-research/start', body)).data
 
 export const startIndustryReport = async (body: {
-  industry_id: string; model_tier?: string; send_telegram?: boolean
+  industry_id: string; model_tier?: string
 }): Promise<{ job_id: string }> =>
   (await api.post('/api/reports/industry-research/start', body)).data
 
@@ -300,11 +300,11 @@ export const getDailyBriefFile = async (filename: string): Promise<{ content: st
 export const listIndustries = async (): Promise<Industry[]> =>
   (await api.get('/api/reports/industries')).data
 
-export const generateEquityReport = async (ticker: string, company_name: string, send_telegram = false): Promise<EquityReportResult> =>
-  (await api.post('/api/reports/equity-research', { ticker, company_name, send_telegram })).data
+export const generateEquityReport = async (ticker: string, company_name: string): Promise<EquityReportResult> =>
+  (await api.post('/api/reports/equity-research', { ticker, company_name })).data
 
-export const generateIndustryReport = async (industry_id: string, send_telegram = false): Promise<IndustryReportResult> =>
-  (await api.post('/api/reports/industry-research', { industry_id, send_telegram })).data
+export const generateIndustryReport = async (industry_id: string): Promise<IndustryReportResult> =>
+  (await api.post('/api/reports/industry-research', { industry_id })).data
 
 export const getReportHistory = async (): Promise<(ReportFile & { created_at?: string })[]> =>
   (await api.get('/api/reports/history')).data
@@ -312,8 +312,6 @@ export const getReportHistory = async (): Promise<(ReportFile & { created_at?: s
 export const getReportFile = async (filename: string): Promise<{ content: string; name: string }> =>
   (await api.get(`/api/reports/file/${filename}`)).data
 
-export const getTelegramStatus = async (): Promise<{ configured: boolean }> =>
-  (await api.get('/api/reports/telegram/status')).data
 
 // ── Ticker Detail ──────────────────────────────────────────────────────────────
 export const getTickerDetail = async (ticker: string, period = '1y'): Promise<TickerDetail> =>

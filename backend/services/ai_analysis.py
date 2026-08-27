@@ -15,10 +15,13 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+from typing import Callable, Optional
 
 import anthropic
 import requests
 from dotenv import load_dotenv
+
+from backend.services.job_store import JobCancelled
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
@@ -347,30 +350,47 @@ def call_gpt(prompt: str, max_tokens: int, perplexity_ctx: str = "") -> str:
         return f"[GPT 오류: {exc}]"
 
 
-def call_claude(prompt: str, model: str, max_tokens: int, perplexity_ctx: str = "") -> str:
-    """Claude 호출. 토큰 한도로 잘린 경우 후속 호출로 마무리 문장을 복구한다."""
+def call_claude(prompt: str, model: str, max_tokens: int, perplexity_ctx: str = "",
+                should_cancel: Optional[Callable[[], bool]] = None) -> str:
+    """Claude 호출. 토큰 한도로 잘린 경우 후속 호출로 마무리 문장을 복구한다.
+
+    스트리밍으로 받는다 — 응답을 통째로 기다리면 사용자가 중단을 눌러도
+    그 호출이 끝날 때까지 멈출 수 없다. 조각마다 취소를 확인하고,
+    취소면 JobCancelled 를 올려 연결을 끊는다.
+    """
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     full_prompt = (
         f"[시장 데이터·뉴스 — 분석에 활용하세요]\n{perplexity_ctx}\n\n---\n\n{prompt}"
         if perplexity_ctx else prompt
     )
-    msg = client.messages.create(
+
+    def _check() -> None:
+        if should_cancel is not None and should_cancel():
+            raise JobCancelled()
+
+    def _stream(**kw) -> tuple[str, Optional[str]]:
+        parts: list[str] = []
+        _check()
+        with client.messages.stream(**kw) as st:
+            for piece in st.text_stream:
+                _check()
+                parts.append(piece)
+            stop_reason = st.get_final_message().stop_reason
+        return "".join(parts), stop_reason
+
+    text, stop_reason = _stream(
         model=model,
         max_tokens=max_tokens,
         system=_CLAUDE_SYSTEM,
         messages=[{"role": "user", "content": full_prompt}],
     )
-    text = "".join(
-        block.text for block in msg.content
-        if getattr(block, "type", None) == "text"
-    )
 
     # 토큰 한도로 잘린 경우: 끊긴 마지막 문장만 완성
-    if msg.stop_reason == "max_tokens" and text.strip():
+    if stop_reason == "max_tokens" and text.strip():
         # 끊긴 문장을 잇는 데 원본 프롬프트 전체를 되보낼 이유가 없다.
         # 예전 방식은 출력 80~200 토큰을 얻으려고 입력 3~4천 토큰을 썼다.
         try:
-            fix = client.messages.create(
+            tail, _ = _stream(
                 model=model,
                 max_tokens=200,
                 messages=[
@@ -383,12 +403,10 @@ def call_claude(prompt: str, model: str, max_tokens: int, perplexity_ctx: str = 
                     )},
                 ],
             )
-            tail = "".join(
-                block.text for block in fix.content
-                if getattr(block, "type", None) == "text"
-            )
             if tail.strip():
                 text += tail
+        except JobCancelled:
+            raise
         except Exception:
             pass  # 복구 실패 시 원본 텍스트 반환
 
@@ -681,8 +699,13 @@ def _run_parallel_agents(
     model_key: str,
     perplexity_ctx: str,
     provider: str = "claude",
+    should_cancel: Optional[Callable[[], bool]] = None,
 ) -> dict[int, tuple[str, float]]:
-    """Phase 1: 선택된 에이전트를 컨텍스트 없이 병렬 실행."""
+    """Phase 1: 선택된 에이전트를 컨텍스트 없이 병렬 실행.
+
+    취소되면 아직 시작하지 않은 에이전트는 건너뛰고, 진행 중인 것은
+    스트리밍 도중 스스로 멈춘다.
+    """
     all_agents = _build_agents(ev, portfolio_str, prev_results=[])
     agent_map = {a["id"]: a for a in all_agents if a["id"] in selected_ids}
 
@@ -690,6 +713,9 @@ def _run_parallel_agents(
 
     def _call(ag: dict):
         t0 = time.time()
+        if should_cancel is not None and should_cancel():
+            # 큐에서 대기하다 취소된 에이전트 — LLM 을 부르지 않고 끝낸다.
+            return ag["id"], "[취소됨]", 0.0
         try:
             if provider == "gpt":
                 # GPT는 항상 전체 컨텍스트(yfinance+뉴스)를 주입해 데이터 누락 방지
@@ -702,8 +728,11 @@ def _run_parallel_agents(
             else:
                 ctx = perplexity_ctx if ag.get("inject_perplexity") else ""
                 model = _resolve_model(ag["id"], model_key)
-                text = call_claude(ag["prompt"], model, ag["max_tokens"], perplexity_ctx=ctx)
+                text = call_claude(ag["prompt"], model, ag["max_tokens"], perplexity_ctx=ctx,
+                                   should_cancel=should_cancel)
             return ag["id"], text, time.time() - t0
+        except JobCancelled:
+            return ag["id"], "[취소됨]", time.time() - t0
         except Exception as exc:
             return ag["id"], f"[오류: {exc}]", time.time() - t0
 
@@ -724,6 +753,7 @@ def _run_contextual_agents(
     context_texts: list[str],
     perplexity_ctx: str,
     provider: str = "claude",
+    should_cancel: Optional[Callable[[], bool]] = None,
 ) -> dict[int, tuple[str, float]]:
     """Phase 2: Phase 1 결과를 컨텍스트로 받아 순차 실행 (agents 8, 9)."""
     all_agents = _build_agents(ev, portfolio_str, prev_results=context_texts,
@@ -736,6 +766,9 @@ def _run_contextual_agents(
             continue
         ag = agent_map[ag_id]
         t0 = time.time()
+        # 순차 실행이라 남은 에이전트를 그냥 건너뛰면 된다.
+        if should_cancel is not None and should_cancel():
+            raise JobCancelled()
         try:
             if provider == "gpt":
                 gpt_tokens = max(4000, ag["max_tokens"] * 3)
@@ -743,7 +776,10 @@ def _run_contextual_agents(
             else:
                 ctx = perplexity_ctx if ag.get("inject_perplexity") else ""
                 model = _resolve_model(ag_id, model_key)
-                text = call_claude(ag["prompt"], model, ag["max_tokens"], perplexity_ctx=ctx)
+                text = call_claude(ag["prompt"], model, ag["max_tokens"], perplexity_ctx=ctx,
+                                   should_cancel=should_cancel)
+        except JobCancelled:
+            raise
         except Exception as exc:
             text = f"[오류: {exc}]"
         results[ag_id] = (text, round(time.time() - t0, 2))
@@ -757,6 +793,7 @@ def run_macro_agents(
     model_key: str = "sonnet",
     mode: str = "fast",
     provider: str = "claude",  # 무시됨 — 항상 Claude 사용
+    should_cancel: Optional[Callable[[], bool]] = None,
 ) -> list[dict]:
     """
     기본 분석(model_key=haiku): Claude Haiku (전체 에이전트)
@@ -770,8 +807,14 @@ def run_macro_agents(
     selected_ids = ANALYSIS_MODES.get(mode, ANALYSIS_MODES["fast"])
     portfolio_str = _format_portfolio(portfolio)
 
+    def _check() -> None:
+        if should_cancel is not None and should_cancel():
+            raise JobCancelled()
+
     # Pre-phase: yfinance로 시장 지표 + Perplexity로 뉴스 수집
+    _check()
     perplexity_ctx = gather_context(event)
+    _check()
 
     phase1_ids = [i for i in selected_ids if i <= 7]
     phase2_ids = [i for i in selected_ids if i > 7]
@@ -779,8 +822,10 @@ def run_macro_agents(
 
     if phase1_ids:
         all_results.update(
-            _run_parallel_agents(phase1_ids, event, portfolio_str, effective_model_key, perplexity_ctx, effective_provider)
+            _run_parallel_agents(phase1_ids, event, portfolio_str, effective_model_key,
+                                 perplexity_ctx, effective_provider, should_cancel)
         )
+    _check()
 
     if phase2_ids:
         p1_texts = [
@@ -788,8 +833,10 @@ def run_macro_agents(
             if i in all_results and not all_results[i][0].startswith("[오류")
         ]
         all_results.update(
-            _run_contextual_agents(phase2_ids, event, portfolio_str, effective_model_key, p1_texts, perplexity_ctx, effective_provider)
+            _run_contextual_agents(phase2_ids, event, portfolio_str, effective_model_key,
+                                   p1_texts, perplexity_ctx, effective_provider, should_cancel)
         )
+    _check()
 
     all_agents = _build_agents(event, portfolio_str)
     return [

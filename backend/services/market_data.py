@@ -274,8 +274,8 @@ def get_close_df(
 
 def _get_sector_etf_df_1mo(ttl: int = 300) -> pd.DataFrame:
     def _fetch():
-        from backend.db.market_cache import _yf_lock
-        with _yf_lock:
+        from backend.db.market_cache import _yf_sem
+        with _yf_sem:
             data = yf.download(
                 SECTOR_ETF_TICKERS, period="1mo", progress=False,
                 auto_adjust=True, threads=False

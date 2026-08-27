@@ -1,3 +1,8 @@
+# Cloud Run 배포용 의존성.
+# 로컬 개발 환경에는 pip·setuptools 가 딸려온 패키지들이 이미 깔려 있어서
+# 여기 빠진 것이 있어도 티가 나지 않는다. 컨테이너는 깨끗한 상태에서 이 파일만
+# 보고 설치하므로, 코드가 import 하는 것은 전부 여기 적혀 있어야 한다.
+
 anthropic==0.111.0
 fastapi==0.138.0
 numpy==2.4.6
@@ -15,3 +20,15 @@ uvicorn==0.49.0
 yfinance==1.4.1
 websockets
 protobuf
+
+# 인증 — backend/services/auth.py, backend/routers/auth.py 가 쓴다.
+# 이게 빠져 있어서 배포본에서는 로그인 자체가 불가능했다.
+# google-auth 는 firebase-admin 이 함께 끌어오지만, auth.py 가 google.auth 를
+# 직접 import 하므로 우연한 전이 의존이 아니라 명시적으로 적어 둔다.
+firebase-admin==7.5.0
+google-auth==2.56.3
+
+# PyPortfolioOpt → scikit-base 는 packaging 을 import 하면서 의존성으로 선언하지
+# 않는다(업스트림 누락). 그래서 컨테이너에서 포트폴리오 최적화를 실행하면
+# "No module named packaging" 으로 죽었다. 여기서 직접 고정해 둔다.
+packaging==26.2

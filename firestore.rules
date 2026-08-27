@@ -1,0 +1,30 @@
+rules_version = '2';
+
+// Cloud Firestore 보안 규칙
+// ─────────────────────────
+// 이 서비스는 Firestore 를 쓰지 않는다.
+//   · 사용자 데이터(보유 종목·거래·리포트)는 Neon PostgreSQL 에 있다.
+//   · Firebase 는 인증(Firebase Authentication)만 담당한다.
+//   · 프론트엔드는 firebase/auth 만 import 하고 firebase/firestore 는 쓰지 않는다.
+//
+// 그래서 클라이언트의 Firestore 접근을 전부 막는다. 테스트 모드로 열려 있던
+// 상태(누구나 읽고 쓸 수 있음)를 그대로 두면, 쓰지도 않는 저장소가 인터넷에
+// 공개된 채 남아 데이터 유출·쓰기 남용의 통로가 된다.
+//
+// 서버는 이 규칙의 영향을 받지 않는다 — Firebase Admin SDK 는 보안 규칙을
+// 우회하므로, 나중에 백엔드에서 Firestore 가 필요해져도 이 규칙을 풀 필요가 없다.
+//
+// 앞으로 클라이언트에서 Firestore 를 쓰게 되면, 전면 허용으로 되돌리지 말고
+// 컬렉션마다 소유자 검사를 붙여야 한다. 예:
+//
+//   match /users/{uid}/{document=**} {
+//     allow read, write: if request.auth != null && request.auth.uid == uid;
+//   }
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

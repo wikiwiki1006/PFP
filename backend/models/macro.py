@@ -5,7 +5,9 @@ from pydantic import BaseModel, Field
 
 class MacroAnalysisRequest(BaseModel):
     event: str = Field(..., description="분석할 거시경제 이벤트")
-    model: str = Field(default="claude-sonnet-4-6", description="사용할 Claude 모델")
+    # 기본은 저비용 모델. 심층 분석(sonnet)은 호출부가 명시적으로 지정한다 —
+    # 기본값을 비싼 쪽에 두면 실수로 비용이 몇 배가 된다.
+    model: str = Field(default="claude-haiku-4-5", description="사용할 Claude 모델")
     mode: str = Field(default="fast", description="fast(3) | standard(5) | full(9)")
     provider: str = Field(default="claude", description="claude | gpt")
     portfolio: Optional[dict] = None

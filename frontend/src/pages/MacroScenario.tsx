@@ -6,6 +6,7 @@ import remarkGfm from 'remark-gfm'
 import { ErrorMessage } from '@/components/LoadingSpinner'
 import { FinancialTips } from '@/components/FinancialTips'
 import { getMacroModes, startMacroAnalysis, getMacroJob, cancelMacroJob, getHoldings, getMacroReportHistory, getMacroReportFile } from '@/api'
+import { useFeatures } from '@/lib/useFeatures'
 import type { MacroAnalysisResult, MacroAgent } from '@/types'
 import { cn } from '@/lib/utils'
 import { useLoginPrompt } from '@/components/auth/LockedPreview'
@@ -44,20 +45,20 @@ const MODE_LABELS: Record<string, string> = {
 }
 
 const MODE_DESCRIPTIONS: Record<string, string> = {
-  fast:     '이벤트분석·시장반응·최종판정 3개 에이전트',
-  standard: '5개 에이전트 · 포트폴리오 액션 포함',
-  full:     '9개 에이전트 · 전체 심층 분석',
+  fast:     '이벤트분석·투자전략·최종판정',
+  standard: 'fast + 시장반응·포트폴리오 액션',
+  full:     'standard + 과거 유사사례 분석·리스크 분석',
 }
 
 const PRESETS = [
-  { label: 'Fed 긴축 충격',   icon: '🏦', event: '미국 연방준비제도(Fed)가 기준금리를 75bp 인상하고 지속적인 인플레이션에 대응해 추가 인상을 시사했습니다. 미국 10년물 국채 금리가 5%를 돌파하고 모기지 금리는 8%에 달했습니다.' },
-  { label: '대만 해협 봉쇄',  icon: '🚢', event: '중국이 대만 해협에 해군 봉쇄를 단행해 전 세계 컨테이너 물동량의 40%가 차단됐습니다. TSMC 반도체 공급망이 위협받고 글로벌 기술 산업 전반에 걸쳐 공급망 리스크가 급부상했습니다.' },
-  { label: '은행 위기',       icon: '🏧', event: '상업용 부동산 손실로 인해 미국 주요 지역 은행 3곳이 연쇄 붕괴했습니다. FDIC가 긴급 개입하고 은행 간 대출이 사실상 중단되었으며 신용 스프레드가 400bp 급등했습니다.' },
-  { label: 'OPEC+ 감산',     icon: '🛢️', event: 'OPEC+가 기습적으로 하루 200만 배럴 감산을 발표했습니다. WTI 원유가 배럴당 120달러로 급등하고 에너지 인플레이션이 재점화되면서 스태그플레이션 우려가 다시 고개를 들었습니다.' },
-  { label: '무역 전쟁 2.0',  icon: '⚔️', event: '미국이 중국산 전 품목에 60% 일괄 관세를 부과하자 중국이 희토류 수출 금지로 보복했습니다. 글로벌 교역량이 15% 급감할 것으로 예상됩니다.' },
-  { label: 'AI 버블 붕괴',   icon: '💥', event: '주요 AI 기업이 하이퍼스케일러 설비투자(CAPEX) 축소를 발표하고 엔비디아가 수요 둔화를 경고했습니다. AI 관련 주가가 일주일 만에 40% 폭락하고 헤지펀드의 마진콜이 연쇄적으로 터졌습니다.' },
-  { label: '부채 한도 위기', icon: '💰', event: '미국 의회가 부채 한도 상향에 실패해 단기 국채(T-bill)에 대한 기술적 채무불이행이 발생했습니다. 글로벌 달러 매도세가 확산되어 달러인덱스(DXY)가 12% 급락하고 금값이 온스당 3,000달러까지 폭등했습니다.' },
-  { label: '연착륙',         icon: '🛬', event: '연준이 CPI가 2.1%까지 내려오고 실업률이 4.2%를 유지하는 가운데 기준금리를 50bp 인하하는 피벗을 단행했습니다. GDP 성장률이 2.8%로 가속화되면서 모든 자산군에 걸쳐 위험선호(Risk-on) 랠리가 펼쳐졌습니다.' },
+  { label: 'Fed 긴축 충격',   event: '인플레이션이 잡히지 않아 중앙은행이 기준금리를 큰 폭으로 올리고 추가 인상까지 시사했습니다. 시장 금리가 전반적으로 뛰면서 차입 비용이 오르고, 대출과 주택 시장이 함께 식고 있습니다.' },
+  { label: '대만 해협 봉쇄',   event: '대만 해협의 해상 통행이 막혀 아시아發 물류가 광범위하게 지연되고 있습니다. 첨단 반도체 조달이 어려워지면서 이를 쓰는 산업 전반으로 생산 차질이 번지고 있습니다.' },
+  { label: '은행 위기',       event: '부동산 대출 손실이 불거지며 일부 은행이 잇달아 무너지고 예금 이탈이 번지고 있습니다. 금융권이 대출을 조이면서 기업과 가계가 돈을 구하기 어려워졌습니다.' },
+  { label: 'OPEC+ 감산',     event: '주요 산유국이 원유 생산을 크게 줄이면서 유가가 지속적으로 오르고 있습니다. 에너지 비용 상승이 물가 전반으로 번져, 성장은 둔한데 물가만 오르는 국면이 우려됩니다.' },
+  { label: '무역 전쟁',       event: '주요국이 서로 높은 관세와 수출 제한을 주고받으며 갈등이 확산되고 있습니다. 국가 간 교역이 위축되고 기업들이 공급망을 급하게 재편하면서 비용이 늘고 있습니다.' },
+  { label: 'AI 버블 붕괴',    event: 'AI 주요 기업들의 매출 증가세가 꺾이고 감소가 이어지면서 투자 축소가 잇따르고 있습니다. AI 관련 종목과 반도체·데이터센터 등 연관 섹터 주가가 전반적으로 하락하고 있습니다.' },
+  { label: '부채 한도 위기', event: '정부 부채 한도 협상이 교착되면서 국채 상환 능력에 의문이 제기되고 있습니다. 국가 신용에 대한 불안으로 달러 자산에서 자금이 빠지고 안전자산 선호가 강해지고 있습니다.' },
+  { label: '연착륙',         event: '물가가 목표 수준으로 안정되고 고용도 크게 나빠지지 않은 채 중앙은행이 금리 인하로 돌아섰습니다. 경기 침체 없이 성장세가 유지되면서 위험자산에 대한 투자 심리가 개선되고 있습니다.' },
 ]
 
 // Agent 8 은 JSON 원문 대신 ActionTable 표로 렌더링
@@ -393,11 +394,18 @@ function buildPdfHtml(result: MacroAnalysisResult, dateStr: string): string {
 // ── 메인 페이지 ───────────────────────────────────────────────────────────────
 
 export default function MacroScenario() {
+  const features = useFeatures()
+  // 잠긴 뒤에도 이전에 고른 'sonnet' 이 저장돼 있을 수 있다.
+  useEffect(() => {
+    if (!features.deep_analysis_enabled) setModel(m => (m === 'sonnet' ? 'haiku' : m))
+  }, [features.deep_analysis_enabled])
   // 시나리오 분석·과거 이력은 로그인이 필요하다. 예시 분석 결과는 만들지 않는다.
   const { isAuthed, requireLogin, modalEl } = useLoginPrompt()
   // sessionStorage 에서 이전 상태 복원
   const [event,    setEvent]    = useState(() => sessionStorage.getItem(SK_EVENT)    || '')
-  const [model,    setModel]    = useState(() => sessionStorage.getItem(SK_MODEL)    || 'sonnet')
+  // 기본은 '기본 분석'(haiku). 심층 분석은 토큰을 훨씬 많이 쓰므로 사용자가
+  // 필요할 때 직접 고르게 한다.
+  const [model,    setModel]    = useState(() => sessionStorage.getItem(SK_MODEL)    || 'haiku')
   const [mode,     setMode]     = useState(() => sessionStorage.getItem(SK_MODE)     || 'standard')
 
   const [result, setResult] = useState<MacroAnalysisResult | null>(() => {
@@ -673,7 +681,7 @@ export default function MacroScenario() {
           <Globe className="w-4 h-4 text-[#9b59b6]" />
           <div>
             <h1 className="text-base font-bold text-[#e2e8f0]">매크로 시나리오 분석</h1>
-            <p className="text-[11px] text-[#4a5568]">9-에이전트 병렬 분석 · 이벤트 충격 → 보유 포트폴리오 대응 플랜</p>
+            <p className="text-[11px] text-[#4a5568]">발생하지 않았거나 발생할 시나리오를 입력하면 시뮬레이션 결과를 제공합니다.</p>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -719,7 +727,6 @@ export default function MacroScenario() {
                   ? 'border-[#9b59b6]/50 bg-[#9b59b6]/10 text-[#c084fc]'
                   : 'border-[#1e2d40] text-[#64748b] hover:border-[#9b59b6]/30 hover:text-[#94a3b8] hover:bg-[#0a1628]'
               )}>
-              <span className="mr-1">{p.icon}</span>
               <span className="font-medium">{p.label}</span>
             </button>
           ))}
@@ -740,7 +747,7 @@ export default function MacroScenario() {
         <div className="flex flex-wrap gap-4 items-end">
           <div>
             <div className="text-[10px] text-[#4a5568] font-bold tracking-wider mb-1.5">분석 모드</div>
-            <div className="flex gap-2">
+            <div className="option-row flex gap-2">
               {modes.map(m => (
                 <button key={m} onClick={() => setMode(m)} disabled={isRunning}
                   className={cn(
@@ -758,19 +765,24 @@ export default function MacroScenario() {
           {/* 분석 등급 */}
           <div>
             <div className="text-[10px] text-[#4a5568] font-bold tracking-wider mb-1.5">분석 등급</div>
-            <div className="flex gap-2">
-              {([['haiku', '기본 분석', '빠른 분석'], ['sonnet', '심층 분석', '정밀 분석']] as const).map(([m, label, desc]) => (
-                <button key={m} onClick={() => setModel(m)} disabled={isRunning}
+            <div className="option-row flex gap-2">
+              {([['haiku', '기본 분석', '빠른 분석'], ['sonnet', '심층 분석', '정밀 분석']] as const).map(([m, label, desc]) => {
+                // 관리자가 심층 분석을 잠그면 고를 수 없다 (서버도 동일하게 막는다).
+                const locked = m === 'sonnet' && !features.deep_analysis_enabled
+                const limited = m === 'sonnet' && !locked && features.deep_analysis_daily_limit
+                return (
+                <button key={m} onClick={() => setModel(m)} disabled={isRunning || locked}
+                  title={locked ? '심층 분석은 현재 사용할 수 없습니다' : undefined}
                   className={cn(
                     'px-3 py-1.5 text-left rounded font-medium transition-colors min-w-[90px] disabled:opacity-40 disabled:cursor-not-allowed',
                     model === m ? 'bg-[#9b59b6] text-white' : 'bg-[#0b0f1a] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0]'
                   )}>
                   <div className="text-[11px] font-bold">{label}</div>
                   <div className={cn('text-[9px] mt-0.5 leading-tight', model === m ? 'text-purple-200' : 'text-[#475569]')}>
-                    {desc}
+                    {locked ? '사용 불가' : limited ? '하루 1회 · ' + desc : desc}
                   </div>
                 </button>
-              ))}
+              )})}
             </div>
           </div>
           <div className="flex items-center gap-2 ml-auto">

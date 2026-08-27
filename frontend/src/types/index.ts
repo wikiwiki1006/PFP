@@ -479,7 +479,6 @@ export interface EquityReportResult {
   sections: { [key: string]: string }
   raw: string
   file_path: string
-  telegram_sent: boolean
 }
 
 export interface IndustryReportResult {
@@ -487,7 +486,6 @@ export interface IndustryReportResult {
   sections: { [key: string]: string }
   raw: string
   file_path: string
-  telegram_sent: boolean
 }
 
 // Ticker Detail Types

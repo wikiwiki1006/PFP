@@ -13,7 +13,6 @@
 import { useState, type ReactNode } from 'react'
 import { Lock, LogIn, UserPlus } from 'lucide-react'
 import { useAuth } from '@/lib/AuthContext'
-import AuthModal from './AuthModal'
 
 interface Props {
   children: ReactNode
@@ -34,18 +33,10 @@ interface Props {
 export default function LockedPreview({
   children, label, blur = 'normal', size = 'md', silent = false,
 }: Props) {
-  const { isAuthed, loading } = useAuth()
-  const [modal, setModal] = useState<'login' | 'signup' | null>(null)
-
-  // 모달은 어느 분기에서든 같은 자리에 둔다. 가입·로그인에 성공하면 isAuthed 가
-  // 바뀌면서 아래 분기가 갈리는데, 분기마다 따로 그리면 React 가 모달을 새로
-  // 마운트해 완료 팝업과 오류 문구가 사라진다.
-  const authModal = (
-    <AuthModal open={modal !== null} initialMode={modal ?? 'login'} onClose={() => setModal(null)} />
-  )
+  const { isAuthed, loading, openAuth } = useAuth()
 
   // 세션 복원 중에는 잠금을 씌우지 않는다 — 로그인 상태인데 잠깐 깜빡인다.
-  if (loading || isAuthed) return <>{children}{authModal}</>
+  if (loading || isAuthed) return <>{children}</>
 
   const blurPx = blur === 'light' ? '2.5px' : '4px'
 
@@ -80,19 +71,18 @@ export default function LockedPreview({
             로그인 후 사용 가능
           </span>
           <button
-            onClick={() => setModal('login')}
+            onClick={() => openAuth('login')}
             className="rounded bg-[#3b82f6] px-2 py-0.5 text-[10px] font-semibold text-white transition hover:bg-[#2f6fe0]"
           >
             로그인
           </button>
           <button
-            onClick={() => setModal('signup')}
+            onClick={() => openAuth('signup')}
             className="rounded border border-[#2d3f56] px-2 py-0.5 text-[10px] font-medium text-[#94a3b8] transition hover:bg-[#0d1526]"
           >
             회원가입
           </button>
         </div>
-        {authModal}
       </div>
     )
   }
@@ -124,7 +114,7 @@ export default function LockedPreview({
 
           <div className="mt-0.5 flex items-center gap-1.5">
             <button
-              onClick={() => setModal('login')}
+              onClick={() => openAuth('login')}
               className={`inline-flex items-center gap-1 rounded-md bg-[#3b82f6] font-semibold text-white transition hover:bg-[#2f6fe0] ${
                 size === 'sm' ? 'px-2.5 py-1 text-[10px]' : 'px-3 py-1.5 text-[11px]'
               }`}
@@ -132,7 +122,7 @@ export default function LockedPreview({
               <LogIn size={size === 'sm' ? 11 : 12} /> 로그인
             </button>
             <button
-              onClick={() => setModal('signup')}
+              onClick={() => openAuth('signup')}
               className={`inline-flex items-center gap-1 rounded-md border border-[#2d3f56] font-medium text-[#94a3b8] transition hover:border-[#3d5270] hover:bg-[#0d1526] ${
                 size === 'sm' ? 'px-2.5 py-1 text-[10px]' : 'px-3 py-1.5 text-[11px]'
               }`}
@@ -143,7 +133,6 @@ export default function LockedPreview({
         </div>
       </div>
 
-      {authModal}
     </div>
   )
 }
@@ -154,21 +143,18 @@ export default function LockedPreview({
  * 특정 동작만 로그인이 필요한 경우에 맞다.
  */
 export function useLoginPrompt() {
-  const { isAuthed } = useAuth()
-  const [modal, setModal] = useState<'login' | 'signup' | null>(null)
+  const { isAuthed, openAuth } = useAuth()
 
   /** 로그인했으면 action 실행, 아니면 로그인 모달을 띄우고 false 반환. */
   const requireLogin = (action?: () => void): boolean => {
     if (isAuthed) { action?.(); return true }
-    setModal('login')
+    openAuth('login')
     return false
   }
 
-  const modalEl = (
-    <AuthModal open={modal !== null} initialMode={modal ?? 'login'} onClose={() => setModal(null)} />
-  )
-
-  return { isAuthed, requireLogin, modalEl }
+  // 모달은 앱 루트(AuthProvider)에 하나만 있다. 호출부가 렌더할 것이 없으므로
+  // modalEl 은 빈 자리표시자로 남긴다 — 기존 호출부를 고치지 않아도 되게.
+  return { isAuthed, requireLogin, modalEl: null }
 }
 
 
@@ -180,8 +166,7 @@ export function useLoginPrompt() {
  * 화면당 한 번만 배치한다 — 잠긴 패널마다 배지를 띄우면 화면이 시끄럽다.
  */
 export function AuthOverlay() {
-  const { isAuthed, loading } = useAuth()
-  const [modal, setModal] = useState<'login' | 'signup' | null>(null)
+  const { isAuthed, loading, openAuth } = useAuth()
 
   // 안내 카드는 비로그인일 때만 보여주지만, **모달은 항상 같은 자리에 렌더한다.**
   //
@@ -203,13 +188,13 @@ export function AuthOverlay() {
             </div>
             <div className="flex items-center gap-2">
               <button
-                onClick={() => setModal('login')}
+                onClick={() => openAuth('login')}
                 className="inline-flex items-center gap-1.5 rounded-md bg-[#3b82f6] px-4 py-1.5 text-xs font-semibold text-white transition hover:bg-[#2f6fe0]"
               >
                 <LogIn size={13} /> 로그인
               </button>
               <button
-                onClick={() => setModal('signup')}
+                onClick={() => openAuth('signup')}
                 className="inline-flex items-center gap-1.5 rounded-md border border-[#2d3f56] px-4 py-1.5 text-xs font-medium text-[#94a3b8] transition hover:border-[#3d5270] hover:bg-[#0d1526]"
               >
                 <UserPlus size={13} /> 회원가입
@@ -219,11 +204,6 @@ export function AuthOverlay() {
         </div>
       )}
 
-      <AuthModal
-        open={modal !== null}
-        initialMode={modal ?? 'login'}
-        onClose={() => setModal(null)}
-      />
     </>
   )
 }

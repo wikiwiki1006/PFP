@@ -184,13 +184,13 @@ def poll_quotes(tickers: list[str], batch_size: int = 200, interval: str = "1m")
     156행으로 줄어 4배 빠르다 — 최신 봉의 시각이 최대 5분 늦을 뿐이다.
     """
     import yfinance as yf
-    from backend.db.market_cache import _yf_lock
+    from backend.db.market_cache import _yf_sem
 
     out: dict[str, dict] = {}
     for i in range(0, len(tickers), batch_size):
         chunk = tickers[i:i + batch_size]
         try:
-            with _yf_lock:
+            with _yf_sem:
                 data = yf.download(
                     chunk, period="2d", interval=interval,
                     progress=False, auto_adjust=True, threads=True,
@@ -317,13 +317,13 @@ def backfill_last_close(tickers: list[str]) -> int:
     """
     import pandas as pd
     import yfinance as yf
-    from backend.db.market_cache import _yf_lock, save_prices_to_db
+    from backend.db.market_cache import _yf_sem, save_prices_to_db
     from backend.services.market_calendar import last_completed_session
 
     if not tickers:
         return 0
     try:
-        with _yf_lock:
+        with _yf_sem:
             data = yf.download(
                 tickers, period="1mo", progress=False, auto_adjust=True, threads=False,
             )

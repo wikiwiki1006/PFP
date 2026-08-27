@@ -64,13 +64,15 @@ export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelPr
     setSearch('')
   }
 
+  // 모바일에서는 목록과 차트를 좌우로 나눌 폭이 없다.
+  // 위아래로 쌓아 차트가 화면 폭을 온전히 쓰게 한다.
   return (
-    <div className="h-full flex relative">
+    <div className="md:h-full flex flex-col md:flex-row relative">
       {/* sidebar toggle tab */}
       <button
         onClick={() => setSidebarOpen(v => !v)}
         title={sidebarOpen ? '패널 닫기' : '패널 열기'}
-        className="absolute z-20 top-1/2 -translate-y-1/2 flex items-center justify-center w-5 h-12 bg-[#1a2035] border border-[#2d3f56] rounded-r text-[#64748b] hover:text-[#e2e8f0] transition-colors"
+        className="hidden md:flex absolute z-20 top-1/2 -translate-y-1/2 items-center justify-center w-5 h-12 bg-[#1a2035] border border-[#2d3f56] rounded-r text-[#64748b] hover:text-[#e2e8f0] transition-colors"
         style={{ left: sidebarOpen ? '300px' : '0px' }}
       >
         {sidebarOpen ? <ChevronLeft className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
@@ -78,7 +80,7 @@ export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelPr
 
       {/* left list panel */}
       {sidebarOpen && (
-        <div className="w-[300px] flex-shrink-0 border-r border-[#1e2d40] overflow-y-auto p-3 space-y-3">
+        <div className="w-full md:w-[300px] flex-shrink-0 max-h-[42vh] md:max-h-none overflow-y-auto border-b md:border-b-0 md:border-r border-[#1e2d40] p-3 space-y-3">
           {/* search */}
           <div className="relative">
             <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#374151]" />
@@ -140,8 +142,7 @@ export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelPr
       )}
 
       {/* right chart panel */}
-      <div className="flex-1 overflow-y-auto p-4 min-w-0"
-        style={{ paddingLeft: sidebarOpen ? '1rem' : '1.5rem' }}>
+      <div className="flex-1 md:overflow-y-auto p-2 md:p-4 min-w-0">
         {!selected ? (
           <div className="text-sm text-[#64748b] flex items-center justify-center h-full">
             왼쪽에서 티커를 선택하거나 검색하세요.

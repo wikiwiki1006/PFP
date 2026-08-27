@@ -1,0 +1,142 @@
+/*
+ * styles/light-theme-manual.css
+ * ─────────────────────────────
+ * 자동 생성으로 덮을 수 없는 부분의 라이트 모드 보정.
+ *
+ * light-theme.css 는 Tailwind 임의값 **클래스**만 다시 정의한다. 여기서는
+ * 그 방식으로 닿지 않는 것들을 처리한다:
+ *   · SVG 프레젠테이션 속성(`stroke="#1e2d40"`) — 차트 격자·축선
+ *   · 인라인 style 로 박힌 색
+ *   · 브라우저 기본 UI(스크롤바, 셀렉트)
+ *
+ * CSS 는 SVG 프레젠테이션 속성을 이긴다. 그래서 recharts 가 그린 요소도
+ * 클래스 선택자로 색을 바꿀 수 있다.
+ */
+
+/* ── 문서 바탕 ──────────────────────────────────────────────────────────── */
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+[data-theme="light"] body {
+  background: #f6f8fb;
+  color: #111827;
+}
+
+/* ── 차트 (recharts) ────────────────────────────────────────────────────── */
+[data-theme="light"] .recharts-cartesian-grid line {
+  stroke: #e3e9f2 !important;
+}
+[data-theme="light"] .recharts-cartesian-axis-line,
+[data-theme="light"] .recharts-cartesian-axis-tick-line {
+  stroke: #cfd8e6 !important;
+}
+[data-theme="light"] .recharts-cartesian-axis-tick-value {
+  fill: #5b6a80 !important;
+}
+[data-theme="light"] .recharts-legend-item-text {
+  color: #374151 !important;
+  fill: #374151 !important;
+}
+/* 툴팁은 어두운 카드로 그려져 있어 배경만 밝게 돌린다 */
+[data-theme="light"] .recharts-default-tooltip {
+  background: #ffffff !important;
+  border-color: #dfe5ee !important;
+  color: #111827 !important;
+}
+
+/* 커스텀 툴팁(`<Tooltip content={...}>`)은 배경색이 인라인 style 로 박혀 있어
+   클래스 재정의가 닿지 않는다. recharts 가 툴팁을 항상 이 래퍼로 감싸므로,
+   래퍼의 직계 자식을 잡으면 파일마다 고치지 않아도 전부 밝아진다.
+   인라인 style 을 이기려면 !important 가 필요하다. */
+[data-theme="light"] .recharts-tooltip-wrapper > div {
+  background: #ffffff !important;
+  background-color: #ffffff !important;
+  border-color: #dfe5ee !important;
+  box-shadow: 0 4px 16px rgb(15 23 42 / 10%) !important;
+}
+
+/* 차트 위에 '배경색으로 덧칠'해 만든 테두리·점들.
+   파이 조각 구분선, 마커 링, 커스텀 dot 이 모두 여기 해당한다.
+   요소 종류가 path·circle·line 으로 제각각이라 태그를 특정하지 않고
+   속성값으로 잡는다. 다크 배경색이 그대로 남으면 흰 판 위에 검은
+   테두리만 떠 보인다. */
+[data-theme="light"] [stroke="#0b0f1a"],
+[data-theme="light"] [stroke="#060b14"] {
+  stroke: #ffffff !important;
+}
+[data-theme="light"] [fill="#0b1220"] {
+  fill: #ffffff !important;
+}
+/* 기준선(ReferenceLine)처럼 격자 클래스가 없는 선.
+   `.recharts-cartesian-grid line` 규칙이 더 구체적이라 격자는 영향받지 않는다. */
+[data-theme="light"] [stroke="#1e2d40"] {
+  stroke: #dfe5ee !important;
+}
+
+/* ── 스크롤바 ───────────────────────────────────────────────────────────── */
+[data-theme="light"] ::-webkit-scrollbar-track {
+  background: #eef1f6 !important;
+}
+[data-theme="light"] ::-webkit-scrollbar-thumb {
+  background: #c5cedd !important;
+}
+[data-theme="light"] ::-webkit-scrollbar-thumb:hover {
+  background: #aab7c9 !important;
+}
+
+/* ── 폼 컨트롤 ──────────────────────────────────────────────────────────── */
+[data-theme="light"] select option {
+  background: #ffffff;
+  color: #111827;
+}
+/* 날짜 입력의 달력 아이콘은 다크 배경 기준으로 반전돼 있다 */
+[data-theme="light"] input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: none;
+}
+
+/* ── 마크다운 본문 (리포트·브리프) ───────────────────────────────────────── */
+[data-theme="light"] .lens-md,
+[data-theme="light"] .macro-md,
+[data-theme="light"] .brief-md { color: #1f2937; }
+
+[data-theme="light"] .lens-md h1, [data-theme="light"] .lens-md h2,
+[data-theme="light"] .lens-md h3, [data-theme="light"] .lens-md strong,
+[data-theme="light"] .macro-md h1, [data-theme="light"] .macro-md h2,
+[data-theme="light"] .macro-md h3, [data-theme="light"] .macro-md strong,
+[data-theme="light"] .brief-md h1, [data-theme="light"] .brief-md h2,
+[data-theme="light"] .brief-md h3, [data-theme="light"] .brief-md strong {
+  color: #0f172a;
+  border-color: #dfe5ee;
+}
+[data-theme="light"] .lens-md p,  [data-theme="light"] .lens-md li,
+[data-theme="light"] .macro-md p, [data-theme="light"] .macro-md li,
+[data-theme="light"] .brief-md p, [data-theme="light"] .brief-md li { color: #1f2937; }
+
+[data-theme="light"] .lens-md th, [data-theme="light"] .macro-md th,
+[data-theme="light"] .brief-md th {
+  color: #4b5563; background: #f1f4f9; border-color: #dfe5ee;
+}
+[data-theme="light"] .lens-md td, [data-theme="light"] .macro-md td,
+[data-theme="light"] .brief-md td { color: #1f2937; border-color: #e8ecf3; }
+
+[data-theme="light"] .lens-md thead,  [data-theme="light"] .macro-md thead,
+[data-theme="light"] .brief-md thead  { background: #f1f4f9; }
+[data-theme="light"] .lens-md tr:hover td,
+[data-theme="light"] .macro-md tr:hover td { background: #f6f8fb; }
+
+[data-theme="light"] .lens-md code, [data-theme="light"] .macro-md code,
+[data-theme="light"] .brief-md code {
+  background: #eef2f8; color: #047857;
+}
+[data-theme="light"] .lens-md blockquote, [data-theme="light"] .macro-md blockquote,
+[data-theme="light"] .brief-md blockquote {
+  border-left-color: #1d4ed8; color: #55637a;
+}
+[data-theme="light"] .lens-md hr, [data-theme="light"] .macro-md hr,
+[data-theme="light"] .brief-md hr { border-color: #dfe5ee; }
+[data-theme="light"] .lens-md a { color: #1d4ed8; }
+
+/* ── 모달 뒷배경 ────────────────────────────────────────────────────────── */
+/* 흰 화면 위의 검은 70% 오버레이는 지나치게 무겁다 */
+[data-theme="light"] .bg-black\/70 { background-color: rgb(15 23 42 / 45%) !important; }
+[data-theme="light"] .bg-black\/60 { background-color: rgb(15 23 42 / 40%) !important; }

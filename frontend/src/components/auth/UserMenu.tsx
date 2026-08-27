@@ -5,20 +5,22 @@
  * 비로그인이면 로그인·회원가입 버튼, 로그인 상태면 프로필 드롭다운.
  */
 import { useEffect, useRef, useState } from 'react'
-import { LogIn, UserPlus, LogOut, ChevronDown, Trash2, Settings } from 'lucide-react'
+import { LogIn, UserPlus, LogOut, ChevronDown, Trash2, Settings, ShieldCheck } from 'lucide-react'
 import { useAuth } from '@/lib/AuthContext'
 import { api } from '@/api'
-import AuthModal from './AuthModal'
 import ConfirmDialog from './ConfirmDialog'
 import AccountSettings from './AccountSettings'
+import AdminPanel from '../admin/AdminPanel'
+import { useFeatures } from '@/lib/useFeatures'
 
 export default function UserMenu() {
-  const { isAuthed, loading, user, profile, logout } = useAuth()
-  const [modal, setModal] = useState<'login' | 'signup' | null>(null)
+  const { isAuthed, loading, user, profile, logout, openAuth } = useAuth()
   const [open, setOpen]   = useState(false)
   // 로그아웃·탈퇴는 되돌리기 어려우니 확인을 받는다.
   const [confirm, setConfirm] = useState<'logout' | 'withdraw' | null>(null)
   const [settings, setSettings] = useState(false)
+  const [adminOpen, setAdminOpen] = useState(false)
+  const features = useFeatures()
   const ref = useRef<HTMLDivElement>(null)
 
   // 바깥을 클릭하면 닫는다
@@ -39,23 +41,17 @@ export default function UserMenu() {
     }
   }
 
-  // 아이디가 있으면 그것을 우선 보여준다 — 사용자가 로그인할 때 쓰는 이름이다.
-  const label = profile?.username || profile?.name || user?.displayName || '내 계정'
+  // 사용자가 정한 닉네임(name)이 최우선이다. username 은 이메일에서 자동 생성한
+  // 표시용 대체값이라, 닉네임을 입력했는데도 그게 계속 보이면 입력이 무시된 것처럼
+  // 보인다. 로그인 식별자는 이메일이므로 username 을 우선할 이유도 없다.
+  const label = profile?.name || profile?.username || user?.displayName || '내 계정'
   const photo = profile?.photo_url || user?.photoURL
   const initial = (label[0] || '?').toUpperCase()
-
-  // AuthModal 은 로그인 여부와 무관하게 **항상 같은 자리**에 렌더한다.
-  // 분기마다 따로 그리면 로그인 상태가 바뀌는 순간 React 가 모달을 새로 마운트해
-  // 내부 상태(오류 문구, 가입 완료 팝업)가 사라진다.
-  const authModal = (
-    <AuthModal open={modal !== null} initialMode={modal ?? 'login'} onClose={() => setModal(null)} />
-  )
 
   if (loading) {
     return (
       <>
         <div className="h-8 w-20 animate-pulse rounded-lg bg-[#0d1526]" />
-        {authModal}
       </>
     )
   }
@@ -65,26 +61,24 @@ export default function UserMenu() {
       <>
         <div className="flex items-center gap-2">
           <button
-            onClick={() => setModal('login')}
+            onClick={() => openAuth('login')}
             className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium text-[#94a3b8] transition hover:bg-[#0d1526] hover:text-[#e2e8f0]"
           >
             <LogIn size={15} /> 로그인
           </button>
           <button
-            onClick={() => setModal('signup')}
+            onClick={() => openAuth('signup')}
             className="inline-flex items-center gap-1.5 rounded-lg bg-[#3b82f6] px-3 py-1.5 text-sm font-semibold text-white transition hover:bg-[#2f6fe0]"
           >
             <UserPlus size={15} /> 회원가입
           </button>
         </div>
-        {authModal}
       </>
     )
   }
 
   return (
     <div className="relative" ref={ref}>
-      {authModal}
       <button
         onClick={() => setOpen((v) => !v)}
         className="flex items-center gap-2 rounded-lg px-2 py-1.5 transition hover:bg-[#0d1526]"
@@ -115,6 +109,14 @@ export default function UserMenu() {
           </div>
 
 
+          {features.is_admin && (
+            <button
+              onClick={() => { setOpen(false); setAdminOpen(true) }}
+              className="flex w-full items-center gap-2 px-4 py-2.5 text-sm text-[#3b82f6] transition hover:bg-[#0d1526]"
+            >
+              <ShieldCheck size={15} /> 관리자 설정
+            </button>
+          )}
           <button
             onClick={() => { setOpen(false); setSettings(true) }}
             className="flex w-full items-center gap-2 px-4 py-2.5 text-sm text-[#94a3b8] transition hover:bg-[#0d1526]"
@@ -137,6 +139,7 @@ export default function UserMenu() {
       )}
 
       <AccountSettings open={settings} onClose={() => setSettings(false)} />
+      <AdminPanel open={adminOpen} onClose={() => setAdminOpen(false)} />
 
       <ConfirmDialog
         open={confirm === 'logout'}

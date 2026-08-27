@@ -19,8 +19,8 @@ export default function MeanReversionPanel({ holdings }: MeanReversionPanelProps
   }
 
   return (
-    <div className="h-full flex">
-      <div className="w-[200px] flex-shrink-0 border-r border-[#1e2d40] overflow-y-auto p-3 space-y-1.5">
+    <div className="md:h-full flex flex-col md:flex-row">
+      <div className="w-full md:w-[200px] flex-shrink-0 max-h-[32vh] md:max-h-none overflow-y-auto border-b md:border-b-0 md:border-r border-[#1e2d40] p-3 space-y-1.5">
         <div className="text-[11px] text-[#64748b] font-bold tracking-widest uppercase mb-2">보유 종목</div>
         {tickers.map(t => (
           <button

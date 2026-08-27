@@ -16,6 +16,7 @@ import { cn } from '@/lib/utils'
 import { useLoginPrompt } from '@/components/auth/LockedPreview'
 import AuthGate from '@/components/auth/AuthGate'
 import { useAuth } from '@/lib/AuthContext'
+import { useFeatures } from '@/lib/useFeatures'
 
 // ── sessionStorage 키 ──────────────────────────────────────────────────────────
 const EQ_JOB_ID  = 'lens_eq_job_id'
@@ -425,6 +426,11 @@ async function downloadPdfFromHtml(htmlContent: string, filename: string) {
 
 // ── 주식 리포트 탭 ─────────────────────────────────────────────────────────────
 function EquityTab() {
+  const features = useFeatures()
+  // 이전에 고른 'deep' 이 sessionStorage 에 남아 있을 수 있다.
+  useEffect(() => {
+    if (!features.deep_analysis_enabled) setModelTier(t => (t === 'deep' ? 'basic' : t))
+  }, [features.deep_analysis_enabled])
   // 리포트 생성·과거 이력은 로그인이 필요하다. 예시 리포트는 만들지 않는다 —
   // 로그인 전에는 결과도 이력도 비어 있고, 버튼을 누르면 로그인을 요구한다.
   const { isAuthed, requireLogin, modalEl } = useLoginPrompt()
@@ -753,16 +759,26 @@ function EquityTab() {
         <div className="flex flex-wrap items-end gap-3">
           <div>
             <div className="text-[10px] text-[#4a5568] font-bold tracking-wider mb-1.5">분석 등급</div>
-            <div className="flex gap-1.5">
-              {([['basic', '기본 분석'], ['deep', '심층 분석']] as const).map(([t, label]) => (
-                <button key={t} onClick={() => setModelTier(t)} disabled={isRunning}
+            <div className="option-row flex gap-1.5">
+              {([['basic', '기본 분석'], ['deep', '심층 분석']] as const).map(([t, label]) => {
+                // 관리자가 심층 분석을 잠그면 고를 수 없다. 서버도 같은 규칙으로
+                // 막지만(resolve_model_tier), 눌러도 기본으로 처리되는 버튼을
+                // 그냥 두면 사용자는 무시당했다고 느낀다.
+                const locked = t === 'deep' && !features.deep_analysis_enabled
+                const limited = t === 'deep' && !locked && features.deep_analysis_daily_limit
+                return (
+                <button key={t} onClick={() => setModelTier(t)} disabled={isRunning || locked}
+                  title={locked ? '심층 분석은 현재 사용할 수 없습니다' : undefined}
                   className={cn(
                     'px-3 py-1.5 text-left rounded font-medium transition-colors min-w-[80px] disabled:opacity-40 disabled:cursor-not-allowed',
                     modelTier === t ? 'bg-[#9b59b6] text-white' : 'bg-[#0b0f1a] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0]'
                   )}>
                   <div className="text-[11px] font-bold">{label}</div>
+                  {locked && <div className="text-[9px] opacity-70">사용 불가</div>}
+                {limited && <div className="text-[9px] opacity-70">하루 1회</div>}
+                  {limited && <div className="text-[9px] opacity-70">하루 1회</div>}
                 </button>
-              ))}
+              )})}
             </div>
           </div>
           <div className="flex items-center gap-2 ml-auto">
@@ -788,7 +804,12 @@ function EquityTab() {
         </div>
 
         {(startMut.isError || pollQ.data?.status === 'error') && (
-          <div className="text-[10px] text-[#ef4444]">생성 실패. 다시 시도해주세요.</div>
+          <div className="text-[10px] text-[#ef4444]">
+            {/* 서버가 이유를 알려준 경우(AI 기능 중지 등) 그대로 보여준다.
+                "다시 시도"만 안내하면 아무리 눌러도 안 되는 상황을 설명하지 못한다. */}
+            {(startMut.error as { response?: { data?: { detail?: string } } } | null)
+              ?.response?.data?.detail ?? '생성 실패. 다시 시도해주세요.'}
+          </div>
         )}
       </div>
 
@@ -842,6 +863,11 @@ function EquityTab() {
 
 // ── 산업 리포트 탭 ─────────────────────────────────────────────────────────────
 function IndustryTab() {
+  const features = useFeatures()
+  // 이전에 고른 'deep' 이 sessionStorage 에 남아 있을 수 있다.
+  useEffect(() => {
+    if (!features.deep_analysis_enabled) setModelTier(t => (t === 'deep' ? 'basic' : t))
+  }, [features.deep_analysis_enabled])
   const { isAuthed, requireLogin, modalEl } = useLoginPrompt()
   const [selectedId, setSelectedId] = useState<string>(() => sessionStorage.getItem(IND_INDUSTRY) || '')
   const [modelTier,  setModelTier]  = useState(() => sessionStorage.getItem(IND_TIER) || 'basic')
@@ -1155,16 +1181,22 @@ function IndustryTab() {
       <div className="flex flex-wrap items-end gap-3">
         <div>
           <div className="text-[10px] text-[#4a5568] font-bold tracking-wider mb-1.5">분석 등급</div>
-          <div className="flex gap-1.5">
-            {([['basic', '기본 분석'], ['deep', '심층 분석']] as const).map(([t, label]) => (
-              <button key={t} onClick={() => setModelTier(t)} disabled={isRunning}
+          <div className="option-row flex gap-1.5">
+            {([['basic', '기본 분석'], ['deep', '심층 분석']] as const).map(([t, label]) => {
+              const locked = t === 'deep' && !features.deep_analysis_enabled
+              const limited = t === 'deep' && !locked && features.deep_analysis_daily_limit
+              return (
+              <button key={t} onClick={() => setModelTier(t)} disabled={isRunning || locked}
+                title={locked ? '심층 분석은 현재 사용할 수 없습니다' : undefined}
                 className={cn(
                   'px-3 py-1.5 text-left rounded font-medium transition-colors min-w-[80px] disabled:opacity-40 disabled:cursor-not-allowed',
                   modelTier === t ? 'bg-[#9b59b6] text-white' : 'bg-[#0b0f1a] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0]'
                 )}>
                 <div className="text-[11px] font-bold">{label}</div>
+                {locked && <div className="text-[9px] opacity-70">사용 불가</div>}
+                {limited && <div className="text-[9px] opacity-70">하루 1회</div>}
               </button>
-            ))}
+            )})}
           </div>
         </div>
         <div className="flex items-center gap-2 ml-auto">
@@ -1441,12 +1473,12 @@ export default function LensReport() {
       <div className="flex items-center gap-2">
         <BookOpen className="w-4 h-4 text-[#2e75b6]" />
         <div>
-          <h1 className="text-base font-bold text-[#e2e8f0]">LENS 리서치</h1>
+          <h1 className="text-base font-bold text-[#e2e8f0]">AI 리서치</h1>
         </div>
       </div>
 
       {/* 탭 바 */}
-      <div className="flex border-b border-[#1e2d40]">
+      <div className="tab-row flex border-b border-[#1e2d40]">
         {TABS.map((t, i) => (
           <button
             key={t}

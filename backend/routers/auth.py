@@ -105,6 +105,7 @@ def get_me(user: dict = Depends(current_user)):
         "provider":       row.get("provider") or user.get("provider"),
         "email_verified": user.get("email_verified", False),
         "photo_url":      row.get("photo_url"),
+        "age":            row.get("age"),
         "created_at":     row.get("created_at"),
     }
 
@@ -117,19 +118,28 @@ DISPLAY_NAME_MAX = 20
 class ProfileUpdate(BaseModel):
     # 길이 검사는 아래에서 한국어 문구로 처리한다. 여기서 막으면 Pydantic 이
     # 영어 원시 오류를 그대로 내보낸다.
-    name: str = Field(min_length=1, max_length=200)
+    name: Optional[str] = Field(default=None, max_length=200)
+    # 선택 입력. 보내지 않으면 그대로 두고, clear_age 로 지운다.
+    # 범위 검사는 아래에서 한국어로 처리한다 — Field 로 막으면 영문 원시 오류가 나간다.
+    age: Optional[int] = None
+    clear_age: bool = False
 
 
 @router.patch("/me")
 def patch_me(body: ProfileUpdate, user: dict = Depends(current_user)):
-    """표시 이름 변경. 이메일은 로그인 식별자라 여기서 바꾸지 않는다."""
-    name = (body.name or "").strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="표시 이름을 입력해 주세요.")
-    if len(name) > DISPLAY_NAME_MAX:
-        raise HTTPException(status_code=400,
-                            detail=f"표시 이름은 {DISPLAY_NAME_MAX}자 이하로 입력해 주세요.")
-    if not users_repo.update_profile(user["uid"], name):
+    """표시 이름·나이 변경. 이메일은 로그인 식별자라 여기서 바꾸지 않는다."""
+    name = body.name.strip() if body.name is not None else None
+    if name is not None:
+        if not name:
+            raise HTTPException(status_code=400, detail="표시 이름을 입력해 주세요.")
+        if len(name) > DISPLAY_NAME_MAX:
+            raise HTTPException(status_code=400,
+                                detail=f"표시 이름은 {DISPLAY_NAME_MAX}자 이하로 입력해 주세요.")
+    if body.age is not None and not (1 <= body.age <= 120):
+        raise HTTPException(status_code=400, detail="나이는 1~120 사이로 입력해 주세요.")
+    if name is None and body.age is None and not body.clear_age:
+        raise HTTPException(status_code=400, detail="변경할 내용이 없습니다.")
+    if not users_repo.update_profile(user["uid"], name, body.age, body.clear_age):
         raise HTTPException(status_code=400, detail="저장하지 못했습니다.")
     return users_repo.get_user(user["uid"])
 
@@ -527,6 +537,27 @@ class SignupRequest(BaseModel):
     password: str = Field(min_length=1, max_length=200)
 
 
+# ── 관리자 예약 계정 ────────────────────────────────────────────────────────────
+# 관리자는 'admin' 이라는 아이디로 로그인한다. 인증 자체는 이메일 기반이므로
+# 내부적으로는 아래 주소를 쓰고, 로그인 입력만 여기서 바꿔준다.
+# 도메인이 .local 이라 실제로 메일이 오갈 수 없다 — 비밀번호 재설정 메일 같은
+# 외부 경로가 이 계정을 건드릴 수 없다는 뜻이라, 오히려 안전하다.
+ADMIN_LOGIN_ID = "admin"
+ADMIN_EMAIL    = "admin@pfp.local"
+
+
+def _resolve_login_id(raw: str) -> str:
+    """로그인 입력을 실제 이메일로 바꾼다. 'admin' 만 특별 취급한다."""
+    v = raw.strip().lower()
+    return ADMIN_EMAIL if v == ADMIN_LOGIN_ID else v
+
+
+def _is_reserved(email: str) -> bool:
+    """일반 가입이 쓸 수 없는 주소인지. 관리자 계정을 회원가입으로 만들거나
+    가로채지 못하게 막는다."""
+    return email.strip().lower() in (ADMIN_EMAIL, ADMIN_LOGIN_ID)
+
+
 class LoginRequest(BaseModel):
     email:    str = Field(min_length=1, max_length=320)
     password: str = Field(min_length=1, max_length=200)
@@ -546,6 +577,8 @@ def email_available(email: str):
     다만 가입 폼에서는 어차피 시도하면 알 수 있고, 안내가 없으면 사용자가
     원인을 모른 채 막히므로 여기서는 알려준다.
     """
+    if _is_reserved(email):
+        return {"available": False, "reason": "사용할 수 없는 이메일입니다."}
     ok, reason = validate_email(email)
     if not ok:
         return {"available": False, "reason": reason}
@@ -568,6 +601,9 @@ def signup(body: SignupRequest):
             raise HTTPException(status_code=400, detail=reason)
 
     email = body.email.strip().lower()
+    # 관리자 계정은 회원가입으로 만들 수 없다 — 시드 스크립트로만 생성된다.
+    if _is_reserved(email):
+        raise HTTPException(status_code=400, detail="사용할 수 없는 이메일입니다.")
 
     owner = users_repo.find_by_email(email)
     if owner:
@@ -606,8 +642,8 @@ def signup(body: SignupRequest):
 
 @router.post("/login")
 def login(body: LoginRequest):
-    """이메일 + 비밀번호 로그인."""
-    email = body.email.strip().lower()
+    """이메일 + 비밀번호 로그인. 관리자는 이메일 대신 'admin' 을 쓴다."""
+    email = _resolve_login_id(body.email)
 
     # 이메일이 없을 때와 비밀번호가 틀렸을 때를 같은 문구로 돌려준다 —
     # 구분해 주면 어떤 이메일이 가입돼 있는지 하나씩 확인할 수 있다.
@@ -658,6 +694,11 @@ def social_register(user: dict = Depends(verified_user)):
         raise HTTPException(status_code=409, detail="이미 가입된 계정입니다. 로그인해 주세요.")
 
     email = (user.get("email") or "").strip().lower() or None
+
+    # 소셜 제공자가 예약 주소를 발급할 일은 없지만, 값이 어디서 오든
+    # 관리자 계정으로 통하는 길은 한 군데도 열어두지 않는다.
+    if email and _is_reserved(email):
+        raise HTTPException(status_code=400, detail="사용할 수 없는 이메일입니다.")
 
     # 같은 이메일을 다른 방법으로 이미 쓰고 있으면 계정이 갈라진다 — 막는다.
     if email:

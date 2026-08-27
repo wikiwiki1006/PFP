@@ -14,6 +14,7 @@
  */
 import { useState } from 'react'
 import { X, Plus, Trash2, Loader2, AlertTriangle, ArrowRight, Check } from 'lucide-react'
+import { cn } from '@/lib/utils'
 import { setupPortfolio, getTickerPrice, searchTickers, type SetupHolding } from '@/api'
 
 interface Props {
@@ -118,6 +119,37 @@ export default function SetupWizard({ open, replace = false, onClose, onDone }: 
           </button>
         </div>
 
+        {/* 진행 표시 — 몇 단계 중 어디인지 보이지 않으면 사용자는 끝이 안 보인다고 느낀다.
+            0단계(삭제 확인)는 등록 절차가 아니라 경고라 세지 않는다. */}
+        {step > 0 && (
+          <div className="flex flex-shrink-0 items-center gap-2 border-b border-[#1e2d40] px-6 py-3">
+            {([[1, '보유 종목'], [2, '현금 잔고']] as const).map(([n, label]) => {
+              const done = step > n
+              const now  = step === n
+              return (
+                <div key={n} className="flex flex-1 items-center gap-2">
+                  <div className={cn(
+                    'flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full text-[11px] font-bold transition-colors',
+                    done ? 'bg-[#10b981] text-white'
+                      : now ? 'bg-[#3b82f6] text-white'
+                      : 'border border-[#2d3f56] text-[#4a5568]',
+                  )}>
+                    {done ? <Check size={13} /> : n}
+                  </div>
+                  <span className={cn('text-[11px] font-medium whitespace-nowrap',
+                    now ? 'text-[#e2e8f0]' : done ? 'text-[#10b981]' : 'text-[#4a5568]')}>
+                    {label}
+                  </span>
+                  {n === 1 && (
+                    <div className={cn('h-px flex-1 transition-colors',
+                      step > 1 ? 'bg-[#10b981]' : 'bg-[#1e2d40]')} />
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        )}
+
         <div className="flex-1 overflow-y-auto px-6 py-5">
           {/* ── 0단계: 덮어쓰기 경고 ── */}
           {step === 0 && (
@@ -153,13 +185,16 @@ export default function SetupWizard({ open, replace = false, onClose, onDone }: 
                 <br />없으면 비워 두고 다음으로 넘어가도 됩니다.
               </p>
 
-              <div className="grid grid-cols-[1.4fr_0.8fr_1fr_1.1fr_auto] gap-2 px-1 text-[10px] font-bold uppercase tracking-wider text-[#4a5568]">
+              {/* 좁은 화면에서는 각 입력칸에 자리표시자가 라벨 노릇을 하므로 이 줄은 숨긴다 */}
+              <div className="hidden sm:grid grid-cols-[1.4fr_0.8fr_1fr_1.1fr_auto] gap-2 px-1 text-[10px] font-bold uppercase tracking-wider text-[#4a5568]">
                 <span>종목</span><span>수량</span><span>매수 단가 (USD)</span><span>매수일</span><span />
               </div>
 
               {rows.map((r, i) => (
                 <div key={i} className="relative">
-                  <div className="grid grid-cols-[1.4fr_0.8fr_1fr_1.1fr_auto] gap-2">
+                  {/* 모바일: 5칸을 한 줄에 넣으면 칸마다 60px 남짓이라 숫자가 안 보인다.
+                      두 줄로 접어 각 칸이 읽히는 폭을 갖게 한다 — 좌우로 밀 필요가 없다. */}
+                  <div className="grid grid-cols-[1.3fr_0.7fr_auto] sm:grid-cols-[1.4fr_0.8fr_1fr_1.1fr_auto] gap-2">
                     <input
                       value={r.ticker}
                       onChange={e => onTickerInput(i, e.target.value)}
@@ -173,7 +208,8 @@ export default function SetupWizard({ open, replace = false, onClose, onDone }: 
                       placeholder="0"
                       className="rounded-lg border border-[#1e2d40] bg-[#0d1526] px-3 py-2 text-sm text-[#e2e8f0] outline-none focus:border-[#3b82f6]"
                     />
-                    <div className="relative">
+                    {/* 모바일에서는 이 두 칸이 둘째 줄을 통째로 쓴다 (col-span-3) */}
+                    <div className="relative col-span-2 sm:col-span-1">
                       <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-[#4a5568]">$</span>
                       <input
                         type="number" min="0" step="any" value={r.price || ''}
@@ -188,7 +224,7 @@ export default function SetupWizard({ open, replace = false, onClose, onDone }: 
                     <input
                       type="date" value={r.date} max={today()}
                       onChange={e => setRow(i, { date: e.target.value })}
-                      className="rounded-lg border border-[#1e2d40] bg-[#0d1526] px-2 py-2 text-sm text-[#e2e8f0] outline-none focus:border-[#3b82f6]"
+                      className="col-span-1 rounded-lg border border-[#1e2d40] bg-[#0d1526] px-2 py-2 text-sm text-[#e2e8f0] outline-none focus:border-[#3b82f6]"
                     />
                     <button
                       onClick={() => setRows(rs => (rs.length > 1 ? rs.filter((_, k) => k !== i) : [emptyRow()]))}

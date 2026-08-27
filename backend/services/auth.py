@@ -32,8 +32,24 @@ _initialized = False
 _init_error: Optional[str] = None
 
 # 개발 편의 스위치 — 인증 없이 로컬에서 돌려볼 때만 사용한다.
-# 켜면 토큰 없이 X-User-Id 를 그대로 신뢰하므로 **운영에서는 절대 켜면 안 된다**.
-ALLOW_INSECURE_DEV_AUTH = os.getenv("ALLOW_INSECURE_DEV_AUTH", "false").lower() in ("1", "true", "yes")
+# 켜면 토큰 없이 X-User-Id 를 그대로 신뢰한다. 즉 헤더 한 줄로 아무 계정이나
+# 사칭할 수 있다는 뜻이라, 운영에서 켜지면 그 순간 전 계정이 열린다.
+#
+# "켜지 말자"는 약속에 기대지 않고, 운영 환경에서는 값과 무관하게 무시한다.
+# Cloud Run 은 K_SERVICE 를, App Engine 은 GAE_ENV 를 자동으로 넣어주므로
+# 이 변수들의 존재만으로 "여기는 운영"이라고 판단할 수 있다.
+_IS_MANAGED_RUNTIME = bool(os.getenv("K_SERVICE") or os.getenv("GAE_ENV"))
+
+ALLOW_INSECURE_DEV_AUTH = (
+    not _IS_MANAGED_RUNTIME
+    and os.getenv("ALLOW_INSECURE_DEV_AUTH", "false").lower() in ("1", "true", "yes")
+)
+
+if _IS_MANAGED_RUNTIME and os.getenv("ALLOW_INSECURE_DEV_AUTH", "").lower() in ("1", "true", "yes"):
+    logger.error(
+        "ALLOW_INSECURE_DEV_AUTH 가 운영 환경에 설정돼 있어 무시했습니다. "
+        "이 변수는 로컬 전용입니다 — 배포 설정에서 제거하세요."
+    )
 
 
 def _cred_path() -> Optional[Path]:
@@ -138,11 +154,18 @@ def is_registered(uid: str) -> bool:
     return False
 
 
-async def verified_user(
+def verified_user(
     authorization: Optional[str] = Header(default=None),
     x_user_id: Optional[str] = Header(default=None),
 ) -> dict:
     """토큰만 검증한다 — **가입 여부는 보지 않는다**.
+
+    **이 함수는 반드시 동기(def)여야 한다.**
+    verify_id_token 은 check_revoked=True 라 Firebase 에 네트워크 요청을 보낸다.
+    async def 안에서 블로킹 호출을 하면 이벤트 루프가 그동안 멈추고, 같은
+    인스턴스의 다른 사용자 요청까지 전부 대기한다. 실제로 그래서 동시 100명일 때
+    처리량이 인스턴스당 2 req/s 로 주저앉았다. 동기로 두면 FastAPI 가
+    스레드풀에서 실행해 여러 건이 동시에 처리된다.
 
     가입 절차 자체(소셜 가입 완료, 가입 여부 조회)에 쓴다. 그 외의 모든
     엔드포인트는 current_user 를 써서 가입까지 확인해야 한다.
@@ -190,7 +213,7 @@ async def verified_user(
     }
 
 
-async def current_user(user: dict = Depends(verified_user)) -> dict:
+def current_user(user: dict = Depends(verified_user)) -> dict:
     """인증 + 가입 확인. 가입하지 않은 계정은 403.
 
     401 이 아니라 403 을 쓴다 — 토큰 자체는 유효하므로 재로그인해도 소용없고,
@@ -204,7 +227,7 @@ async def current_user(user: dict = Depends(verified_user)) -> dict:
     return user
 
 
-async def optional_user(
+def optional_user(
     authorization: Optional[str] = Header(default=None),
     x_user_id: Optional[str] = Header(default=None),
 ) -> Optional[dict]:
@@ -214,12 +237,93 @@ async def optional_user(
     (401·403 을 던지지 않는다).
     """
     try:
-        user = await verified_user(authorization, x_user_id)
+        user = verified_user(authorization, x_user_id)
     except HTTPException:
         return None
     return user if is_registered(user["uid"]) else None
 
 
-async def require_uid(user: dict = Depends(current_user)) -> str:
+def require_uid(user: dict = Depends(current_user)) -> str:
     """검증된 UID 만 필요한 경우의 축약 의존성."""
     return user["uid"]
+
+
+# ── 관리자 권한 · 기능 스위치 ────────────────────────────────────────────────────
+
+def admin_user(user: dict = Depends(current_user)) -> dict:
+    """관리자 전용 의존성. 관리자가 아니면 404 로 막는다.
+
+    403 이 아니라 404 인 이유는, 403 은 "그 기능이 존재한다"를 알려주기 때문이다.
+    관리 기능의 존재 자체를 숨기는 편이 낫다.
+    """
+    from backend.db.users_repo import is_admin as _is_admin
+
+    if not _is_admin(user["uid"]):
+        raise HTTPException(status_code=404, detail="찾을 수 없습니다.")
+    return user
+
+
+def _flag(key: str) -> bool:
+    from backend.db.settings_repo import get_flag
+
+    return bool(get_flag(key))
+
+
+def ai_feature_user(user: dict = Depends(current_user)) -> dict:
+    """AI 기능(리포트·시나리오 생성) 접근 의존성.
+
+    관리자가 ai_enabled 를 내리면 일반 사용자는 막히고 관리자만 계속 쓸 수 있다.
+    관리자까지 막으면 스위치를 내린 뒤 상태를 확인할 방법이 없어진다.
+    """
+    from backend.db.users_repo import is_admin as _is_admin
+
+    if _is_admin(user["uid"]):
+        return user
+    if not _flag("ai_enabled"):
+        raise HTTPException(
+            status_code=503,
+            detail="AI 분석 기능이 일시적으로 중지되었습니다. 잠시 후 다시 시도해 주세요.",
+        )
+    return user
+
+
+def enforce_deep_limit(user: dict, kind: str) -> None:
+    """심층 분석 횟수 제한 검사. 초과하면 429 를 올린다.
+
+    관리자와 제한이 꺼진 상태는 그냥 통과한다. 기록은 실제로 생성이 시작된 뒤에
+    남긴다 — 검사 시점에 미리 남기면, 요청이 검증에서 막혀도 횟수가 깎인다.
+    """
+    from backend.db.users_repo import is_admin as _is_admin
+    from backend.db import usage_repo
+
+    if _is_admin(user["uid"]) or not _flag("deep_analysis_daily_limit"):
+        return
+    if usage_repo.count_recent(user["uid"]) < 1:
+        return
+
+    when = usage_repo.next_available_at(user["uid"])
+    detail = "심층 분석은 24시간에 한 번만 사용할 수 있습니다."
+    if when:
+        from datetime import datetime
+        try:
+            t = datetime.fromisoformat(when)
+            detail += f" {t.strftime('%m월 %d일 %H:%M')} 이후 다시 사용할 수 있습니다."
+        except Exception:
+            pass
+    raise HTTPException(status_code=429, detail=detail)
+
+
+def resolve_model_tier(requested: str, user: dict) -> str:
+    """요청한 분석 등급을 실제 허용 등급으로 바꾼다.
+
+    deep_analysis_enabled 가 꺼져 있으면 일반 사용자의 'deep' 요청을 'basic' 으로
+    낮춘다. 400 으로 거절하지 않는 이유는, 프론트가 심층 옵션을 이미 숨기고 있어
+    여기까지 온 요청은 오래된 화면이나 캐시된 상태일 가능성이 크기 때문이다.
+    기능을 실패시키는 것보다 기본 분석으로 처리하는 편이 낫다.
+    """
+    from backend.db.users_repo import is_admin as _is_admin
+
+    tier = requested if requested in ("basic", "deep") else "basic"
+    if tier == "deep" and not _is_admin(user["uid"]) and not _flag("deep_analysis_enabled"):
+        return "basic"
+    return tier
