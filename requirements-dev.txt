@@ -1,0 +1,9 @@
+# 로컬 개발·테스트 전용 의존성.
+# 운영 이미지(Dockerfile)는 requirements.txt 만 설치하므로 여기 있는 것은
+# 배포 용량에 영향을 주지 않는다.
+#
+#   pip install -r requirements.txt -r requirements-dev.txt
+
+-r requirements.txt
+
+pytest>=8.0

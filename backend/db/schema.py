@@ -142,6 +142,9 @@ CREATE TABLE IF NOT EXISTS market_prices (
 );
 CREATE INDEX IF NOT EXISTS idx_market_prices_ticker
     ON market_prices(ticker, price_date DESC);
+-- 일별 거래량. 트레이딩 신호 1차 필터(당일 거래량 vs 20일 평균)에 쓴다.
+-- 종가와 같은 (ticker, price_date) 행에 붙이며, 없으면 NULL — 기존 종가 소비자는 영향 없다.
+ALTER TABLE market_prices ADD COLUMN IF NOT EXISTS volume DOUBLE PRECISION;
 
 -- 실시간 시장 스냅샷 (1분마다 갱신) — 공통 데이터
 CREATE TABLE IF NOT EXISTS market_snapshot (

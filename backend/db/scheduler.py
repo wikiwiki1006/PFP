@@ -35,7 +35,7 @@ _SNAPSHOT_INTERVAL      = 60        # 1분
 _SECTOR_INTERVAL        = 300       # 5분
 _MACRO_INTERVAL         = 3600      # 1시간
 _HISTORY_INTERVAL       = 43200     # 12시간
-_BB_SCAN_INTERVAL       = 21600     # 6시간 (Timing Engine: S&P500 볼린저 스캔)
+_SIGNAL_SCAN_INTERVAL   = 21600     # 6시간 (Timing Engine: S&P500 매매신호 스캔 재계산)
 _MACRO_SPREAD_INTERVAL  = 86400     # 24시간 (Timing Engine: 금리차/HY스프레드 백분위)
 _RTC_INTERVAL           = 300       # 5분  (24시간 자산: 원유·금·금리·환율·암호화폐)
 _SLICE_INTERVAL         = 60        # 1분  (티어1 전량 갱신 — 장중만)
@@ -69,7 +69,7 @@ def start():
     logger.info(
         f"백그라운드 스케줄러 시작 [{now_s}] — "
         f"티어1 1분(장중) / 마퀴 1분 / 24h자산 5분 / 섹터 5분 / 종가반영 15분 / "
-        f"매크로 1시간 / 이력백필 12시간 / BB스캔 6시간 / "
+        f"매크로 1시간 / 이력백필 12시간 / 신호스캔 6시간 / "
         f"S&P500일별 {daily} / 유니버스 24시간"
     )
 
@@ -80,15 +80,38 @@ def stop():
 
 
 def trigger_sp500_if_missed():
-    """서버 시작 시 호출 — KST 03:00 수집을 놓쳤으면 백그라운드에서 즉시 실행."""
+    """서버 시작 시 호출 — KST 03:00 수집을 놓쳤거나 거래량이 아직 없으면 즉시 실행."""
     if _sp500_updating.is_set():
         logger.info("SP500 수집이 이미 진행 중 — 스킵")
         return
     if _sp500_update_due():
         logger.info("SP500 업데이트 누락 감지 → 백그라운드 즉시 수집 시작")
         threading.Thread(target=_run_sp500_with_guard, daemon=True).start()
+    elif _sp500_volume_backfill_due():
+        logger.info("SP500 거래량 미적재 감지 → 백그라운드 즉시 백필 시작")
+        threading.Thread(target=_run_sp500_with_guard, daemon=True).start()
     else:
         logger.info("SP500 업데이트 최신 상태 — 스킵")
+
+
+def _sp500_volume_backfill_due() -> bool:
+    """S&P500 거래량이 아직 대부분 비어 있으면 True (신호 스캔 1차 필터가 거래량을 요구).
+
+    최초 배포 직후 한 번만 참이 된다 — 수집이 성공하면 커버리지가 채워져 다시 거짓.
+    부분 실패(일부 티커 누락)로는 재시도 폭주가 나지 않도록 커버리지 80% 를 기준으로 둔다.
+    """
+    try:
+        from backend.services.trading_signals import get_sp500_universe
+        from backend.db.market_cache import get_volume_stale_tickers
+
+        universe = get_sp500_universe()
+        if not universe:
+            return False
+        stale = get_volume_stale_tickers(universe)
+        return len(stale) > len(universe) * 0.2
+    except Exception as e:
+        logger.warning(f"_sp500_volume_backfill_due 확인 실패: {e}")
+        return False
 
 
 def _sp500_update_due() -> bool:
@@ -217,7 +240,7 @@ def _loop():
     last_sector       = 0.0
     last_macro        = 0.0
     last_history      = 0.0
-    last_bb_scan      = 0.0
+    last_signal_scan  = 0.0
     last_macro_spread = 0.0
     last_rtc          = 0.0     # 24시간 자산 (5분)
     last_universe     = 0.0     # 유니버스 목록 동기화 (24시간)
@@ -275,18 +298,21 @@ def _loop():
             _run_safe("history", _update_history)
             last_history = now
 
-        # ⑤ Timing Engine: S&P500 볼린저 스캔, 6시간마다
-        if now - last_bb_scan >= _BB_SCAN_INTERVAL:
-            _run_safe("bb_scan", _update_bb_scan)
-            last_bb_scan = now
+        # ⑤ Timing Engine: S&P500 매매신호 스캔 재계산(순수 DB 읽기), 6시간마다.
+        #    일별 거래량 수집을 놓쳐도 캐시가 갱신되도록 하는 폴백 — 정상 경로는
+        #    _update_sp500_prices 완료 직후 연쇄 실행이다.
+        if now - last_signal_scan >= _SIGNAL_SCAN_INTERVAL:
+            _run_safe("signal_scan", _update_signal_scan)
+            last_signal_scan = now
 
         # ⑥ Timing Engine: 금리차/HY스프레드 백분위, 24시간마다
         if now - last_macro_spread >= _MACRO_SPREAD_INTERVAL:
             _run_safe("macro_spread", _update_macro_spread_history)
             last_macro_spread = now
 
-        # ⑦ S&P500 전 종목 가격 수집: KST 03:00 이후 하루 1회 (별도 스레드)
-        if not _sp500_updating.is_set() and _sp500_update_due():
+        # ⑦ S&P500 전 종목 가격+거래량 수집: KST 06:00 이후 하루 1회 (별도 스레드).
+        #    거래량이 아직 비어 있으면(최초 배포 직후) 시각과 무관하게 1회 백필.
+        if not _sp500_updating.is_set() and (_sp500_update_due() or _sp500_volume_backfill_due()):
             threading.Thread(target=_run_sp500_with_guard, daemon=True).start()
 
         _stop_event.wait(_SNAPSHOT_INTERVAL)
@@ -395,20 +421,26 @@ def _update_history():
 
 def _update_sp500_prices():
     """
-    S&P 500 전 종목(~500개) 2년치 종가를 market_prices DB에 저장.
+    S&P 500 전 종목(~500개) 2년치 종가 + 거래량을 market_prices DB에 저장.
 
     - 배치 50개, 배치 사이 2초 슬립 → _yf_sem 슬롯을 놓는 구간에 사용자 요청 처리 가능
-    - stale 티커만 수집 (max_age_hours=20) → 이미 신선한 티커는 yfinance 미호출
-    - 완료 후 pairs 사전 계산(_precompute_pairs) 연속 실행
+    - 종가 stale(max_age 20h) ∪ 거래량 stale 티커만 수집 → 신선한 티커는 yfinance 미호출
+      거래량은 같은 yf.download 응답에서 꺼내므로 추가 네트워크 비용이 없다.
+      최초 배포 직후 1회만 전 종목이 거래량 stale → 2년치 OHLCV 백필.
+    - 완료 후 매매신호 스캔(_update_signal_scan) + pairs 사전 계산(_precompute_pairs) 연속 실행
     """
     import logging as _logging
     from backend.services.trading_signals import get_sp500_universe
     from backend.db.market_cache import (
-        get_stale_tickers, _yf_download_batched, save_prices_to_db, save_common,
+        get_stale_tickers, get_volume_stale_tickers,
+        _yf_download_ohlcv_batched, save_prices_to_db, save_common,
     )
 
     universe = get_sp500_universe()
-    stale = get_stale_tickers(universe, max_age_hours=20)
+    stale = sorted(
+        set(get_stale_tickers(universe, max_age_hours=20))
+        | set(get_volume_stale_tickers(universe))
+    )
     if not stale:
         save_common(
             "sp500_price_update_last",
@@ -416,15 +448,18 @@ def _update_sp500_prices():
             ttl_seconds=86400 * 2,
         )
         logger.info("SP500 전체 신선 — DB 스킵, 타임스탬프 갱신")
+        _run_safe("signal_scan", _update_signal_scan)
         _run_safe("precompute_pairs", _precompute_pairs)
         return
 
-    logger.info(f"SP500 가격 수집 시작: {len(stale)}/{len(universe)}개 stale 티커")
+    logger.info(f"SP500 가격+거래량 수집 시작: {len(stale)}/{len(universe)}개 stale 티커")
     _yf_log = _logging.getLogger("yfinance")
     _prev = _yf_log.level
     _yf_log.setLevel(_logging.CRITICAL)
     try:
-        close_df = _yf_download_batched(stale, period="2y", inter_batch_sleep=2.0)
+        close_df, volume_df = _yf_download_ohlcv_batched(
+            stale, period="2y", inter_batch_sleep=2.0
+        )
     finally:
         _yf_log.setLevel(_prev)
 
@@ -432,15 +467,16 @@ def _update_sp500_prices():
         logger.warning("SP500 가격 수집: yfinance 빈 응답")
         return
 
-    save_prices_to_db(close_df.dropna(axis=1, how="all"))
+    save_prices_to_db(close_df.dropna(axis=1, how="all"), volume_df)
     save_common(
         "sp500_price_update_last",
         datetime.now(tz=timezone.utc).isoformat(),
         ttl_seconds=86400 * 2,
     )
-    logger.info(f"SP500 가격 수집 완료: {close_df.shape[1]}개 저장")
+    logger.info(f"SP500 가격+거래량 수집 완료: {close_df.shape[1]}개 저장")
 
-    # 데이터 수집 완료 직후 pairs 사전 계산
+    # 데이터 수집 완료 직후 매매신호 스캔 갱신 → pairs 사전 계산
+    _run_safe("signal_scan", _update_signal_scan)
     _run_safe("precompute_pairs", _precompute_pairs)
 
 
@@ -477,25 +513,28 @@ def _precompute_pairs():
     logger.info(f"pairs 사전계산 완료: {computed}/{len(_PAIRS_PRECOMPUTE_TICKERS)}개")
 
 
-def _update_bb_scan():
-    """Timing Engine: S&P500 전체 3년 볼린저 밴드 스캔 → common_cache 저장."""
-    import pandas as pd
-    from backend.services.market_data import get_close_df
-    from backend.services.trading_signals import get_sp500_universe, bollinger_scan_full_universe
-    from backend.db.market_cache import save_common, _yf_download_batched
+def _update_signal_scan():
+    """Timing Engine: S&P500 SMA 1차 필터 + MACD/RSI 스코어링 → common_cache 저장.
 
-    universe = get_sp500_universe()
-    close_df = _yf_download_batched(universe, period="5y")
-    if close_df.empty:
-        logger.warning("bb_scan: 데이터 없음, 스킵")
+    DB(market_prices)의 종가·거래량만 읽어 계산한다 — yfinance 호출이 전혀 없다.
+    (거래량 적재는 _update_sp500_prices 가 담당하므로 이중 수집하지 않는다.)
+    """
+    from backend.db.market_cache import get_prices_from_db, get_volume_from_db, save_common
+    from backend.services.trading_signals import get_sp500_universe, sma_macd_rsi_scan
+
+    universe  = get_sp500_universe()
+    close_df  = get_prices_from_db(universe, "1y", fill=True)
+    if close_df is None or close_df.empty:
+        logger.warning("signal_scan: 종가 데이터 없음, 스킵")
         return
-    close_df = close_df.ffill()
-    cutoff   = close_df.index.max() - pd.Timedelta(days=365 * 3)
-    trimmed  = close_df[close_df.index >= cutoff]
-    valid_cols = [c for c in universe if c in trimmed.columns]
-    result = bollinger_scan_full_universe(trimmed[valid_cols], top_n=10)
-    save_common("bb_scan_sp500", result, ttl_seconds=_BB_SCAN_INTERVAL * 2)
-    logger.info(f"bb_scan 갱신 완료: {result.get('scanned', 0)}개 종목 스캔")
+    volume_df = get_volume_from_db(universe, "1y")
+    valid = [c for c in universe if c in close_df.columns]
+    result = sma_macd_rsi_scan(close_df[valid], volume_df, top_n=10)
+    save_common("signal_scan_sp500", result, ttl_seconds=_SIGNAL_SCAN_INTERVAL * 5)
+    logger.info(
+        f"신호 스캔 갱신 완료: {result.get('scanned', 0)}개 스캔 · "
+        f"매수 {len(result.get('long_picks', []))} / 매도 {len(result.get('short_picks', []))}"
+    )
 
 
 def _update_macro_spread_history():

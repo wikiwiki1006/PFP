@@ -62,6 +62,20 @@ def _dsn() -> str:
     )
 
 
+def _dsn_label() -> str:
+    """로그에 찍을 접속 대상. 비밀번호는 뺀다.
+
+    예전에는 DATABASE_URL 로 접속해도 로그에 DB_HOST 값을 찍었다. 그래서
+    운영 DB 에 붙여 놓고도 'localhost' 로 보여, 어디에 연결됐는지 확인할 방법이
+    없었다. 실제로 쓰는 DSN 을 그대로 보여준다.
+    """
+    url = os.getenv("DATABASE_URL", "").strip()
+    if url:
+        host = re.sub(r"^.*@", "", url).split("/")[0].split("?")[0]
+        return f"DATABASE_URL → {host}"
+    return f"{os.getenv('DB_HOST', 'localhost')}:{os.getenv('DB_PORT', '5432')}/{os.getenv('DB_NAME', 'postgres')}"
+
+
 def init_pool(minconn: int = 2, maxconn: Optional[int] = None) -> bool:
     """연결 풀 초기화. 성공 시 True, 실패 시 False(파일 폴백).
 
@@ -79,8 +93,7 @@ def init_pool(minconn: int = 2, maxconn: Optional[int] = None) -> bool:
     try:
         _pool = ThreadedConnectionPool(minconn, maxconn, dsn=_dsn())
         logger.info(
-            f"PostgreSQL 연결 풀 초기화 완료 "
-            f"({os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')})"
+            f"PostgreSQL 연결 풀 초기화 완료 ({_dsn_label()}, 최대 {maxconn} 커넥션)"
         )
         return True
     except Exception as e:

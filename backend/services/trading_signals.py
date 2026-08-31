@@ -303,73 +303,165 @@ def get_sp500_universe() -> list[str]:
     return list(SP500_NASDAQ_UNIVERSE)
 
 
-def bollinger_scan_full_universe(
+def _ema(series: pd.Series, span: int) -> pd.Series:
+    return series.ewm(span=span, adjust=False).mean()
+
+
+def _macd_hist(close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.Series:
+    """MACD 히스토그램 = (EMA12 - EMA26) - EMA9(그 차이)."""
+    macd = _ema(close, fast) - _ema(close, slow)
+    return macd - _ema(macd, signal)
+
+
+def _rsi(close: pd.Series, period: int = 14) -> pd.Series:
+    """Wilder RSI(14). avg_loss=0(전부 상승) 구간은 RSI 100 으로 둔다."""
+    delta = close.diff()
+    gain  = delta.clip(lower=0.0)
+    loss  = -delta.clip(upper=0.0)
+    avg_gain = gain.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
+    avg_loss = loss.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
+    rs  = avg_gain / avg_loss
+    rsi = 100.0 - 100.0 / (1.0 + rs)
+    return rsi.where(avg_loss != 0.0, 100.0)
+
+
+def sma_macd_rsi_scan(
     close_df: pd.DataFrame,
+    volume_df: "pd.DataFrame | None",
     top_n: int = 10,
-    window: int = 20,
-    n_std: float = 2.0,
+    min_history: int = 210,
 ) -> dict:
+    """2단계 매매신호 스캔 (S&P500).
+
+    Step 1 — 벡터 SMA 필터로 유니버스 축소 (for 문 없이 마지막 행만 비교):
+      · 매수 통과: 현재가 > SMA100  AND  SMA20 > SMA50  AND  당일거래량 > 20일평균거래량
+      · 매도 통과: 현재가 < SMA200  AND  SMA20 < SMA50  AND  당일거래량 > 20일평균거래량
+    Step 2 — 통과 종목만 MACD 히스토그램 / RSI(14) 로 통합점수(0~100) 산출 후 상위 top_n.
+
+    거래량 데이터가 없는 티커는 '수급' 조건을 판정할 수 없어 후보에서 빠진다.
     """
-    유니버스 전체 종목에 볼린저 밴드 평균회귀 신호를 계산해 z-score 기준 순위화.
-    가장 음수(과매도, BUY 후보) top_n / 가장 양수(과매수, SELL 후보) top_n 반환.
-    """
-    rows: list[dict] = []
-    scanned = 0
+    empty = {"long_picks": [], "short_picks": [], "scanned": 0, "as_of": None}
+    if close_df is None or close_df.empty:
+        return empty
 
-    for ticker in close_df.columns:
-        price = close_df[ticker].dropna()
-        if len(price) < window + 5:
-            continue
-        scanned += 1
-        try:
-            mr = mean_reversion_signal(price, window=window, n_std=n_std)
-            z = mr["current_z"]
-            if z != z:  # NaN
-                continue
-            cur    = float(price.iloc[-1])
-            mid    = float(mr["mid_band"].iloc[-1])
-            upper  = float(mr["upper_band"].iloc[-1])
-            lower  = float(mr["lower_band"].iloc[-1])
-            rows.append({
-                "ticker":     ticker,
-                "z":          round(float(z), 3),
-                "price":      round(cur, 2),
-                "mid_band":   round(mid, 2),
-                "upper_band": round(upper, 2),
-                "lower_band": round(lower, 2),
-                "pct_b":      round(float(mr.get("pct_b", 0.5)), 4),
-            })
-        except Exception:
-            continue
+    close_df = close_df.sort_index()
+    valid = [c for c in close_df.columns if int(close_df[c].notna().sum()) >= min_history]
+    if not valid:
+        return empty
+    close = close_df[valid].ffill()
 
-    rows.sort(key=lambda r: r["z"])
-    long_candidates  = [r for r in rows if r["z"] < 0]
-    short_candidates = [r for r in rows if r["z"] > 0]
-    long_candidates.sort(key=lambda r: r["z"])               # 가장 음수 먼저
-    short_candidates.sort(key=lambda r: r["z"], reverse=True)  # 가장 양수 먼저
+    if volume_df is not None and not volume_df.empty:
+        vcols = [c for c in valid if c in volume_df.columns]
+        vol   = volume_df.sort_index().reindex(close.index)[vcols]
+    else:
+        vol = pd.DataFrame(index=close.index)
 
-    def _to_pick(r: dict, side: str) -> dict:
-        move_pct = round((r["mid_band"] - r["price"]) / r["price"] * 100, 1) if r["price"] else 0.0
+    # '당일' = 거래량이 폭넓게 존재하는 마지막 날짜.
+    # close 는 일부 티커의 장중·부분 봉 때문에 뒤쪽이 들쭉날쭉할 수 있고(ffill 로 메워짐),
+    # 그 마지막 행을 '오늘'로 잡으면 거래량이 아직 없어 1차 필터가 전부 탈락한다.
+    if vol.shape[1]:
+        coverage = vol.notna().sum(axis=1)
+        good = coverage[coverage >= max(1, int(vol.shape[1] * 0.5))]
+        if len(good):
+            asof = good.index[-1]
+            close = close.loc[:asof]
+            vol   = vol.loc[:asof]
+
+    # ── Step 1: 벡터 1차 필터 ────────────────────────────────────────────────
+    last   = close.iloc[-1]
+    sma20  = close.rolling(20).mean().iloc[-1]
+    sma50  = close.rolling(50).mean().iloc[-1]
+    sma100 = close.rolling(100).mean().iloc[-1]
+    sma200 = close.rolling(200).mean().iloc[-1]
+
+    if vol.shape[1]:
+        vol_today = vol.iloc[-1]
+        vsma20    = vol.rolling(20).mean().iloc[-1]
+        vol_surge = (vol_today > vsma20).reindex(valid).fillna(False)
+    else:
+        vol_surge = pd.Series(False, index=valid)
+
+    long_pass  = ((last > sma100) & (sma20 > sma50)).reindex(valid).fillna(False) & vol_surge
+    short_pass = ((last < sma200) & (sma20 < sma50)).reindex(valid).fillna(False) & vol_surge
+
+    long_cands  = [t for t in valid if bool(long_pass.get(t, False))]
+    short_cands = [t for t in valid if bool(short_pass.get(t, False))]
+
+    # ── Step 2: 스코어링 ────────────────────────────────────────────────────
+    def _score(ticker: str, side: str) -> "dict | None":
+        c = close[ticker].dropna()
+        if len(c) < min_history or ticker not in vol.columns:
+            return None
+        vt = vol[ticker].dropna()
+        if len(vt) < 20:
+            return None
+        avg20 = float(vt.iloc[-20:].mean())
+        if avg20 <= 0:
+            return None
+        vratio = float(vt.iloc[-1] / avg20)
+
+        hist    = _macd_hist(c)
+        h_today = float(hist.iloc[-1])
+        h_prev  = float(hist.iloc[-2])
+        rsi_val = float(_rsi(c).iloc[-1])
+        price   = float(c.iloc[-1])
+
+        # 수급 폭발 (0~40, 캡)
+        s_vol = min(40.0, vratio * 15.0)
+
+        # MACD 가속도 (0~30): 히스토그램 확장 + 영선 돌파
+        if side == "long":
+            s_mom = 15.0 if (h_today - h_prev) > 0 else 0.0
+            if h_prev < 0 <= h_today:
+                s_mom += 15.0
+        else:
+            s_mom = 15.0 if (h_today - h_prev) < 0 else 0.0
+            if h_prev > 0 >= h_today:
+                s_mom += 15.0
+
+        # RSI 골디락스 존 (-10~30)
+        if side == "long":
+            if   50 <= rsi_val <= 65: s_rsi = 30.0
+            elif 40 <= rsi_val < 50:  s_rsi = 20.0
+            elif rsi_val >= 70:       s_rsi = -10.0
+            else:                     s_rsi = 0.0
+        else:
+            if   35 <= rsi_val <= 50: s_rsi = 30.0
+            elif 50 < rsi_val <= 60:  s_rsi = 20.0
+            elif rsi_val <= 30:       s_rsi = -10.0
+            else:                     s_rsi = 0.0
+
+        score = max(0.0, min(100.0, s_vol + s_mom + s_rsi))
+        arrow = "▲" if h_today >= h_prev else "▼"
+        trend = "정배열 (20>50일선)" if side == "long" else "역배열 (20<50일선)"
+        anchor = "100일선 위" if side == "long" else "200일선 아래"
         return {
-            "ticker":     r["ticker"],
-            "z":          r["z"],
-            "entry":      r["price"],
-            "target":     r["mid_band"],
-            "upper_band": r["upper_band"],
-            "lower_band": r["lower_band"],
-            "pct_b":      r["pct_b"],
-            "move_pct":   move_pct if side == "long" else -move_pct,
-            "reason": (
-                f"하단밴드 이탈 (Z={r['z']:.2f}) → 중앙선 ${r['mid_band']:.2f} 회귀 기대"
-                if side == "long" else
-                f"상단밴드 이탈 (Z={r['z']:.2f}) → 중앙선 ${r['mid_band']:.2f} 하락 기대"
-            ),
+            "ticker":         ticker,
+            "price":          round(price, 2),
+            "score":          round(score),
+            "volume_ratio":   round(vratio, 2),
+            "rsi":            round(rsi_val, 1),
+            "macd_hist":      round(h_today, 4),
+            "macd_hist_prev": round(h_prev, 4),
+            "components": {
+                "volume":   round(s_vol, 1),
+                "momentum": round(s_mom, 1),
+                "trend":    round(s_rsi, 1),
+            },
+            "reason": f"{anchor} · {trend} · 거래량 {vratio:.1f}배 · RSI {rsi_val:.0f} · MACD {arrow}",
         }
 
+    longs  = [r for r in (_score(t, "long")  for t in long_cands)  if r]
+    shorts = [r for r in (_score(t, "short") for t in short_cands) if r]
+    longs.sort(key=lambda r: r["score"], reverse=True)
+    shorts.sort(key=lambda r: r["score"], reverse=True)
+
+    as_of = close.index[-1]
     return {
-        "long_picks":  [_to_pick(r, "long")  for r in long_candidates[:top_n]],
-        "short_picks": [_to_pick(r, "short") for r in short_candidates[:top_n]],
-        "scanned":     scanned,
+        "long_picks":  longs[:top_n],
+        "short_picks": shorts[:top_n],
+        "scanned":     len(valid),
+        "as_of":       as_of.strftime("%Y-%m-%d") if hasattr(as_of, "strftime") else str(as_of),
     }
 
 
@@ -548,8 +640,17 @@ def pairs_auto_detail(
 ) -> dict:
     """
     ticker_a와 가장 유사한 종목을 close_df(이미 캐시된 가격) 내에서 탐색하고,
-    두 종목의 인덱스화 가격 비교 + 스프레드(%) + 임계치 초과 구간을 반환.
+    두 종목의 실제 가격 비교 + 스프레드(%) + 임계치 초과 구간을 반환.
+
+    스프레드는 표시 구간 첫날에 고정 인덱싱하지 않고, 가격비(A/B)의 60일 롤링
+    평균 대비 괴리율로 계산한다. 첫날 기준으로 고정하면 아주 예전(예: 2년 전)의
+    일회성 괴리가 그 날짜 이후 모든 스프레드 값에 영구히 더해져, 실제로는 두
+    종목이 다시 같은 방향으로 움직이고 있어도 격차가 좁혀지지 않고 계속 벌어지는
+    것처럼 보인다. 롤링 평균은 시간이 지나며 같이 움직이므로 오래된 괴리는
+    자연히 창 밖으로 밀려나 스프레드가 0 근방에서 다시 진동할 수 있다.
     """
+    SPREAD_WINDOW = 60  # 페어 트레이딩 기본 lookback(pairs_trading_signal)과 동일한 관례
+
     pool = [t for t in candidates if t in close_df.columns and t != ticker_a]
     if ticker_a not in close_df.columns or not pool:
         return {"matches": [], "best": None}
@@ -580,24 +681,31 @@ def pairs_auto_detail(
 
     best_ticker = scored[0][0]
 
-    # 상위 top_n 페어 각각의 차트 데이터 계산 (실제 주가 반환, 스프레드는 인덱스화 기반)
+    # 상위 top_n 페어 각각의 차트 데이터 계산 (실제 주가 + 롤링 기준 스프레드)
     all_charts: dict = {}
     all_breaches: dict = {}
 
     for pair_ticker, _, pair_common in scored[:top_n]:
         pa = price_a.loc[pair_common]
         pb = close_df[pair_ticker].loc[pair_common]
-        idx_a = (pa / float(pa.iloc[0]) * 100)
-        idx_b = (pb / float(pb.iloc[0]) * 100)
-        spread_pct = idx_a - idx_b
+        # 이력이 짧은 페어(최소 60일 보장선 근처)도 워밍업 구간에 전체를 다 뺏기지
+        # 않도록, 표시 구간 길이에 맞춰 window 를 줄인다. 통상(2년치, ~500행)엔 60 그대로.
+        window    = max(10, min(SPREAD_WINDOW, len(pair_common) // 3))
+        ratio     = pa / pb
+        ratio_ref = ratio.rolling(window).mean()   # '최근 정상 상태' — 시간에 따라 같이 이동
+        spread_pct = (ratio / ratio_ref - 1.0) * 100
+
+        # 롤링 평균이 아직 다 차지 않은 워밍업 구간(첫 window-1일)은 NaN —
+        # 그 구간은 표시하지 않는다 (그래프에 무의미한 값이나 null 을 보내지 않는다).
+        valid_dates = spread_pct.dropna().index
 
         pair_chart: list[dict] = []
         pair_breaches: list[dict] = []
         prev_outside = False
-        for date in pair_common:
+        for date in valid_dates:
             a_v = float(pa.loc[date])          # 실제 주가
             b_v = float(pb.loc[date])          # 실제 주가
-            s_v = float(spread_pct.loc[date])  # 인덱스화 기반 스프레드(%)
+            s_v = float(spread_pct.loc[date])  # 가격비의 60일 롤링평균 대비 괴리율(%)
             d_str = date.strftime("%Y-%m-%d")
             pair_chart.append({"date": d_str, "a": round(a_v, 2), "b": round(b_v, 2), "spread": round(s_v, 2)})
             curr_outside = abs(s_v) > threshold_pct

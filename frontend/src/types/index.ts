@@ -219,22 +219,29 @@ export interface MarketSituation {
   source: string
 }
 
-export interface BBScanPick {
+/** SMA 1차 필터 + MACD/RSI 스코어링 매매신호 스캔 결과 종목. */
+export interface SignalScanPick {
   ticker: string
-  z: number
-  entry: number
-  target: number
-  upper_band: number
-  lower_band: number
-  pct_b: number
-  move_pct: number
+  price: number
+  /** 통합 점수 0~100 */
+  score: number
+  /** 당일 거래량 / 20일 평균 거래량 */
+  volume_ratio: number
+  /** RSI(14) */
+  rsi: number
+  /** 당일 MACD 히스토그램 */
+  macd_hist: number
+  macd_hist_prev: number
+  /** 항목별 배점 (수급 /40, 모멘텀 /30, 추세 /30) */
+  components: { volume: number; momentum: number; trend: number }
   reason: string
 }
 
-export interface BBScanFullResult {
-  long_picks: BBScanPick[]
-  short_picks: BBScanPick[]
+export interface SignalScanResult {
+  long_picks: SignalScanPick[]
+  short_picks: SignalScanPick[]
   scanned: number
+  as_of?: string | null
 }
 
 export interface TechnicalChartPoint {

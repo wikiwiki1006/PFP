@@ -639,6 +639,42 @@ def ticker_search(q: str = "", limit: int = 5):
     return [{"ticker": t, "name": n} for t, n in merged]
 
 
+@router.get("/ticker-exists")
+def ticker_exists(ticker: str = ""):
+    """티커가 실제 시장에 존재하는지 확인. 로그인 불필요 — 포트폴리오 최적화처럼
+    비로그인에서도 종목을 입력받는 화면이 저장 전에 검증할 수 있어야 한다.
+
+    ① 상장 목록(ticker_universe, DB) 조회 — 몇 ms, 대부분의 US 종목을 커버.
+    ② 목록에 없으면 yfinance 로 최종 확인 — 목록 동기화 지연·ETF 등 예외 대응.
+    결과는 1시간 캐시한다 — 오탈자를 여러 번 시도해도 같은 티커에 yfinance 를
+    반복 호출하지 않는다.
+    """
+    from backend.services.ticker_universe import lookup as universe_lookup
+    from backend.services.market_data import _cached
+
+    sym = ticker.upper().strip()
+    if not sym:
+        return {"ticker": sym, "exists": False, "name": None}
+
+    known = universe_lookup(sym)
+    if known is not None:
+        return {"ticker": sym, "exists": True, "name": known.get("name", "")}
+
+    def _check_yfinance() -> bool:
+        try:
+            import yfinance as yf
+            from backend.db.market_cache import _yf_sem
+            with _yf_sem:
+                hist = yf.Ticker(sym).history(period="5d")
+            return not hist.empty
+        except Exception as e:
+            logger.warning(f"[ticker-exists] {sym} yfinance 확인 실패: {e}")
+            return False
+
+    exists = _cached(f"ticker_exists::{sym}", 3600, _check_yfinance)
+    return {"ticker": sym, "exists": bool(exists), "name": None}
+
+
 @router.get("/ticker-price")
 def get_ticker_price(ticker: str, _auth: dict = Depends(current_user)):
     """티커 현재가 조회 — 거래 입력 폼의 가격 자동 채움용.

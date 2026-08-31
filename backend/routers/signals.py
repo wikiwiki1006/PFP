@@ -25,7 +25,7 @@ from backend.services.trading_signals import (
     momentum_breakout_signal,
     detect_regime_er,
     get_sp500_universe,
-    bollinger_scan_full_universe,
+    sma_macd_rsi_scan,
     compute_macro_spread_levels,
     technical_chart_detail,
     pairs_auto_detail,
@@ -370,14 +370,6 @@ def market_regime(
 # Timing Engine 신규 엔드포인트
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _trim_years(df: pd.DataFrame, years: int = 3) -> pd.DataFrame:
-    """get_close_df(period='5y') 결과를 최근 N년으로 트림 (yfinance는 '3y'를 지원하지 않음)."""
-    if df.empty:
-        return df
-    cutoff = df.index.max() - pd.Timedelta(days=365 * years)
-    return df[df.index >= cutoff]
-
-
 @router.get("/market-situation")
 def market_situation():
     """금리차(10Y-2Y) / 하이일드 스프레드의 과거 백분위 기반 Low/Normal/High 분류."""
@@ -390,28 +382,34 @@ def market_situation():
     return result
 
 
-@router.get("/bb-scan-full")
-def bb_scan_full(top_n: int = Query(default=10, ge=1, le=30)):
+@router.get("/signal-scan")
+def signal_scan(top_n: int = Query(default=10, ge=1, le=30)):
     """
-    S&P500 전체 종목 대상 3년 볼린저 밴드 스캔 — 매수/매도 신호 상위 N개.
-    common_cache에 6시간 TTL로 캐시(스케줄러가 주기적으로 갱신).
-    """
-    cached = get_common("bb_scan_sp500")
-    if cached:
-        long_picks  = cached.get("long_picks", [])[:top_n]
-        short_picks = cached.get("short_picks", [])[:top_n]
-        return {**cached, "long_picks": long_picks, "short_picks": short_picks}
+    S&P500 매매신호 스캔 — SMA 1차 필터 → 통과 종목만 MACD/RSI 스코어링 → 매수/매도 상위 N개.
 
-    universe = get_sp500_universe()
-    close_df = get_close_df(universe, period="5y", ttl=300)
-    close_df = _trim_years(close_df, years=3)
-    valid_cols = [c for c in universe if c in close_df.columns]
-    result = bollinger_scan_full_universe(close_df[valid_cols], top_n=max(top_n, 10))
-    save_common("bb_scan_sp500", result, ttl_seconds=21600)
+    스케줄러가 일별 가격·거래량 수집 직후 계산해 common_cache 에 저장한다.
+    캐시 미스일 때만 DB(market_prices)의 종가·거래량으로 즉석 계산한다 — yfinance 호출 없음.
+    """
+    cached = get_common("signal_scan_sp500")
+    if not cached:
+        from backend.db.market_cache import get_prices_from_db, get_volume_from_db
+
+        universe = get_sp500_universe()
+        close_df = get_prices_from_db(universe, "1y", fill=True)
+        if close_df is None or close_df.empty:
+            raise HTTPException(
+                status_code=503,
+                detail="가격 데이터가 아직 준비되지 않았습니다. 잠시 후 다시 시도하세요.",
+            )
+        volume_df = get_volume_from_db(universe, "1y")
+        valid = [c for c in universe if c in close_df.columns]
+        cached = sma_macd_rsi_scan(close_df[valid], volume_df, top_n=10)
+        save_common("signal_scan_sp500", cached, ttl_seconds=21600)
+
     return {
-        **result,
-        "long_picks":  result["long_picks"][:top_n],
-        "short_picks": result["short_picks"][:top_n],
+        **cached,
+        "long_picks":  cached.get("long_picks", [])[:top_n],
+        "short_picks": cached.get("short_picks", [])[:top_n],
     }
 
 

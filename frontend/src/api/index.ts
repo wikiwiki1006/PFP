@@ -8,7 +8,7 @@ import type {
   MarketRegime, OptimizationResult, FactorAnalysisResult,
   MacroModes, MacroAnalysisResult, AnalystFeedback,
   DailyBriefResult, ReportFile, Industry, EquityReportResult, IndustryReportResult,
-  MarketSituation, BBScanFullResult, TechnicalChartResult, PairsAutoResult,
+  MarketSituation, SignalScanResult, TechnicalChartResult, PairsAutoResult,
   TickerDetail, AIOptimizationResult,
 } from '@/types'
 
@@ -127,6 +127,10 @@ export const getTickerPrice = async (ticker: string): Promise<{
 export const searchTickers = async (q: string): Promise<{ ticker: string; name: string }[]> =>
   (await api.get('/api/portfolio/ticker-search', { params: { q, limit: 5 } })).data
 
+/** 티커가 실제 시장에 존재하는지 확인. 로그인 불필요. */
+export const checkTickerExists = async (ticker: string): Promise<{ ticker: string; exists: boolean; name: string | null }> =>
+  (await api.get('/api/portfolio/ticker-exists', { params: { ticker } })).data
+
 export const autoDetectSectors = async (): Promise<{ updated: { ticker: string; sector: string }[]; count: number }> =>
   (await api.post('/api/portfolio/auto-sector')).data
 
@@ -179,8 +183,8 @@ export const getMarketRegime = async (ticker = '^GSPC', years = 1): Promise<Mark
 export const getMarketSituation = async (): Promise<MarketSituation> =>
   (await api.get('/api/signals/market-situation')).data
 
-export const getBBScanFull = async (topN = 10): Promise<BBScanFullResult> =>
-  (await api.get('/api/signals/bb-scan-full', { params: { top_n: topN } })).data
+export const getSignalScan = async (topN = 10): Promise<SignalScanResult> =>
+  (await api.get('/api/signals/signal-scan', { params: { top_n: topN } })).data
 
 export const getTechnicalChart = async (
   ticker: string,

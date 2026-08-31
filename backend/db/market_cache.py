@@ -22,6 +22,8 @@ import pandas as pd
 
 from backend.db import get_conn, is_available
 
+logger = logging.getLogger(__name__)
+
 # yfinance 동시 다운로드 허용 수.
 #
 # 예전에는 Lock 이었다. yfinance 가 내부적으로 SQLite(타임존·쿠키 캐시)를 쓰고
@@ -35,12 +37,51 @@ from backend.db import get_conn, is_available
 _YF_CONCURRENCY = max(1, int(os.getenv("YF_CONCURRENCY", "4")))
 _yf_sem = threading.BoundedSemaphore(_YF_CONCURRENCY)
 
+
+def _yf_cache_db_has_tables(path: str) -> bool:
+    """sqlite 파일에 테이블이 하나라도 있으면 True. 열 수 없어도 손상으로 간주해 False."""
+    import sqlite3
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2)
+        try:
+            cur = conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'")
+            return cur.fetchone()[0] > 0
+        finally:
+            conn.close()
+    except Exception:
+        return False
+
+
+def _repair_yf_cache_dir(cache_dir: str) -> None:
+    """yfinance 타임존/쿠키/ISIN 캐시(sqlite, peewee) 손상 복구.
+
+    비정상 종료(강제 kill 등)로 WAL 체크포인트가 유실되면 .db 파일은 남아 있는데
+    테이블이 하나도 없는 상태가 될 수 있다. yfinance 는 이를 스스로 감지하지 않고
+    'no such table: _tz_kv' 를 그대로 던진다 — 그리고 파일이 이미 존재하니 다시
+    만들지도 않아, 한 번 이 상태가 되면 재시작해도 영구히 재발한다(실제로 겪은 버그:
+    백엔드 프로세스를 강제 종료했더니 이후 모든 종목 검색이 이 오류로 깨졌다).
+    시작 시 sqlite3 표준 라이브러리만으로 가볍게 확인해, 손상됐으면 지워서
+    yfinance 가 다음 접근에서 깨끗하게 새로 만들게 한다.
+    """
+    for name in ("tkr-tz.db", "cookies.db", "isin-tkr.db"):
+        path = os.path.join(cache_dir, name)
+        if not os.path.isfile(path) or _yf_cache_db_has_tables(path):
+            continue
+        for suffix in ("", "-shm", "-wal"):
+            try:
+                os.remove(path + suffix)
+            except OSError:
+                pass
+        logger.warning(f"yfinance 캐시 손상 감지 → 재생성: {path}")
+
+
 # 타임존 캐시를 쓰기 가능한 곳으로 고정한다. 지정하지 않으면 홈 디렉터리에
 # 만들려 하는데, 컨테이너에서는 그게 실패하거나 인스턴스마다 달라진다.
 _TZ_CACHE_DIR = os.getenv("YF_TZ_CACHE_DIR", "/tmp/py-yfinance")
 try:
     import yfinance as _yf_mod
     os.makedirs(_TZ_CACHE_DIR, exist_ok=True)
+    _repair_yf_cache_dir(_TZ_CACHE_DIR)
     _yf_mod.set_tz_cache_location(_TZ_CACHE_DIR)
 except Exception:  # 캐시를 못 쓰면 매번 조회할 뿐 동작에는 지장이 없다
     pass
@@ -85,7 +126,51 @@ def _yf_download_batched(
             time.sleep(inter_batch_sleep)
     return pd.concat(frames, axis=1) if frames else pd.DataFrame()
 
-logger = logging.getLogger(__name__)
+
+def _yf_download_ohlcv_batched(
+    tickers: list[str],
+    period: str,
+    batch_size: int = 50,
+    inter_batch_sleep: float = 0.0,
+    **kwargs,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """`_yf_download_batched` 와 동일한 배치/세마포어 구조.
+
+    다른 점은 같은 응답에서 Close 와 Volume 을 함께 꺼내 `(close_df, volume_df)` 로
+    반환한다는 것뿐이다. 트레이딩 신호 스캔이 거래량을 필요로 하는데, 종가 수집과
+    별도로 한 번 더 내려받으면 yfinance 호출이 두 배가 되므로 한 응답에서 같이 처리한다.
+    """
+    import yfinance as yf
+    close_frames: list[pd.DataFrame] = []
+    vol_frames:   list[pd.DataFrame] = []
+    for i in range(0, len(tickers), batch_size):
+        batch = tickers[i : i + batch_size]
+        try:
+            with _yf_sem:
+                data = yf.download(
+                    batch, period=period, progress=False,
+                    auto_adjust=True, threads=False, **kwargs
+                )
+            if data.empty:
+                continue
+            if isinstance(data.columns, pd.MultiIndex):
+                lvl0 = data.columns.get_level_values(0)
+                if "Close"  in lvl0: close_frames.append(data["Close"])
+                if "Volume" in lvl0: vol_frames.append(data["Volume"])
+            else:
+                # 단일 티커 응답 — 컬럼이 평면
+                if "Close" in data.columns:
+                    close_frames.append(data[["Close"]].rename(columns={"Close": batch[0]}))
+                if "Volume" in data.columns:
+                    vol_frames.append(data[["Volume"]].rename(columns={"Volume": batch[0]}))
+        except Exception as e:
+            logger.warning(f"OHLCV 배치 다운로드 실패 (sample: {batch[:3]}): {e}")
+        if inter_batch_sleep > 0 and i + batch_size < len(tickers):
+            time.sleep(inter_batch_sleep)
+    close_df = pd.concat(close_frames, axis=1) if close_frames else pd.DataFrame()
+    vol_df   = pd.concat(vol_frames,   axis=1) if vol_frames   else pd.DataFrame()
+    return close_df, vol_df
+
 
 _PERIOD_DAYS: dict[str, int] = {
     "1d": 2, "5d": 10, "1mo": 40, "3mo": 100,
@@ -145,7 +230,44 @@ def get_prices_from_db(
         return None
 
 
-def save_prices_to_db(df: pd.DataFrame):
+def get_volume_from_db(
+    tickers: list[str], period: str = "1y"
+) -> Optional[pd.DataFrame]:
+    """DB → DatetimeIndex × ticker 거래량 DataFrame. volume 이 있는 행만.
+
+    ffill 하지 않는다 — 거래량은 0/결측의 의미가 달라 이월하면 왜곡된다.
+    거래량이 아직 적재되지 않은 티커는 컬럼 자체가 빠진다.
+    """
+    if not is_available() or not tickers:
+        return None
+    days = period_to_days(period)
+    since = date.today() - timedelta(days=days + 30)
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT ticker, price_date, volume
+                       FROM market_prices
+                       WHERE ticker = ANY(%s) AND price_date >= %s AND volume IS NOT NULL
+                       ORDER BY price_date ASC""",
+                    (tickers, since),
+                )
+                rows = cur.fetchall()
+        if not rows:
+            return None
+        df = pd.DataFrame(rows, columns=["ticker", "date", "volume"])
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.drop_duplicates(subset=["ticker", "date"], keep="last")
+        pivot = df.pivot(index="date", columns="ticker", values="volume")
+        pivot.index.name = None
+        pivot.columns.name = None
+        return pivot
+    except Exception as e:
+        logger.warning(f"DB get_volume_from_db 실패: {e}")
+        return None
+
+
+def save_prices_to_db(df: pd.DataFrame, volume_df: Optional[pd.DataFrame] = None):
     """close_df (DatetimeIndex × tickers) → market_prices upsert.
 
     캘린더 가드: 미국 증시 캘린더를 따르는 티커에 대해
@@ -154,6 +276,11 @@ def save_prices_to_db(df: pd.DataFrame):
     은 저장하지 않는다. 이 함수가 market_prices 의 **유일한 SQL 기록 지점**이므로,
     어떤 호출자가 ffill 된 프레임을 넘기더라도 위조 종가가 영구 저장되지 않는다.
     (암호화폐·환율·선물·해외 종목은 자기 캘린더로 실제 거래되므로 그대로 저장한다.)
+
+    volume_df 를 함께 주면 같은 (ticker, price_date) 행에 거래량을 붙인다. 종가와
+    동일한 캘린더 가드를 통과한 행만 저장된다. 종가만 넘어온 호출은 기존 거래량을
+    지우지 않는다 (COALESCE) — 그래서 거래량 없는 경로(_yf_download_batched)가
+    같은 행을 덮어써도 손실이 없다.
     """
     if not is_available() or df is None or df.empty:
         return
@@ -165,6 +292,18 @@ def save_prices_to_db(df: pd.DataFrame):
 
         us_cal   = {t: uses_us_session_calendar(str(t)) for t in df.columns}
         last_ses = last_completed_session()
+
+        def _vol_at(ticker, dt) -> "float | None":
+            if volume_df is None or ticker not in volume_df.columns:
+                return None
+            try:
+                v = volume_df.at[dt, ticker]
+            except (KeyError, TypeError):
+                return None
+            if v is None or pd.isna(v):
+                return None
+            fv = float(v)
+            return fv if fv >= 0 else None
 
         rows = []
         skipped = 0
@@ -180,7 +319,7 @@ def save_prices_to_db(df: pd.DataFrame):
                     if not day_is_session or d > last_ses:
                         skipped += 1
                         continue
-                rows.append((str(ticker), d, float(val)))
+                rows.append((str(ticker), d, float(val), _vol_at(ticker, dt)))
         if skipped:
             logger.debug(f"market_prices 캘린더 가드로 {skipped}개 셀 저장 스킵")
         if not rows:
@@ -192,10 +331,12 @@ def save_prices_to_db(df: pd.DataFrame):
                 for i in range(0, len(rows), batch):
                     execute_values(
                         cur,
-                        """INSERT INTO market_prices(ticker, price_date, close_price)
+                        """INSERT INTO market_prices(ticker, price_date, close_price, volume)
                            VALUES %s
                            ON CONFLICT(ticker, price_date) DO UPDATE
-                           SET close_price=EXCLUDED.close_price, updated_at=NOW()""",
+                           SET close_price=EXCLUDED.close_price,
+                               volume=COALESCE(EXCLUDED.volume, market_prices.volume),
+                               updated_at=NOW()""",
                         rows[i:i + batch],
                     )
         logger.debug(f"market_prices 저장: {len(rows)}행")
@@ -252,6 +393,50 @@ def get_stale_tickers(tickers: list[str], max_age_hours: int = _STALE_HOURS) -> 
         return [t for t in tickers if t not in fresh]
     except Exception as e:
         logger.warning(f"DB get_stale_tickers 실패, 전체 stale 처리: {e}")
+        return list(tickers)
+
+
+def get_volume_stale_tickers(
+    tickers: list[str], min_rows: int = 150, lookback_days: int = 220
+) -> list[str]:
+    """거래량 이력이 부족한 티커 목록.
+
+    - 최근 lookback_days 안의 non-null volume 행이 min_rows 미만  → stale
+    - 최신 volume 날짜가 마지막 확정 세션보다 뒤처짐               → stale
+    최초 배포 직후엔 전 종목이 여기 걸려 한 번만 백필된다. 이후엔 종가가 매일
+    stale 이라 같은 다운로드에 거래량이 따라오므로 자연히 비게 된다.
+    """
+    if not is_available() or not tickers:
+        return list(tickers)
+    since = date.today() - timedelta(days=lookback_days)
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT ticker,
+                              COUNT(volume) AS vcount,
+                              MAX(price_date) FILTER (WHERE volume IS NOT NULL) AS last_vol
+                       FROM market_prices
+                       WHERE ticker = ANY(%s) AND price_date >= %s
+                       GROUP BY ticker""",
+                    (tickers, since),
+                )
+                rows = cur.fetchall()
+        from backend.services.market_calendar import last_completed_session
+        expected = last_completed_session()
+        have: dict[str, tuple] = {r[0]: (r[1], r[2]) for r in rows}
+
+        stale: list[str] = []
+        for t in tickers:
+            rec = have.get(t)
+            if rec is None:
+                stale.append(t); continue
+            vcount, last_vol = rec
+            if (vcount or 0) < min_rows or last_vol is None or last_vol < expected:
+                stale.append(t)
+        return stale
+    except Exception as e:
+        logger.warning(f"DB get_volume_stale_tickers 실패, 전체 stale 처리: {e}")
         return list(tickers)
 
 

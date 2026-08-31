@@ -1,19 +1,32 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Search, ChevronLeft, ChevronRight } from 'lucide-react'
-import { getBBScanFull } from '@/api'
+import { getSignalScan } from '@/api'
 import BollingerChart from './BollingerChart'
 import { COLOR_UP, COLOR_DOWN } from './colors'
-import type { BBScanPick, HoldingsMap } from '@/types'
+import type { SignalScanPick, HoldingsMap } from '@/types'
 
 interface TradeSignalsPanelProps {
   holdings?: HoldingsMap
 }
 
+function ScoreBar({ label, value, max, color }: { label: string; value: number; max: number; color: string }) {
+  const pct = Math.max(0, Math.min(100, (value / max) * 100))
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="text-[9px] text-[#64748b] w-8 shrink-0">{label}</span>
+      <div className="flex-1 h-1 rounded bg-[#1e2d40] overflow-hidden">
+        <div className="h-full rounded" style={{ width: `${pct}%`, background: color }} />
+      </div>
+    </div>
+  )
+}
+
 function PickRow({
   p, kind, selected, onClick,
-}: { p: BBScanPick; kind: 'long' | 'short'; selected: boolean; onClick: () => void }) {
+}: { p: SignalScanPick; kind: 'long' | 'short'; selected: boolean; onClick: () => void }) {
   const color = kind === 'long' ? COLOR_UP : COLOR_DOWN
+  const macdUp = p.macd_hist >= p.macd_hist_prev
   return (
     <button
       onClick={onClick}
@@ -21,11 +34,20 @@ function PickRow({
     >
       <div className="flex justify-between items-center">
         <span className="font-mono font-bold text-sm text-[#e2e8f0]">{p.ticker}</span>
-        <span className="text-[12px] font-mono font-bold" style={{ color }}>
-          {p.move_pct >= 0 ? '+' : ''}{p.move_pct.toFixed(1)}%
+        <span className="font-mono font-bold tabular-nums" style={{ color }}>
+          <span className="text-[15px]">{p.score}</span><span className="text-[10px] text-[#64748b]">/100</span>
         </span>
       </div>
-      <div className="text-[10px] text-[#64748b] mt-0.5">Z {p.z.toFixed(2)} · ${p.entry} → ${p.target}</div>
+      <div className="text-[10px] text-[#64748b] mt-0.5 flex items-center gap-2">
+        <span>RSI {p.rsi.toFixed(0)}</span>
+        <span>Vol×{p.volume_ratio.toFixed(1)}</span>
+        <span style={{ color: macdUp ? COLOR_UP : COLOR_DOWN }}>MACD {macdUp ? '▲' : '▼'}</span>
+      </div>
+      <div className="mt-1.5 space-y-1">
+        <ScoreBar label="수급"   value={p.components.volume}   max={40} color={color} />
+        <ScoreBar label="모멘텀" value={p.components.momentum} max={30} color={color} />
+        <ScoreBar label="추세"   value={p.components.trend}    max={30} color={color} />
+      </div>
     </button>
   )
 }
@@ -53,8 +75,8 @@ export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelPr
   const holdTickers = Object.keys(holdings).filter(t => t !== 'CASH')
 
   const scanQ = useQuery({
-    queryKey: ['timing-bb-scan-full'],
-    queryFn:  () => getBBScanFull(10),
+    queryKey: ['timing-signal-scan'],
+    queryFn:  () => getSignalScan(10),
     staleTime: 1800_000,
   })
 
@@ -121,6 +143,9 @@ export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelPr
                   {scanQ.data.long_picks.map(p => (
                     <PickRow key={p.ticker} p={p} kind="long" selected={selected === p.ticker} onClick={() => setSelected(p.ticker)} />
                   ))}
+                  {scanQ.data.long_picks.length === 0 && (
+                    <div className="text-[11px] text-[#64748b]">1차 필터를 통과한 매수 후보가 없습니다.</div>
+                  )}
                 </div>
               </div>
               <div>
@@ -131,10 +156,14 @@ export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelPr
                   {scanQ.data.short_picks.map(p => (
                     <PickRow key={p.ticker} p={p} kind="short" selected={selected === p.ticker} onClick={() => setSelected(p.ticker)} />
                   ))}
+                  {scanQ.data.short_picks.length === 0 && (
+                    <div className="text-[11px] text-[#64748b]">1차 필터를 통과한 매도 후보가 없습니다.</div>
+                  )}
                 </div>
               </div>
               <div className="text-[10px] text-[#374151] pt-1">
-                S&P500 {scanQ.data.scanned}개 종목 · 볼린저 밴드 스캔
+                S&P500 {scanQ.data.scanned}개 종목 · SMA 1차 필터 + MACD/RSI 스코어링
+                {scanQ.data.as_of ? ` · ${scanQ.data.as_of} 기준` : ''}
               </div>
             </>
           )}

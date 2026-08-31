@@ -10,7 +10,7 @@ interface TimingEngineProps {
 
 const TABS = [
   { label: 'Market Regime', sub: '종목별 시장 상황' },
-  { label: 'Signal Scan', sub: '매매신호 · 볼린저 밴드' },
+  { label: 'Signal Scan', sub: '매매신호'},
   { label: 'Pairs Trading', sub: '페어 트레이딩' },
 ]
 

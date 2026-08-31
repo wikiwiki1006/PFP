@@ -154,7 +154,12 @@ function Pill({ label, value, color }: { label: string; value: string; color?: s
   return (
     <div className="metric-pill text-center px-6 py-3 border-r border-[#1e2d40] last:border-r-0 flex-shrink-0">
       <div className="metric-pill-label text-[14px] text-[#94a3b8] font-bold tracking-widest uppercase">{label}</div>
-      <div className="metric-pill-value text-[22px] font-mono font-bold mt-0.5 tabular-nums" style={{ color: color || '#e2e8f0' }}>{value}</div>
+      {/* 색 미지정(중립) 값은 인라인 style 대신 클래스로 — 라이트모드에서 light-theme.css 가
+          text-[#e2e8f0] 를 검정으로 재정의해야 흰 배경에서 읽힌다. 인라인 style 은 그 재정의가 닿지 않는다. */}
+      <div
+        className={`metric-pill-value text-[22px] font-mono font-bold mt-0.5 tabular-nums${color ? '' : ' text-[#e2e8f0]'}`}
+        style={color ? { color } : undefined}
+      >{value}</div>
     </div>
   )
 }
@@ -2283,7 +2288,10 @@ export default function AlphaTerminal() {
                   ].map(item => (
                     <div key={item.label} className="bg-[#060b14] border border-[#1e2d40] rounded p-3">
                       <div className="text-[11px] text-[#94a3b8] font-bold tracking-wider uppercase mb-1">{item.label}</div>
-                      <div className="text-2xl font-mono font-bold" style={{ color: (item as any).color || '#e2e8f0' }}>{item.value}</div>
+                      <div
+                        className={`text-2xl font-mono font-bold${(item as any).color ? '' : ' text-[#e2e8f0]'}`}
+                        style={(item as any).color ? { color: (item as any).color } : undefined}
+                      >{item.value}</div>
                     </div>
                   ))}
                 </div>

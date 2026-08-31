@@ -7,7 +7,7 @@ import {
 import { Brain, Plus, X, Download, ChevronRight, TrendingUp, TrendingDown, Minus, Square, Info, Lock } from 'lucide-react'
 import { useLoginPrompt } from '@/components/auth/LockedPreview'
 import LoadingSpinner from '@/components/LoadingSpinner'
-import { startAIOptimizeJob, getAIOptimizeJob, cancelAIOptimizeJob, getHoldings } from '@/api'
+import { startAIOptimizeJob, getAIOptimizeJob, cancelAIOptimizeJob, getHoldings, checkTickerExists } from '@/api'
 import type { AIOptimizationResult, OptimizationMode } from '@/types'
 import { cn } from '@/lib/utils'
 
@@ -784,15 +784,41 @@ export default function Optimizer() {
   }
 
   // ── Ticker helpers ────────────────────────────────────────────────────────────
-  const addTicker = (raw: string) => {
+  const [tickerError,    setTickerError]    = useState<string | null>(null)
+  const [checkingTicker, setCheckingTicker] = useState(false)
+  // 검증 도중 다른 티커가 추가/삭제되며 응답이 뒤늦게 와도 그 결과가 최신 요청인지
+  // 확인하기 위한 카운터 — 없으면 빠르게 여러 개 입력할 때 오래된 응답이 화면을
+  // 덮어써 엉뚱한 에러가 표시될 수 있다.
+  const tickerCheckSeq = useRef(0)
+
+  const addTicker = async (raw: string) => {
     const t = raw.trim().toUpperCase().replace(/[^A-Z0-9.-]/g, '')
-    if (!t || tickers.includes(t)) return
-    setTickers(prev => [...prev, t])
     setTickerInput('')
+    if (!t || tickers.includes(t)) return
+
+    const seq = ++tickerCheckSeq.current
+    setTickerError(null)
+    setCheckingTicker(true)
+    try {
+      const res = await checkTickerExists(t)
+      if (seq !== tickerCheckSeq.current) return   // 그 사이 더 최신 요청이 나감 — 무시
+      if (res.exists) {
+        setTickers(prev => (prev.includes(t) ? prev : [...prev, t]))
+      } else {
+        setTickerError(`${t}: 시장에 존재하지 않는 티커입니다.`)
+      }
+    } catch {
+      // 검증 자체가 실패(네트워크 등)하면 막지 않는다 — 최적화 실행 단계에서 다시 걸러진다.
+      if (seq === tickerCheckSeq.current) {
+        setTickers(prev => (prev.includes(t) ? prev : [...prev, t]))
+      }
+    } finally {
+      if (seq === tickerCheckSeq.current) setCheckingTicker(false)
+    }
   }
   const removeTicker = (t: string) => setTickers(prev => prev.filter(x => x !== t))
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter' || e.key === ' ' || e.key === ',') { e.preventDefault(); addTicker(tickerInput) }
+    if (e.key === 'Enter' || e.key === ' ' || e.key === ',') { e.preventDefault(); void addTicker(tickerInput) }
     if (e.key === 'Backspace' && !tickerInput && tickers.length) setTickers(prev => prev.slice(0, -1))
   }
   // 이 화면은 로그인 없이도 쓸 수 있다 — 종목을 직접 입력하면 공개 시세만으로
@@ -866,18 +892,24 @@ export default function Optimizer() {
               value={tickerInput}
               onChange={e => setTickerInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              onBlur={() => tickerInput && addTicker(tickerInput)}
+              onBlur={() => { if (tickerInput) void addTicker(tickerInput) }}
               disabled={isRunning}
               placeholder={tickers.length ? '' : 'AAPL MSFT NVDA... (Enter로 추가, 비우면 보유 종목 자동 사용)'}
               className="flex-1 bg-transparent text-xs text-[#e2e8f0] outline-none placeholder-[#374151] min-w-[180px] disabled:opacity-50"
             />
-            {tickerInput && (
-              <button onClick={() => addTicker(tickerInput)} className="text-[#8b5cf6] hover:text-[#a78bfa]">
-                <Plus className="w-3.5 h-3.5" />
-              </button>
-            )}
+            {checkingTicker
+              ? <LoadingSpinner size="sm" />
+              : tickerInput && (
+                <button onClick={() => void addTicker(tickerInput)} className="text-[#8b5cf6] hover:text-[#a78bfa]">
+                  <Plus className="w-3.5 h-3.5" />
+                </button>
+              )}
           </div>
-          <p className="text-[10px] text-[#374151] mt-1">Enter로 추가. 미기입 시 보유 종목 자동 사용.</p>
+          {tickerError ? (
+            <p className="text-[10px] text-[#ef4444] mt-1">{tickerError}</p>
+          ) : (
+            <p className="text-[10px] text-[#374151] mt-1">Enter로 추가. 미기입 시 보유 종목 자동 사용.</p>
+          )}
         </div>
 
         {/* Options — 데이터 기간은 투자기간에 따라 백엔드가 자동 결정하므로 입력받지 않는다 */}
