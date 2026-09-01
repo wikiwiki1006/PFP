@@ -7,7 +7,7 @@ import {
 import ReactMarkdown from 'react-markdown'
 import {
   MessageSquare, RefreshCw,
-  Plus, Trash2, Edit3, Check, X, Play, FileText, ChevronRight,
+  Plus, Trash2, Edit3, Check, X, Play, FileText, ChevronRight, ChevronLeft,
   Download, History, Search, Briefcase,
 } from 'lucide-react'
 import {
@@ -28,6 +28,7 @@ import { useTour } from '@/lib/TourContext'
 import ConfirmDialog from '@/components/auth/ConfirmDialog'
 import { useDemoQuery } from '@/lib/useDemoQuery'
 import { useAuth } from '@/lib/AuthContext'
+import { useIsMobile } from '@/lib/useIsMobile'
 import {
   DEMO_METRICS, DEMO_EQUITY_CURVE, DEMO_HOLDINGS_DETAIL, DEMO_HOLDINGS_RAW,
   DEMO_SECTOR_WEIGHTS, DEMO_ANALYST_FEEDBACK, DEMO_NEWS, DEMO_EARNINGS,
@@ -237,6 +238,9 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
   // 잘라 버리면 "최초 입금일부터 보이지 않는" 문제가 그대로 남는다.
   const [range, setRange] = useState<'1M' | '3M' | '1Y' | 'ALL'>('ALL')
   const [bm,    setBm]    = useState<BenchmarkMode>('sp500')
+  // 모바일에서는 드래그 확대(스와이프 줌)를 끈다 — 스크롤하려고 짚은 손가락이
+  // 그대로 확대 영역 선택으로 잡혀 페이지 스크롤을 막았다.
+  const isMobile = useIsMobile()
 
   // ── 줌 상태 ─────────────────────────────────────────────────────────────
   const [dragBounds, setDragBounds] = useState<{
@@ -395,7 +399,9 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
 
   // ── 드래그 줌 핸들러 ────────────────────────────────────────────────────────
   // 컨테이너 mouseDown: 차트 전체 영역에서 드래그 시작 가능 (넓은 드래그 영역)
+  // 모바일에서는 시작하지 않는다 — 스크롤과 스와이프 확대가 같은 제스처라 겹친다.
   const handleContainerMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (isMobile) return
     const rect = chartContainerRef.current?.getBoundingClientRect()
     if (!rect) return
     const px = e.clientX - rect.left
@@ -408,7 +414,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
   }
   const handleMouseDown = (e: any) => {
     // Recharts onMouseDown: dragging already started by container, just update if activeLabel present
-    if (!e?.activeLabel || dragging.current) return
+    if (isMobile || !e?.activeLabel || dragging.current) return
     dragging.current = true
     const sy = chartMouseYRef.current
     setCrosshairX(null)
@@ -655,10 +661,16 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
       <div style={{ margin: '0 12px 8px', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 4 }}>
       <div
         ref={chartContainerRef}
-        style={{ width: '100%', height: 300, position: 'relative' }}
+        // 세로 스크롤은 브라우저에 맡긴다 — 모바일에서 확대 드래그를 꺼도
+        // (위 handleContainerMouseDown 참고) 제스처 인식 자체는 브라우저가
+        // 더 먼저 하므로 이 힌트가 없으면 여전히 스크롤이 걸릴 수 있다.
+        style={{ width: '100%', height: 300, position: 'relative', touchAction: 'pan-y' }}
         onMouseMove={handleNativeMouseMove}
         onMouseLeave={handleNativeMouseLeave}
         onMouseDown={handleContainerMouseDown}
+        // 터치는 mouseleave 가 안 와서 손을 떼도 십자선/툴팁이 안 사라진다.
+        // 손 뗄 때(pointerup)는 무조건 지운다 — 마우스는 이미 mouseleave 로 되므로 겹쳐도 무해하다.
+        onPointerUp={e => { if (e.pointerType === 'touch') handleNativeMouseLeave() }}
       >
         {/* 가로 십자선: HTML overlay로 정확한 마우스 Y 위치에 표시 */}
         {crosshairX && chartMouseY != null && !dragBounds && (
@@ -757,17 +769,20 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
   const [view, setView] = useState<'holdings' | 'history'>('holdings')
   // 등록 마법사 — 'new' 는 기존 포트폴리오를 지우고 새로 만드는 경우다.
   const [wizard, setWizard] = useState<null | 'first' | 'new'>(null)
-  // 투어 마지막 단계에서 '등록 시작'을 누르면 곧바로 등록 마법사를 연다.
-  const { wantsSetup, clearWantsSetup } = useTour()
-  useEffect(() => {
-    if (wantsSetup) { setWizard('new'); clearWantsSetup() }
-  }, [wantsSetup, clearWantsSetup])
 
   // '아직 아무것도 없음' 판정. 종목이 없고 현금도 0일 때만 최초 등록으로 본다 —
   // 현금만 넣어 둔 사용자에게 "등록하기"를 띄우면 기존 입력을 지우라는 뜻이 된다.
   const nonCash = Object.keys(rawHoldings || {}).filter(t => t !== 'CASH')
   const cashQty = Number(rawHoldings?.CASH?.q ?? 0)
   const isEmptyPortfolio = isAuthed && nonCash.length === 0 && cashQty === 0
+
+  // 투어 마지막 단계에서 '등록 시작'을 누르면 곧바로 등록 마법사를 연다.
+  // 기존 포트폴리오가 없으면(가입 직후가 대부분) 'first' 로 열어 삭제 경고를
+  // 건너뛴다 — 지울 것이 없는데 "기존 포트폴리오가 삭제됩니다"를 보여주면 안 된다.
+  const { wantsSetup, clearWantsSetup } = useTour()
+  useEffect(() => {
+    if (wantsSetup) { setWizard(isEmptyPortfolio ? 'first' : 'new'); clearWantsSetup() }
+  }, [wantsSetup, clearWantsSetup, isEmptyPortfolio])
 
   // 알림·확인 팝업. 브라우저 기본 alert/confirm 은 앱과 생김새가 따로 놀고
   // 라이트 모드에서 특히 이질적이라 쓰지 않는다.
@@ -807,6 +822,8 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
   const [sellVals,         setSellVals]         = useState({ q: 0, price: 0, date: '' })
   const sellValsRef = useRef({ q: 0, price: 0, date: '' })
   const [sellPriceLoading, setSellPriceLoading] = useState(false)
+  // 현재가는 참고용 표시 전용 — sellVals.price(실제 매도가)에는 자동으로 채우지 않는다.
+  const [sellCurrentPrice, setSellCurrentPrice] = useState<number | null>(null)
   // sellValsRef: stale closure 방지 — 입력값 최신 상태 추적
   useEffect(() => { sellValsRef.current = sellVals }, [sellVals])
 
@@ -871,7 +888,11 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
   const [sugIdx,      setSugIdx]      = useState(-1)
   const [tickerError, setTickerError] = useState('')
   const [priceLoading,setPriceLoading]= useState(false)
+  // 현재가는 참고용 표시 전용 — form.price(평단가/거래가)에는 자동으로 채우지 않는다.
+  const [currentPrice, setCurrentPrice] = useState<number | null>(null)
   const tickerInputRef = useRef<HTMLInputElement>(null)
+  // 모바일 전용 — "추가 매수/매도" 팝업 표시 여부
+  const [showTradeModal, setShowTradeModal] = useState(false)
 
   // ── History edit state ─────────────────────────────────────────────────
   const [editTradeId,   setEditTradeId]   = useState<number | null>(null)
@@ -903,7 +924,9 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
     onSuccess: (_data, vars) => {
       _invalidateAll()
       setForm(f => ({ ...f, ticker: '', q: 0, price: 0, date: new Date().toISOString().slice(0, 10) }))
+      setCurrentPrice(null)
       setTickerError('')
+      setShowTradeModal(false)
       // BUY 후 섹터 자동 분류 (백그라운드 스레드 완료 대기 후 재조회)
       if (vars.type === 'BUY') {
         setTimeout(() => {
@@ -939,15 +962,18 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
     onSuccess: _invalidateAll,
     onError: (e: any) => setCashAlert(`거래 삭제 실패: ${e?.response?.data?.detail || e.message}`),
   })
-  // SELL 인라인 폼 열기 — 현재 보유수량 + 현재가 자동 설정
+  // SELL 인라인 폼 열기 — 현재 보유수량은 채우지만, 매도가는 사용자가 직접 입력한다.
+  // 현재가는 참고용으로만 별도 표시한다(오늘 시세를 그대로 매도가로 등록해버리는
+  // 걸 막기 위해 — 실제 체결가는 오늘 시세와 다를 수 있다).
   const openSell = async (h: any) => {
     setSellTicker(h.ticker)
-    setSellVals({ q: h.qty ?? 0, price: h.current_price ?? 0, date: new Date().toISOString().slice(0, 10) })
+    setSellVals({ q: h.qty ?? 0, price: 0, date: new Date().toISOString().slice(0, 10) })
+    setSellCurrentPrice(h.current_price ?? null)
     if (!h.current_price) {
       setSellPriceLoading(true)
       try {
         const r = await getTickerPrice(h.ticker)
-        setSellVals(v => ({ ...v, price: r.price }))
+        setSellCurrentPrice(r.price)
       } catch {} finally { setSellPriceLoading(false) }
     }
   }
@@ -961,6 +987,7 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
     setForm(f => ({ ...f, ticker: upper }))
     setTickerError('')
     setSugIdx(-1)
+    setCurrentPrice(null)   // 티커가 바뀌면 이전 현재가 표시는 더 이상 유효하지 않다
     if (upper.length === 0) { setSuggestions([]); setShowSug(false); return }
     if (debounceRef.current) clearTimeout(debounceRef.current)
     debounceRef.current = setTimeout(async () => {
@@ -975,19 +1002,23 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
   const selectSuggestion = async (ticker: string) => {
     setForm(f => ({ ...f, ticker }))
     setSuggestions([]); setShowSug(false); setSugIdx(-1); setTickerError('')
-    await fetchAndSetPrice(ticker)
+    await fetchCurrentPrice(ticker)
   }
 
-  const fetchAndSetPrice = async (ticker: string) => {
+  /** 현재가를 조회해 참고용으로만 표시한다 — form.price(직접 입력하는 거래 단가)는
+      건드리지 않는다. 자동으로 채우면 사용자가 알아채지 못하고 오늘 시세를
+      그대로 평단가로 등록해버릴 수 있다. */
+  const fetchCurrentPrice = async (ticker: string) => {
     if (!ticker) return
     setPriceLoading(true)
     try {
       const result = await getTickerPrice(ticker)
-      setForm(f => ({ ...f, price: result.price }))
+      setCurrentPrice(result.price)
       setTickerError('')
     } catch {
+      setCurrentPrice(null)
       setTickerError(`"${ticker}"은(는) 유효하지 않은 티커입니다. 다시 시도해주세요.`)
-      setForm(f => ({ ...f, ticker: '', price: 0 }))
+      setForm(f => ({ ...f, ticker: '' }))
     } finally {
       setPriceLoading(false)
     }
@@ -1013,7 +1044,8 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
     setTimeout(() => {
       setShowSug(false); setSugIdx(-1)
       const t = form.ticker.trim()
-      if (t && !form.price) fetchAndSetPrice(t)
+      // 가격을 이미 입력했어도 참고용 현재가는 갱신한다(평단가엔 영향 없음).
+      if (t && currentPrice == null) fetchCurrentPrice(t)
     }, 180)
   }
 
@@ -1025,6 +1057,102 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
 
   // History 최신순
   const trades = (tradesQ.data || []).slice().reverse()
+
+  // 매수/매도 입력 필드 — 데스크탑 하단 바와 모바일 팝업이 이 하나를 공유한다.
+  // (똑같은 마크업을 두 곳에 따로 두면 나중에 한쪽만 고쳐 어긋나기 쉽다.)
+  const renderTradeFields = (autoFocusTicker = false) => (
+    <>
+      {tickerError && (
+        <div className="text-[11px] text-[#ef4444] flex items-center gap-1">
+          <X className="w-3 h-3" />{tickerError}
+        </div>
+      )}
+      <div className="flex items-center gap-2 flex-wrap">
+        {/* Ticker — 전체 미국 티커 검색 */}
+        <div className="relative">
+          <input
+            ref={tickerInputRef}
+            autoFocus={autoFocusTicker}
+            value={form.ticker}
+            onChange={e => handleTickerChange(e.target.value)}
+            onBlur={handleTickerBlur}
+            onKeyDown={handleTickerKeyDown}
+            placeholder="티커"
+            autoComplete="off"
+            className="w-32 bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#e2e8f0] rounded px-2 py-1.5 placeholder-[#334155] focus:outline-none focus:border-[#3b82f6]"
+          />
+          {showSug && suggestions.length > 0 && (
+            <div className="absolute bottom-full mb-1 left-0 z-50 bg-[#0b1220] border border-[#1e2d40] rounded shadow-xl min-w-[180px]">
+              {suggestions.map((s, idx) => (
+                <button key={s.ticker}
+                  onMouseDown={e => { e.preventDefault(); selectSuggestion(s.ticker) }}
+                  className={cn(
+                    'flex items-center gap-2 w-full text-left px-3 py-2 transition-colors',
+                    idx === sugIdx ? 'bg-[#1e2d40] text-[#e2e8f0]' : 'text-[#cbd5e1] hover:bg-[#0f1e30] hover:text-[#e2e8f0]'
+                  )}>
+                  <span className="font-mono font-bold text-[13px] flex-shrink-0">{s.ticker}</span>
+                  <span className="text-[11px] text-[#94a3b8] truncate">{s.name}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* BUY / SELL */}
+        <select value={form.type} onChange={e => setForm(f => ({ ...f, type: e.target.value }))}
+          className="bg-[#0b1220] border border-[#1e2d40] text-sm text-[#cbd5e1] rounded px-2 py-1.5 focus:outline-none focus:border-[#3b82f6]">
+          <option value="BUY">매수</option>
+          <option value="SELL">매도</option>
+        </select>
+
+        {/* QTY — 스크롤 지원 */}
+        <input type="number" value={form.q || ''}
+          onChange={e => setForm(f => ({ ...f, q: +e.target.value }))}
+          onWheel={handleQtyWheel}
+          placeholder="수량" min={0} step={1}
+          className="w-14 bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#e2e8f0] rounded px-2 py-1.5 placeholder-[#334155] focus:outline-none focus:border-[#3b82f6]"
+        />
+
+        {/* 현재가 — 참고용 표시 전용. 옆 입력칸들과 같은 디자인으로 맞춘다.
+            평단가/거래가 입력에 자동으로 들어가지 않는다. */}
+        {form.ticker && (
+          <div
+            title="현재 시장가 — 참고용입니다. 자동으로 입력되지 않습니다."
+            className="flex items-center gap-1.5 px-2 py-1.5 text-sm font-mono rounded border border-[#1e2d40] bg-[#0b1220] flex-shrink-0"
+          >
+            <span className="text-[10px] text-[#64748b]">현재가</span>
+            <span className="text-[#e2e8f0]">{priceLoading ? '…' : currentPrice != null ? `$${currentPrice.toFixed(2)}` : '—'}</span>
+          </div>
+        )}
+
+        {/* Price — 사용자가 직접 입력하는 매수/매도 단가. 자동으로 채우지 않는다. */}
+        <input type="number" value={form.price || ''}
+          onChange={e => setForm(f => ({ ...f, price: +e.target.value }))}
+          placeholder={form.type === 'SELL' ? '매도가' : '매수가'}
+          className="w-32 bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#e2e8f0] rounded px-2 py-1.5 placeholder-[#334155] focus:outline-none focus:border-[#3b82f6]"
+        />
+
+        {/* Date — 매수/매도 날짜 */}
+        <input type="date" value={form.date}
+          onChange={e => setForm(f => ({ ...f, date: e.target.value }))}
+          max={todayStr}
+          className="bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#cbd5e1] rounded px-2 py-1.5 focus:outline-none focus:border-[#3b82f6] [color-scheme:dark]"
+        />
+
+        {/* Submit — onPointerDown으로 ticker blur보다 먼저 발화 */}
+        <button type="button"
+          onPointerDown={e => {
+            e.preventDefault()
+            if (!form.ticker || !form.q || !form.price || tradeMut.isPending) return
+            tradeMut.mutate(form)
+          }}
+          disabled={!form.ticker || !form.q || !form.price || tradeMut.isPending}
+          className="bg-[#1d4ed8] hover:bg-[#2563eb] disabled:opacity-40 text-white rounded px-3 py-1.5 transition-colors text-sm font-bold">
+          <Plus className="w-4 h-4" />
+        </button>
+      </div>
+    </>
+  )
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -1040,6 +1168,15 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
             view === 'history' ? 'text-[#e2e8f0] border-b-2 border-[#3b82f6]' : 'text-[#94a3b8] hover:text-[#94a3b8]')}>
           <History className="w-3 h-3" />거래 내역
         </button>
+
+        {/* 모바일 전용 — 상시 노출 거래 입력 폼 대신 버튼+팝업으로 (화면 사용 효율) */}
+        {isAuthed && (
+          <button
+            onClick={() => setShowTradeModal(true)}
+            className="md:hidden ml-auto mr-2 flex items-center gap-1 rounded border border-[#3b82f6]/40 bg-[#3b82f6]/10 px-2 py-1 text-[10px] font-bold text-[#3b82f6]">
+            <Plus className="w-2.5 h-2.5" />추가 매수/매도
+          </button>
+        )}
 
         {/* 이미 등록된 상태에서만 노출 — 비어 있으면 가운데 큰 버튼으로 유도한다 */}
         {isAuthed && !isEmptyPortfolio && (
@@ -1202,16 +1339,16 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
                         <td className="py-2 px-2.5 font-mono text-[12px] text-[#cbd5e1]">
                           {fn(fv(h.weight) * 100, fv(h.weight) * 100 < 1 ? 2 : 1)}%
                         </td>
-                        {/* SELL 버튼 */}
-                        <td className="py-2 px-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        {/* SELL 버튼 — 데스크탑은 hover 시에만, 모바일은 hover 가 없어 항상 보인다 */}
+                        <td className="py-2 px-1 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
                           <button type="button"
                             onPointerDown={e => { e.preventDefault(); openSell(h) }}
                             className="text-[10px] font-bold text-[#f59e0b] border border-[#f59e0b]/40 rounded px-1.5 py-0.5 hover:bg-[#f59e0b]/15 transition-colors">
                             매도
                           </button>
                         </td>
-                        {/* Edit / Delete */}
-                        <td className="py-2 px-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        {/* Edit / Delete — 마찬가지로 모바일에서는 항상 보인다 */}
+                        <td className="py-2 px-1 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
                           <div className="flex gap-1">
                             <button type="button"
                               onPointerDown={e => {
@@ -1240,20 +1377,24 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
                       </>
                     )}
                   </tr>
-                  {/* 인라인 SELL 폼 */}
+                  {/* 인라인 SELL 폼 — 데스크탑 전용. 모바일은 아래 팝업(모달)으로 대신한다. */}
                   {sellTicker === h.ticker && (
-                    <tr className="border-b border-[#f59e0b]/20 bg-[#0a0e18]">
+                    <tr className="hidden md:table-row border-b border-[#f59e0b]/20 bg-[#0a0e18]">
                       <td colSpan={9} className="px-3 py-2">
                         <div className="flex items-center gap-2 flex-wrap">
                           <span className="text-[#f59e0b] font-mono font-bold text-[12px] flex-shrink-0">매도 {h.ticker}</span>
+                          {/* 현재가 — 참고용 표시 전용. 매도가 입력에 자동으로 들어가지 않는다. */}
+                          <span className="text-[11px] text-[#64748b] font-mono flex-shrink-0"
+                            title="현재 시장가 — 참고용입니다. 자동으로 입력되지 않습니다.">
+                            현재가 {sellPriceLoading ? '…' : sellCurrentPrice != null ? `$${sellCurrentPrice.toFixed(2)}` : '—'}
+                          </span>
                           <input type="number" value={sellVals.q || ''}
                             onChange={e => setSellVals(v => ({ ...v, q: +e.target.value }))}
                             placeholder="수량" min={0.001} step={0.001}
                             className="w-16 bg-[#1e2d40] border border-[#334155] text-sm text-[#e2e8f0] rounded px-2 py-1" />
                           <input type="number" value={sellVals.price || ''}
                             onChange={e => setSellVals(v => ({ ...v, price: +e.target.value }))}
-                            placeholder={sellPriceLoading ? '조회중…' : '가격 (USD)'}
-                            disabled={sellPriceLoading}
+                            placeholder="매도가"
                             className="w-28 bg-[#1e2d40] border border-[#334155] text-sm text-[#e2e8f0] rounded px-2 py-1" />
                           <input type="date" value={sellVals.date}
                             onChange={e => setSellVals(v => ({ ...v, date: e.target.value }))}
@@ -1281,87 +1422,89 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
           </div>
 
 
-          {/* 거래 입력 폼 */}
-          <div className="flex-shrink-0 border-t border-[#1e2d40] px-3 py-2 bg-[#060b14] space-y-2">
-            {tickerError && (
-              <div className="text-[11px] text-[#ef4444] flex items-center gap-1">
-                <X className="w-3 h-3" />{tickerError}
-              </div>
-            )}
-            <div className="flex items-center gap-2 flex-wrap">
-              {/* Ticker — 전체 미국 티커 검색 */}
-              <div className="relative">
-                <input
-                  ref={tickerInputRef}
-                  value={form.ticker}
-                  onChange={e => handleTickerChange(e.target.value)}
-                  onBlur={handleTickerBlur}
-                  onKeyDown={handleTickerKeyDown}
-                  placeholder="티커"
-                  autoComplete="off"
-                  className="w-32 bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#e2e8f0] rounded px-2 py-1.5 placeholder-[#334155] focus:outline-none focus:border-[#3b82f6]"
-                />
-                {showSug && suggestions.length > 0 && (
-                  <div className="absolute bottom-full mb-1 left-0 z-50 bg-[#0b1220] border border-[#1e2d40] rounded shadow-xl min-w-[180px]">
-                    {suggestions.map((s, idx) => (
-                      <button key={s.ticker}
-                        onMouseDown={e => { e.preventDefault(); selectSuggestion(s.ticker) }}
-                        className={cn(
-                          'flex items-center gap-2 w-full text-left px-3 py-2 transition-colors',
-                          idx === sugIdx ? 'bg-[#1e2d40] text-[#e2e8f0]' : 'text-[#cbd5e1] hover:bg-[#0f1e30] hover:text-[#e2e8f0]'
-                        )}>
-                        <span className="font-mono font-bold text-[13px] flex-shrink-0">{s.ticker}</span>
-                        <span className="text-[11px] text-[#94a3b8] truncate">{s.name}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {/* BUY / SELL */}
-              <select value={form.type} onChange={e => setForm(f => ({ ...f, type: e.target.value }))}
-                className="bg-[#0b1220] border border-[#1e2d40] text-sm text-[#cbd5e1] rounded px-2 py-1.5 focus:outline-none focus:border-[#3b82f6]">
-                <option value="BUY">매수</option>
-                <option value="SELL">매도</option>
-              </select>
-
-              {/* QTY — 스크롤 지원 */}
-              <input type="number" value={form.q || ''}
-                onChange={e => setForm(f => ({ ...f, q: +e.target.value }))}
-                onWheel={handleQtyWheel}
-                placeholder="수량" min={0} step={1}
-                className="w-14 bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#e2e8f0] rounded px-2 py-1.5 placeholder-[#334155] focus:outline-none focus:border-[#3b82f6]"
-              />
-
-              {/* Price — 직접 입력만 (현재가 자동 조회 유지) */}
-              <input type="number" value={form.price || ''}
-                onChange={e => setForm(f => ({ ...f, price: +e.target.value }))}
-                placeholder={priceLoading ? '조회중…' : '가격 (USD)'}
-                disabled={priceLoading}
-                className="w-32 bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#e2e8f0] rounded px-2 py-1.5 placeholder-[#334155] focus:outline-none focus:border-[#3b82f6]"
-              />
-
-              {/* Date — 매수/매도 날짜 */}
-              <input type="date" value={form.date}
-                onChange={e => setForm(f => ({ ...f, date: e.target.value }))}
-                max={todayStr}
-                className="bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#cbd5e1] rounded px-2 py-1.5 focus:outline-none focus:border-[#3b82f6] [color-scheme:dark]"
-              />
-
-              {/* Submit — onPointerDown으로 ticker blur보다 먼저 발화 */}
-              <button type="button"
-                onPointerDown={e => {
-                  e.preventDefault()
-                  if (!form.ticker || !form.q || !form.price || priceLoading || tradeMut.isPending) return
-                  tradeMut.mutate(form)
-                }}
-                disabled={!form.ticker || !form.q || !form.price || priceLoading || tradeMut.isPending}
-                className="bg-[#1d4ed8] hover:bg-[#2563eb] disabled:opacity-40 text-white rounded px-3 py-1.5 transition-colors text-sm font-bold">
-                <Plus className="w-4 h-4" />
-              </button>
-            </div>
+          {/* 거래 입력 폼 — 데스크탑에서만 상시 노출. 모바일은 화면을 계속 차지하면
+              효율이 떨어져서 "추가 매수/매도" 버튼 + 팝업(아래)으로 뺐다. */}
+          <div className="hidden md:block flex-shrink-0 border-t border-[#1e2d40] px-3 py-2 bg-[#060b14] space-y-2">
+            {renderTradeFields()}
           </div>
         </>
+      )}
+
+      {/* 모바일 전용 매수/매도 팝업 — 상단 "추가 매수/매도" 버튼으로 연다 */}
+      {showTradeModal && (
+        <div
+          role="dialog" aria-modal="true" aria-label="추가 매수/매도"
+          className="md:hidden fixed inset-0 z-[110] flex items-end justify-center bg-black/70 backdrop-blur-sm"
+          onClick={() => setShowTradeModal(false)}
+        >
+          <div
+            className="w-full max-h-[80vh] overflow-y-auto rounded-t-2xl border border-[#1e2d40] bg-[#0b0f1a] p-4 space-y-3"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-bold text-[#e2e8f0]">추가 매수/매도</h3>
+              <button onClick={() => setShowTradeModal(false)} className="text-[#94a3b8] hover:text-[#e2e8f0]">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            {renderTradeFields(true)}
+          </div>
+        </div>
+      )}
+
+      {/* 모바일 전용 매도 팝업 — 보유 종목 행의 "매도" 버튼으로 연다 */}
+      {sellTicker && (
+        <div
+          role="dialog" aria-modal="true" aria-label={`${sellTicker} 매도`}
+          className="md:hidden fixed inset-0 z-[110] flex items-end justify-center bg-black/70 backdrop-blur-sm"
+          onClick={() => setSellTicker(null)}
+        >
+          <div
+            className="w-full max-h-[80vh] overflow-y-auto rounded-t-2xl border border-[#1e2d40] bg-[#0b0f1a] p-4 space-y-3"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-bold text-[#f59e0b] font-mono">매도 {sellTicker}</h3>
+              <button onClick={() => setSellTicker(null)} className="text-[#94a3b8] hover:text-[#e2e8f0]">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            {/* 현재가 — 참고용 표시 전용. 매도가 입력에 자동으로 들어가지 않는다. */}
+            <div className="text-[11px] text-[#64748b] font-mono"
+              title="현재 시장가 — 참고용입니다. 자동으로 입력되지 않습니다.">
+              현재가 {sellPriceLoading ? '…' : sellCurrentPrice != null ? `$${sellCurrentPrice.toFixed(2)}` : '—'}
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <input type="number" value={sellVals.q || ''}
+                onChange={e => setSellVals(v => ({ ...v, q: +e.target.value }))}
+                placeholder="수량" min={0.001} step={0.001}
+                className="w-20 bg-[#1e2d40] border border-[#334155] text-sm text-[#e2e8f0] rounded px-2 py-1.5" />
+              <input type="number" value={sellVals.price || ''}
+                onChange={e => setSellVals(v => ({ ...v, price: +e.target.value }))}
+                placeholder="매도가"
+                className="w-28 bg-[#1e2d40] border border-[#334155] text-sm text-[#e2e8f0] rounded px-2 py-1.5" />
+              <input type="date" value={sellVals.date}
+                onChange={e => setSellVals(v => ({ ...v, date: e.target.value }))}
+                max={todayStr}
+                className="bg-[#1e2d40] border border-[#334155] text-sm text-[#cbd5e1] rounded px-2 py-1.5 [color-scheme:dark]" />
+            </div>
+            <div className="flex items-center gap-2 pt-1">
+              <button type="button"
+                onClick={() => {
+                  const v = sellValsRef.current
+                  const t = sellTicker
+                  if (t && v.q > 0 && v.price > 0 && !sellMut.isPending)
+                    sellMut.mutate({ ticker: t, q: v.q, price: v.price, date: v.date })
+                }}
+                disabled={sellMut.isPending}
+                className="flex-1 bg-[#f59e0b]/15 border border-[#f59e0b]/40 text-[#f59e0b] rounded px-3 py-2 text-sm font-bold hover:bg-[#f59e0b]/25 transition-colors disabled:opacity-50">
+                {sellMut.isPending ? '처리 중…' : '매도 확인'}
+              </button>
+              <button type="button" onClick={() => setSellTicker(null)}
+                className="px-4 py-2 text-sm text-[#94a3b8] hover:text-[#cbd5e1]">취소</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* 현금 잔고 — 항상 표시 */}
@@ -2032,6 +2175,95 @@ export default function AlphaTerminal() {
   const qc = useQueryClient()
   const [botTab,       setBotTab]       = useState(0)
   const [rightTab,     setRightTab]     = useState(0)
+  // 모바일 전용 — 브리핑·피드백·뉴스 패널을 기본은 접어 두고(배너만), 배너를
+  // 누르면 전체화면으로 연다. 데스크탑은 이 값과 무관하게 항상 인라인으로 보인다.
+  const [rightPanelOpen, setRightPanelOpen] = useState(false)
+
+  // 배너의 세로 위치(뷰포트 높이 대비 %) — 사용자가 위아래로 드래그해 옮길 수
+  // 있다. 탭(누르기)과 드래그(옮기기)를 구분해야 해서 onClick 대신 포인터
+  // down/move/up 을 직접 다룬다: 눌렀다 뗄 때까지 거의 안 움직였으면 탭(=열기),
+  // 일정량 이상 움직였으면 드래그(=위치만 바꾸고 열지 않음)로 본다.
+  const [bannerTop, setBannerTop] = useState<number>(() => {
+    try {
+      const s = Number(localStorage.getItem('pfp_brief_banner_top'))
+      return Number.isFinite(s) && s > 5 && s < 95 ? s : 42
+    } catch { return 42 }
+  })
+  const bannerTopRef = useRef(bannerTop)
+  useEffect(() => { bannerTopRef.current = bannerTop }, [bannerTop])
+  const bannerDragRef = useRef<{ startY: number; startTop: number; moved: boolean } | null>(null)
+
+  const handleBannerPointerDown = (e: React.PointerEvent) => {
+    bannerDragRef.current = { startY: e.clientY, startTop: bannerTopRef.current, moved: false }
+  }
+  useEffect(() => {
+    function onMove(e: PointerEvent) {
+      const d = bannerDragRef.current
+      if (!d) return
+      const dy = e.clientY - d.startY
+      if (Math.abs(dy) > 6) d.moved = true
+      if (!d.moved) return
+      const vh = window.innerHeight || 800
+      const nextTop = Math.min(92, Math.max(8, d.startTop + (dy / vh) * 100))
+      setBannerTop(nextTop)
+    }
+    function onUp() {
+      const d = bannerDragRef.current
+      if (!d) return
+      if (d.moved) {
+        try { localStorage.setItem('pfp_brief_banner_top', String(bannerTopRef.current)) } catch {}
+      } else {
+        setRightPanelOpen(true)   // 거의 안 움직였다 = 탭 = 열기
+      }
+      bannerDragRef.current = null
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    return () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+  }, [])
+
+  // ── 우측 패널(브리핑·피드백·뉴스) 폭 — 드래그로 조절, 값은 기억해 둔다.
+  // 인라인 style 로 CSS 변수만 세팅하고 실제 width 는 Tailwind 클래스
+  // (md:w-[var(--right-panel-w)])가 md 이상에서만 적용하므로, 모바일에서는
+  // 이 값과 무관하게 항상 w-full 이다 — JS 로 화면폭을 따로 판별할 필요가 없다.
+  const [rightPanelW, setRightPanelW] = useState<number>(() => {
+    try {
+      const s = Number(localStorage.getItem('pfp_right_panel_w'))
+      return Number.isFinite(s) && s > 0 ? Math.min(720, Math.max(260, s)) : 340
+    } catch { return 340 }
+  })
+  const rightPanelWRef = useRef(rightPanelW)
+  useEffect(() => { rightPanelWRef.current = rightPanelW }, [rightPanelW])
+  const resizingRef = useRef(false)
+  const resizeStartRef = useRef({ x: 0, w: 0 })
+
+  const handlePanelResizeStart = (e: React.PointerEvent) => {
+    resizingRef.current = true
+    resizeStartRef.current = { x: e.clientX, w: rightPanelW }
+  }
+  useEffect(() => {
+    function onMove(e: PointerEvent) {
+      if (!resizingRef.current) return
+      // 오른쪽 패널 기준 — 마우스가 왼쪽으로 갈수록(dx<0) 패널이 넓어진다
+      const dx = e.clientX - resizeStartRef.current.x
+      const next = Math.min(720, Math.max(260, resizeStartRef.current.w - dx))
+      setRightPanelW(next)
+    }
+    function onUp() {
+      if (!resizingRef.current) return
+      resizingRef.current = false
+      try { localStorage.setItem('pfp_right_panel_w', String(rightPanelWRef.current)) } catch {}
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    return () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+  }, [])
   const [tickerModal,  setTickerModal]  = useState<string | null>(null)
   const [searchQuery,  setSearchQuery]  = useState('')
   const [searchSugs,   setSearchSugs]   = useState<{ ticker: string; name: string }[]>([])
@@ -2300,9 +2532,53 @@ export default function AlphaTerminal() {
           </div>
         </div>
 
-        {/* ═══ RIGHT PANEL — always visible ═══ */}
-        <div data-tour="brief" className="m-order-3 flex min-h-0 flex-shrink-0 w-full md:w-[30%] md:min-w-[260px] min-h-[420px] md:min-h-0">
+        {/* 리사이즈 핸들 — 데스크탑에서만 (모바일은 세로로 쌓이므로 폭 조절이 의미 없다) */}
+        <div
+          onPointerDown={handlePanelResizeStart}
+          title="드래그해서 패널 폭 조절"
+          className="hidden md:block w-1.5 flex-shrink-0 cursor-col-resize hover:bg-[#3b82f6]/30 active:bg-[#3b82f6]/50 transition-colors"
+        />
+
+        {/* 모바일 전용 배너 — 우측 가장자리에 세로 탭처럼 붙여 두고, 누르면 패널이
+            오른쪽에서 왼쪽으로 슬라이드해 들어온다(닫을 땐 반대로 왼쪽→오른쪽).
+            화살표는 "누르면 이 방향으로 열린다"는 뜻 — 세로 위치는 드래그로 옮길 수 있다.
+            데스크탑에서는 패널이 항상 인라인으로 보이므로 필요 없다. */}
+        <button
+          onPointerDown={handleBannerPointerDown}
+          style={{ top: `${bannerTop}%`, touchAction: 'none' }}
+          className={cn(
+            'md:hidden fixed right-0 z-30 -translate-y-1/2 flex flex-col items-center gap-1 rounded-l-lg',
+            'border border-r-0 border-[#2d3f56] bg-[#1a2035] px-1.5 py-2.5 text-[10px] font-bold',
+            'tracking-widest text-[#94a3b8] shadow-lg select-none transition-opacity',
+            rightPanelOpen ? 'opacity-0 pointer-events-none' : 'opacity-100',
+          )}
+        >
+          <ChevronLeft className="w-3.5 h-3.5 flex-shrink-0" />
+          <span style={{ writingMode: 'vertical-rl' }}>브리핑</span>
+        </button>
+
+        {/* ═══ RIGHT PANEL — 데스크탑엔 항상 보임, 모바일에선 배너를 눌러야 오른쪽에서
+            왼쪽으로 슬라이드해 열리고, 닫기를 누르면 왼쪽에서 오른쪽으로 슬라이드해 닫힌다.
+            display:none 으로는 트랜지션이 안 걸려서, 항상 마운트해 두고 translate-x 로만
+            보이고/안 보이고를 조절한다(닫혀 있을 땐 pointer-events 도 꺼서 안 눌리게 한다). */}
+        <div
+          data-tour="brief"
+          style={{ ['--right-panel-w' as any]: `${rightPanelW}px` }}
+          className={cn(
+            'm-order-3 flex-shrink-0 min-h-0 flex-col fixed inset-0 z-40 flex bg-[#0b0f1a]',
+            'transition-transform duration-300 ease-out',
+            rightPanelOpen ? 'translate-x-0' : 'translate-x-full pointer-events-none',
+            'md:flex md:flex-row md:static md:inset-auto md:z-auto md:bg-transparent md:translate-x-0 md:pointer-events-auto md:transition-none',
+            'w-full md:w-[var(--right-panel-w)] md:min-w-[260px] min-h-[420px] md:min-h-0',
+          )}>
           <div className="flex flex-col min-h-0 flex-1 overflow-hidden">
+            {/* 모바일 전용 닫기 헤더 — 데스크탑엔 없음 */}
+            <div className="md:hidden flex-shrink-0 flex items-center justify-between px-4 py-3 border-b border-[#1e2d40] bg-[#060b14]">
+              <span className="text-sm font-bold text-[#e2e8f0]">브리핑 · 피드백 · 뉴스</span>
+              <button onClick={() => setRightPanelOpen(false)} className="text-[#94a3b8] hover:text-[#e2e8f0]">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
             <div className="tab-row flex-shrink-0 bg-[#060b14] border-b border-[#1e2d40] flex">
               {RIGHT_TABS.map((t, i) => (
                 <button key={t} onClick={() => setRightTab(i)}
@@ -2314,7 +2590,7 @@ export default function AlphaTerminal() {
               ))}
             </div>
 
-            <div className="flex-1 md:min-h-0 md:overflow-hidden">
+            <div className="flex-1 min-h-0 overflow-hidden">
             {rightTab === 0 && (
               <LockedPreview silent>
                 <DailyBriefPanel />

@@ -8,7 +8,7 @@ import type {
   MarketRegime, OptimizationResult, FactorAnalysisResult,
   MacroModes, MacroAnalysisResult, AnalystFeedback,
   DailyBriefResult, ReportFile, Industry, EquityReportResult, IndustryReportResult,
-  MarketSituation, SignalScanResult, TechnicalChartResult, PairsAutoResult,
+  MarketSituation, SignalScanResult, SignalScoreResult, TechnicalChartResult, PairsAutoResult,
   TickerDetail, AIOptimizationResult,
 } from '@/types'
 
@@ -185,6 +185,10 @@ export const getMarketSituation = async (): Promise<MarketSituation> =>
 
 export const getSignalScan = async (topN = 10): Promise<SignalScanResult> =>
   (await api.get('/api/signals/signal-scan', { params: { top_n: topN } })).data
+
+/** 검색된 임의 종목의 매수/매도 참고 점수 — 상위 N개 리스트 밖이어도 조회 가능. */
+export const getSignalScore = async (ticker: string): Promise<SignalScoreResult> =>
+  (await api.get('/api/signals/signal-score', { params: { ticker } })).data
 
 export const getTechnicalChart = async (
   ticker: string,

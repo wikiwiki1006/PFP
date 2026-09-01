@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Search, ChevronLeft, ChevronRight } from 'lucide-react'
-import { getSignalScan } from '@/api'
+import { getSignalScan, getSignalScore } from '@/api'
 import BollingerChart from './BollingerChart'
 import { COLOR_UP, COLOR_DOWN } from './colors'
 import type { SignalScanPick, HoldingsMap } from '@/types'
@@ -49,6 +49,68 @@ function PickRow({
         <ScoreBar label="추세"   value={p.components.trend}    max={30} color={color} />
       </div>
     </button>
+  )
+}
+
+/** 종목 하나의 매수/매도 참고 점수 — Signal Scan 상위 10개 리스트에 없어도(순위 밖,
+    보유 종목, 검색한 임의 티커 등) 볼 수 있게 한다. 상세 차트(BollingerChart) 위에 표시. */
+function TickerScoreCard({ ticker }: { ticker: string }) {
+  const q = useQuery({
+    queryKey: ['signal-score', ticker],
+    queryFn:  () => getSignalScore(ticker),
+    staleTime: 300_000,
+    retry: false,
+  })
+
+  if (q.isLoading) return <div className="text-xs text-[#64748b] mb-3">매매신호 점수 계산 중…</div>
+  if (q.isError || !q.data) return null
+
+  const { long, long_filter_pass, short, short_filter_pass } = q.data
+  if (!long && !short) {
+    return (
+      <div className="text-xs text-[#64748b] mb-3">
+        거래량 데이터가 부족해 매매신호 점수를 계산할 수 없습니다.
+      </div>
+    )
+  }
+
+  const sides: { key: string; side: SignalScanPick | null; pass: boolean; label: string; color: string }[] = [
+    { key: 'long',  side: long,  pass: long_filter_pass,  label: '매수', color: COLOR_UP },
+    { key: 'short', side: short, pass: short_filter_pass, label: '매도', color: COLOR_DOWN },
+  ]
+
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-3">
+      {sides.map(({ key, side, pass, label, color }) => {
+        if (!side) {
+          return (
+            <div key={key} className="border border-[#1e2d40] rounded p-2.5 flex items-center justify-center text-[11px] text-[#374151]">
+              {label} 점수 계산 불가
+            </div>
+          )
+        }
+        const macdUp = side.macd_hist >= side.macd_hist_prev
+        return (
+          <div key={key} className="border border-[#1e2d40] rounded p-2.5">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-[11px] font-bold" style={{ color }}>{label} 점수</span>
+              {!pass && <span className="text-[9px] text-[#64748b]">1차 필터 미통과 · 참고용</span>}
+            </div>
+            <div className="font-mono font-bold" style={{ color }}>
+              <span className="text-[18px]">{side.score}</span><span className="text-[10px] text-[#64748b]">/100</span>
+            </div>
+            <div className="text-[10px] text-[#64748b] mt-0.5 mb-1.5">
+              RSI {side.rsi.toFixed(0)} · Vol×{side.volume_ratio.toFixed(1)} · MACD {macdUp ? '▲' : '▼'}
+            </div>
+            <div className="space-y-1">
+              <ScoreBar label="수급"   value={side.components.volume}   max={40} color={color} />
+              <ScoreBar label="모멘텀" value={side.components.momentum} max={30} color={color} />
+              <ScoreBar label="추세"   value={side.components.trend}    max={30} color={color} />
+            </div>
+          </div>
+        )
+      })}
+    </div>
   )
 }
 
@@ -136,8 +198,14 @@ export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelPr
           {scanQ.data && (
             <>
               <div>
-                <div className="text-[11px] font-bold tracking-widest mb-1.5" style={{ color: COLOR_UP }}>
+                <div className="text-[11px] font-bold tracking-widest mb-1.5 flex items-center gap-1.5 flex-wrap" style={{ color: COLOR_UP }}>
                   매수 신호 <span className="text-[#374151]">{scanQ.data.long_picks.length}</span>
+                  {!!scanQ.data.long_filter_level && (
+                    <span className="text-[9px] font-normal text-[#f59e0b] normal-case tracking-normal"
+                      title="원래 기준으로 top 10이 안 채워져 조건을 완화했습니다.">
+                      ⚠ 완화됨: {scanQ.data.long_filter_note}
+                    </span>
+                  )}
                 </div>
                 <div className="space-y-1.5">
                   {scanQ.data.long_picks.map(p => (
@@ -149,8 +217,14 @@ export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelPr
                 </div>
               </div>
               <div>
-                <div className="text-[11px] font-bold tracking-widest mb-1.5" style={{ color: COLOR_DOWN }}>
+                <div className="text-[11px] font-bold tracking-widest mb-1.5 flex items-center gap-1.5 flex-wrap" style={{ color: COLOR_DOWN }}>
                   매도 신호 <span className="text-[#374151]">{scanQ.data.short_picks.length}</span>
+                  {!!scanQ.data.short_filter_level && (
+                    <span className="text-[9px] font-normal text-[#f59e0b] normal-case tracking-normal"
+                      title="원래 기준으로 top 10이 안 채워져 조건을 완화했습니다.">
+                      ⚠ 완화됨: {scanQ.data.short_filter_note}
+                    </span>
+                  )}
                 </div>
                 <div className="space-y-1.5">
                   {scanQ.data.short_picks.map(p => (
@@ -179,6 +253,7 @@ export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelPr
         ) : (
           <>
             <div className="text-lg font-mono font-bold text-[#e2e8f0] mb-3">{selected}</div>
+            <TickerScoreCard key={`score-${selected}`} ticker={selected} />
             <BollingerChart key={selected} ticker={selected} height={460} />
           </>
         )}

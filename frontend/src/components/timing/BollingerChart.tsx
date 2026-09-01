@@ -1,13 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   ComposedChart, Line, Area, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, ReferenceArea, ReferenceDot, ReferenceLine,
+  ResponsiveContainer, ReferenceDot, ReferenceLine,
 } from 'recharts'
 import { getTechnicalChart } from '@/api'
 import type { TechnicalChartPoint } from '@/types'
 import { COLOR_UP, COLOR_DOWN } from './colors'
 import { useTheme } from '@/lib/ThemeContext'
+import { useTouchDismissTooltip } from '@/lib/useTouchDismissTooltip'
 
 // ── debounce hook ─────────────────────────────────────────────────────────────
 function useDebounced<T>(value: T, ms = 700): T {
@@ -195,6 +196,7 @@ export default function BollingerChart({ ticker, height = 420 }: BollingerChartP
   // 값은 light-theme.css 가 bg-[#0b0f1a] 에 적용하는 색과 반드시 같아야 한다.
   const { theme } = useTheme()
   const panelBg = theme === 'light' ? '#f6f8fb' : '#0b0f1a'
+  const { tooltipActive, onPointerDown: onTooltipPointerDown, onPointerUp: onTooltipPointerUp } = useTouchDismissTooltip()
 
   // ── BB params (trigger API refetch when debounced) ────────────────────────
   const [bbPeriod,       setBBPeriod]       = useState(20)
@@ -218,34 +220,6 @@ export default function BollingerChart({ ticker, height = 420 }: BollingerChartP
   const [tpPrice,     setTpPrice]     = useState(0)
   const [slPrice,     setSlPrice]     = useState(0)
 
-  // ── zoom state ────────────────────────────────────────────────────────────
-  const [domain,   setDomain]   = useState<[string, string] | null>(null)
-  const [refLeft,  setRefLeft]  = useState<string | null>(null)
-  const [refRight, setRefRight] = useState<string | null>(null)
-  const lastLbl = useRef<string | null>(null)
-
-  // ── reset zoom when ticker changes ────────────────────────────────────────
-  useEffect(() => {
-    setDomain(null); setRefLeft(null); setRefRight(null)
-    lastLbl.current = null
-  }, [ticker])
-
-  // ── global mouseup for drag-zoom ──────────────────────────────────────────
-  useEffect(() => {
-    function onUp() {
-      if (refLeft == null) return
-      const right = refRight ?? lastLbl.current
-      if (right && right !== refLeft) {
-        const [a, b] = refLeft < right ? [refLeft, right] : [right, refLeft]
-        setDomain([a, b])
-      }
-      setRefLeft(null); setRefRight(null)
-      lastLbl.current = null
-    }
-    window.addEventListener('mouseup', onUp)
-    return () => window.removeEventListener('mouseup', onUp)
-  }, [refLeft, refRight])
-
   // ── API call ──────────────────────────────────────────────────────────────
   const q = useQuery({
     queryKey: ['timing-technical-chart', ticker, bbPeriodD, bbStdD, resistD],
@@ -256,13 +230,7 @@ export default function BollingerChart({ ticker, height = 420 }: BollingerChartP
 
   const series    = q.data?.series     ?? []
   const keyPoints = q.data?.key_points ?? []
-
-  // ── zoom-filtered data ────────────────────────────────────────────────────
-  const visible = useMemo(() => {
-    if (!domain) return series
-    const [a, b] = domain
-    return series.filter(p => p.date >= a && p.date <= b)
-  }, [series, domain])
+  const visible   = series
 
   // ── weekly / daily mode ───────────────────────────────────────────────────
   const isWeekly = useMemo(() => {
@@ -386,9 +354,6 @@ export default function BollingerChart({ ticker, height = 420 }: BollingerChartP
 
   // ── handlers ─────────────────────────────────────────────────────────────
   function toggleMA(k: string) { setActiveMAs(p => ({ ...p, [k]: !p[k as keyof typeof p] })) }
-  function onDown(e: any) { if (!e?.activeLabel) return; setRefLeft(e.activeLabel); setRefRight(null); lastLbl.current = e.activeLabel }
-  function onMove(e: any) { if (!refLeft || !e?.activeLabel) return; setRefRight(e.activeLabel); lastLbl.current = e.activeLabel }
-  function onReset() { setDomain(null); setRefLeft(null); setRefRight(null); lastLbl.current = null }
 
   const zColor = !q.data ? '#64748b' : q.data.current_z <= -1 ? COLOR_UP : q.data.current_z >= 1 ? COLOR_DOWN : '#94a3b8'
   const resistBreaks = visibleKPs.filter(k => k.type === 'RESISTANCE_BREAK').length
@@ -420,11 +385,6 @@ export default function BollingerChart({ ticker, height = 420 }: BollingerChartP
             <span className="text-[10px] text-[#374151]">({isWeekly ? '주봉' : '일봉'})</span>
           )}
           {q.isFetching && <span className="text-[10px] text-[#3b82f6]">계산 중…</span>}
-          {domain && (
-            <button onClick={onReset} className="text-[#3b82f6] hover:text-[#60a5fa] underline">
-              줌 초기화
-            </button>
-          )}
           <span className="ml-auto font-mono font-bold" style={{ color: zColor }}>
             {q.data && `Z ${q.data.current_z.toFixed(2)}`}
           </span>
@@ -470,15 +430,13 @@ export default function BollingerChart({ ticker, height = 420 }: BollingerChartP
       {/* 휴대폰 폭에 1년치 캔들을 다 넣으면 하나가 1~2px 이 되어 형태를 알아볼 수
           없다. 좁은 화면에서는 차트를 화면보다 넓게 그리고 좌우로 밀어 보게 한다
           (chart-hscroll — 실제 폭 지정은 styles/mobile.css). */}
+      {/* 터치로 짚어 값을 보다가 손을 떼면 팝업이 안 사라지는 문제 — onPointerDown/Up 으로 강제 정리 */}
       {q.data && (
-        <div className="chart-hscroll">
+        <div className="chart-hscroll" onPointerDown={onTooltipPointerDown} onPointerUp={onTooltipPointerUp}>
         <ResponsiveContainer width="100%" height={height}>
           <ComposedChart
             data={displayData}
             margin={{ top: 6, right: 20, left: 0, bottom: 0 }}
-            onMouseDown={onDown}
-            onMouseMove={onMove}
-            onDoubleClick={onReset}
           >
             <CartesianGrid strokeDasharray="3 3" stroke="#1e2d40" vertical={false} />
             <XAxis dataKey="date"
@@ -487,7 +445,7 @@ export default function BollingerChart({ ticker, height = 420 }: BollingerChartP
             <YAxis domain={yDomain}
               tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false}
               width={60} tickFormatter={v => `$${Number(v).toFixed(0)}`} />
-            <Tooltip content={<ChartTooltip />} />
+            <Tooltip active={tooltipActive} content={<ChartTooltip />} />
 
             {/* BB filled channel: upper area fills down, lower area erases with background */}
             {showBands && (
@@ -544,12 +502,6 @@ export default function BollingerChart({ ticker, height = 420 }: BollingerChartP
               <ReferenceLine y={slPrice} stroke={COLOR_DOWN} strokeDasharray="6 3" strokeWidth={1.5}
                 label={{ value: `SL  $${slPrice.toFixed(2)}`, fill: COLOR_DOWN, fontSize: 10, position: 'insideBottomRight' }} />
             )}
-
-            {/* drag-zoom highlight */}
-            {refLeft && refRight && (
-              <ReferenceArea x1={refLeft} x2={refRight}
-                strokeOpacity={0.3} fill="#3b82f6" fillOpacity={0.15} />
-            )}
           </ComposedChart>
         </ResponsiveContainer>
         </div>
@@ -558,7 +510,6 @@ export default function BollingerChart({ ticker, height = 420 }: BollingerChartP
       {/* ── bottom legend ───────────────────────────────────────────────── */}
       {q.data && (
         <div className="flex flex-wrap items-center gap-3 justify-center mt-1.5 text-[10px] text-[#374151]">
-          <span>드래그 확대 · 더블클릭 초기화</span>
           {maCrosses.filter(c => c.type === 'golden').length > 0 && (
             <span style={{ color: '#fbbf24' }}>● 골든크로스 {maCrosses.filter(c => c.type === 'golden').length}</span>
           )}

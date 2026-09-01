@@ -7,32 +7,26 @@ import {
 import { Star } from 'lucide-react'
 import { getPairsAuto } from '@/api'
 import { COLOR_DOWN } from './colors'
+import { useTouchDismissTooltip } from '@/lib/useTouchDismissTooltip'
+import { useIsMobile } from '@/lib/useIsMobile'
+import { cn } from '@/lib/utils'
 import type { HoldingsMap } from '@/types'
 
-function PriceTooltip({ active, payload, label }: any) {
+// 주가 비교 차트와 스프레드 차트가 syncId 로 커서를 공유한다(아래 참조) — 어느
+// 쪽을 가리켜도 같은 날짜의 두 값을 한 번에 보여줘야 "동일 시점 비교"가 된다.
+// 그래서 툴팁도 하나로 합쳐 a/b 가격과 스프레드를 항상 함께 보여준다.
+function PairsTooltip({ active, payload, label, tickerA, tickerB }: any) {
   if (!active || !payload?.length) return null
+  const p = payload[0]?.payload
+  if (!p) return null
   return (
-    <div className="bg-[#1a2035] border border-[#1e2d40] rounded-lg p-3 text-[11px] shadow-xl">
-      <p className="text-[#64748b] mb-1.5">{label}</p>
-      {payload.map((p: any) => (
-        <p key={p.dataKey} className="font-mono" style={{ color: p.color }}>
-          {p.name}: ${Number(p.value).toFixed(2)}
-        </p>
-      ))}
-    </div>
-  )
-}
-
-function SpreadTooltip({ active, payload, label }: any) {
-  if (!active || !payload?.length) return null
-  return (
-    <div className="bg-[#1a2035] border border-[#1e2d40] rounded-lg p-3 text-[11px] shadow-xl">
-      <p className="text-[#64748b] mb-1.5">{label}</p>
-      {payload.map((p: any) => (
-        <p key={p.dataKey} className="font-mono" style={{ color: p.color }}>
-          {p.name}: {Number(p.value).toFixed(2)}%p
-        </p>
-      ))}
+    <div className="bg-[#1a2035] border border-[#1e2d40] rounded-lg p-3 text-[11px] shadow-xl space-y-1 min-w-[160px]">
+      <p className="text-[#64748b] mb-1">{label}</p>
+      {p.a != null && <p className="font-mono" style={{ color: '#3b82f6' }}>{tickerA}: ${Number(p.a).toFixed(2)}</p>}
+      {p.b != null && <p className="font-mono" style={{ color: '#f59e0b' }}>{tickerB}: ${Number(p.b).toFixed(2)}</p>}
+      {p.spread != null && (
+        <p className="font-mono font-bold" style={{ color: '#8b5cf6' }}>스프레드: {Number(p.spread).toFixed(2)}%p</p>
+      )}
     </div>
   )
 }
@@ -47,6 +41,8 @@ export default function PairsTradingPanel({ holdings = {} }: PairsTradingPanelPr
   const [ticker, setTicker]                 = useState<string | null>(null)
   const [threshold, setThreshold]           = useState(5)
   const [selectedPair, setSelectedPair]     = useState<string | null>(null)
+  const { tooltipActive, onPointerDown, onPointerUp } = useTouchDismissTooltip()
+  const isMobile = useIsMobile()
 
   const q = useQuery({
     queryKey: ['timing-pairs-auto', ticker, threshold],
@@ -100,7 +96,7 @@ export default function PairsTradingPanel({ holdings = {} }: PairsTradingPanelPr
   )
 
   return (
-    <div className="p-4 space-y-4">
+    <div className="p-2 md:p-4 space-y-4">
       <div className="text-[11px] text-[#64748b] font-bold tracking-widest uppercase">페어 트레이딩 — 자동 유사종목 탐색</div>
 
       {/* 입력 */}
@@ -217,20 +213,37 @@ export default function PairsTradingPanel({ holdings = {} }: PairsTradingPanelPr
             </div>
           </div>
 
-          {/* 실제 주가 비교 — 이중 Y축 */}
-          <div>
-            <div className="text-[11px] text-[#64748b] font-bold tracking-widest mb-1.5">
-              실제 주가 비교 (좌축: {q.data.ticker} / 우축: {activePair})
+          {/* 주가 비교 + 스프레드 — 하나의 날짜 x축을 syncId 로 공유한다.
+              두 패널을 시각적으로 하나처럼 붙이기 위해 위 차트는 x축 눈금을 숨기고
+              (아래 차트가 대신 보여준다), 좌우 여백·축 폭을 동일하게 맞춰 두 차트의
+              같은 날짜가 같은 x좌표에 오게 한다 — 그래야 커서를 어디에 올려도
+              동일 시점의 주가와 스프레드를 함께 읽을 수 있다. */}
+          {/* 모바일에서는 테두리를 없애고(item 5) 축 폭/여백도 줄여서(item 6) 좌우 최대폭을 확보한다.
+              두 차트가 syncId 로 x좌표를 맞추려면 margin.right·YAxis width 를 반드시 서로 같게 유지해야 한다. */}
+          <div
+            onPointerDown={onPointerDown}
+            onPointerUp={onPointerUp}
+            className={cn(
+              'overflow-hidden',
+              isMobile ? '' : 'border border-[#1e2d40] rounded-lg',
+            )}
+          >
+            <div className="flex items-center justify-between px-1 md:px-3 pt-3 pb-1">
+              <span className="text-[11px] text-[#64748b] font-bold tracking-widest">
+                주가 비교 (좌축 {q.data.ticker} · 우축 {activePair}) & 스프레드
+              </span>
+              <span className="text-[10px] text-[#374151]">임계값 초과 시점 {activeBreaches.length}건</span>
             </div>
-            <ResponsiveContainer width="100%" height={260}>
-              <ComposedChart data={activeChart} margin={{ top: 5, right: 60, left: 0, bottom: 0 }}>
+
+            <ResponsiveContainer width="100%" height={240}>
+              <ComposedChart data={activeChart} syncId="pairs-chart" margin={{ top: 5, right: isMobile ? 15 : 60, left: 0, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#1e2d40" vertical={false} />
-                <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} minTickGap={50} />
+                <XAxis dataKey="date" tick={false} tickLine={false} axisLine={false} height={4} />
                 <YAxis
                   yAxisId="left"
                   tick={{ fill: '#3b82f6', fontSize: 10 }}
                   tickLine={false} axisLine={false}
-                  width={55}
+                  width={isMobile ? 34 : 55}
                   tickFormatter={(v: number) => `$${v.toFixed(0)}`}
                 />
                 <YAxis
@@ -238,34 +251,29 @@ export default function PairsTradingPanel({ holdings = {} }: PairsTradingPanelPr
                   orientation="right"
                   tick={{ fill: '#f59e0b', fontSize: 10 }}
                   tickLine={false} axisLine={false}
-                  width={55}
+                  width={isMobile ? 34 : 55}
                   tickFormatter={(v: number) => `$${v.toFixed(0)}`}
                 />
-                <Tooltip content={<PriceTooltip />} />
+                <Tooltip active={tooltipActive} content={<PairsTooltip tickerA={q.data.ticker} tickerB={activePair} />} />
                 <Legend wrapperStyle={{ fontSize: '11px', color: '#64748b' }} />
                 <Line yAxisId="left"  type="monotone" dataKey="a" stroke="#3b82f6" strokeWidth={2} dot={false} name={q.data.ticker}  isAnimationActive={false} />
                 <Line yAxisId="right" type="monotone" dataKey="b" stroke="#f59e0b" strokeWidth={2} dot={false} name={activePair ?? q.data.best.ticker} isAnimationActive={false} />
               </ComposedChart>
             </ResponsiveContainer>
-          </div>
 
-          {/* 스프레드 차트 */}
-          <div>
-            <div className="flex items-center justify-between mb-1.5">
-              <span className="text-[11px] text-[#64748b] font-bold tracking-widest">
-                스프레드 (%p) — 임계값 초과 시점 {activeBreaches.length}건
-              </span>
-            </div>
-            <ResponsiveContainer width="100%" height={220}>
-              <ComposedChart data={activeChart} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+            <ResponsiveContainer width="100%" height={200}>
+              <ComposedChart data={activeChart} syncId="pairs-chart" margin={{ top: 0, right: isMobile ? 15 : 60, left: 0, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#1e2d40" vertical={false} />
                 <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} minTickGap={50} />
-                <YAxis tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={50} />
-                <Tooltip content={<SpreadTooltip />} />
-                <ReferenceLine y={threshold}  stroke={COLOR_DOWN} strokeDasharray="4 2" />
-                <ReferenceLine y={-threshold} stroke={COLOR_DOWN} strokeDasharray="4 2" />
-                <ReferenceLine y={0}          stroke="#374151" />
+                {/* 좌측 축 폭을 위 차트와 맞춰 두 패널의 x좌표를 정렬한다 */}
+                <YAxis yAxisId="left"  tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={isMobile ? 34 : 55}
+                  tickFormatter={(v: number) => `${v.toFixed(0)}%`} />
+                <YAxis yAxisId="right" orientation="right" tick={false} tickLine={false} axisLine={false} width={isMobile ? 34 : 55} />
+                <ReferenceLine yAxisId="left" y={threshold}  stroke={COLOR_DOWN} strokeDasharray="4 2" />
+                <ReferenceLine yAxisId="left" y={-threshold} stroke={COLOR_DOWN} strokeDasharray="4 2" />
+                <ReferenceLine yAxisId="left" y={0}          stroke="#374151" />
                 <Area
+                  yAxisId="left"
                   type="monotone"
                   dataKey="spread"
                   stroke="#8b5cf6"
@@ -284,7 +292,7 @@ export default function PairsTradingPanel({ holdings = {} }: PairsTradingPanelPr
                 />
               </ComposedChart>
             </ResponsiveContainer>
-            <div className="text-[10px] text-[#374151] mt-1">
+            <div className="text-[10px] text-[#374151] px-3 pb-2">
               빨간 점 = 임계값 초과 순간 (지속 구간 아님)
             </div>
           </div>

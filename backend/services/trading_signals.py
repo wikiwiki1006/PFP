@@ -325,6 +325,139 @@ def _rsi(close: pd.Series, period: int = 14) -> pd.Series:
     return rsi.where(avg_loss != 0.0, 100.0)
 
 
+def _score_ticker_side(
+    ticker: str,
+    close: pd.Series,
+    volume: "pd.Series | None",
+    side: str,
+    min_history: int = 210,
+) -> "dict | None":
+    """단일 종목 · 단일 방향(매수/매도) 스코어(0~100). Step 2 스코어링 공식 본체.
+
+    `sma_macd_rsi_scan` 의 후보 리스트 스코어링과 `score_ticker_both_sides`(검색된
+    임의 종목 참고 점수) 가 이 함수 하나를 공유한다 — 두 경로의 점수 공식이
+    어긋나지 않게 하기 위해서다. 1차 필터 통과 여부와 무관하게 호출 가능하다.
+    """
+    c = close.dropna()
+    if len(c) < min_history or volume is None:
+        return None
+    vt = volume.dropna()
+    if len(vt) < 20:
+        return None
+    avg20 = float(vt.iloc[-20:].mean())
+    if avg20 <= 0:
+        return None
+    vratio = float(vt.iloc[-1] / avg20)
+
+    hist    = _macd_hist(c)
+    h_today = float(hist.iloc[-1])
+    h_prev  = float(hist.iloc[-2])
+    rsi_val = float(_rsi(c).iloc[-1])
+    price   = float(c.iloc[-1])
+
+    # 수급 폭발 (0~40, 캡)
+    s_vol = min(40.0, vratio * 15.0)
+
+    # MACD 가속도 (0~30): 히스토그램 확장 + 영선 돌파
+    if side == "long":
+        s_mom = 15.0 if (h_today - h_prev) > 0 else 0.0
+        if h_prev < 0 <= h_today:
+            s_mom += 15.0
+    else:
+        s_mom = 15.0 if (h_today - h_prev) < 0 else 0.0
+        if h_prev > 0 >= h_today:
+            s_mom += 15.0
+
+    # RSI 골디락스 존 (-10~30)
+    if side == "long":
+        if   50 <= rsi_val <= 65: s_rsi = 30.0
+        elif 40 <= rsi_val < 50:  s_rsi = 20.0
+        elif rsi_val >= 70:       s_rsi = -10.0
+        else:                     s_rsi = 0.0
+    else:
+        if   35 <= rsi_val <= 50: s_rsi = 30.0
+        elif 50 < rsi_val <= 60:  s_rsi = 20.0
+        elif rsi_val <= 30:       s_rsi = -10.0
+        else:                     s_rsi = 0.0
+
+    score = max(0.0, min(100.0, s_vol + s_mom + s_rsi))
+    arrow = "▲" if h_today >= h_prev else "▼"
+    trend = "정배열 (20>50일선)" if side == "long" else "역배열 (20<50일선)"
+    anchor = "100일선 위" if side == "long" else "200일선 아래"
+    return {
+        "ticker":         ticker,
+        "price":          round(price, 2),
+        "score":          round(score),
+        "volume_ratio":   round(vratio, 2),
+        "rsi":            round(rsi_val, 1),
+        "macd_hist":      round(h_today, 4),
+        "macd_hist_prev": round(h_prev, 4),
+        "components": {
+            "volume":   round(s_vol, 1),
+            "momentum": round(s_mom, 1),
+            "trend":    round(s_rsi, 1),
+        },
+        "reason": f"{anchor} · {trend} · 거래량 {vratio:.1f}배 · RSI {rsi_val:.0f} · MACD {arrow}",
+    }
+
+
+# 1차 필터 완화 단계. 통과 종목이 top_n 에 못 미치면 순서대로 한 단계씩 완화해
+# 재시도한다 — 실무에서 이 상황의 가장 흔한 원인은 종목 자체가 아니라 '당일
+# 거래량이 아직 다 반영되지 않아 20일 평균보다 낮게 잡히는' 데이터 타이밍이라
+# (장 마감 1시간 뒤 수집이면 뒤늦게 들어오는 체결분이 못 잡힌다), 거래량 조건부터
+# 누그러뜨린다. 그래도 부족하면 추세·가격 조건까지 순서대로 제거해 최후에는
+# 유효 종목 전체를 스코어링해서라도 top_n 을 채운다.
+_RELAX_LEVELS: list[dict] = [
+    {"label": "기준 그대로",                "vol_ratio_min": 1.0, "require_trend": True,  "require_price": True},
+    {"label": "거래량 조건 완화(평균 80%)",  "vol_ratio_min": 0.8, "require_trend": True,  "require_price": True},
+    {"label": "거래량 조건 완화(평균 50%)",  "vol_ratio_min": 0.5, "require_trend": True,  "require_price": True},
+    {"label": "거래량 조건 제외",            "vol_ratio_min": 0.0, "require_trend": True,  "require_price": True},
+    {"label": "추세(20/50일선) 조건도 제외", "vol_ratio_min": 0.0, "require_trend": False, "require_price": True},
+    {"label": "전 종목 스코어링(최후 수단)", "vol_ratio_min": 0.0, "require_trend": False, "require_price": False},
+]
+
+
+def _step1_candidates(
+    side: str, level: dict, valid: list[str],
+    last: pd.Series, sma20: pd.Series, sma50: pd.Series, sma100: pd.Series, sma200: pd.Series,
+    vol_today: pd.Series, vsma20: pd.Series,
+) -> list[str]:
+    if not level["require_price"]:
+        price_ok = pd.Series(True, index=valid)
+    elif side == "long":
+        price_ok = (last > sma100).reindex(valid).fillna(False)
+    else:
+        price_ok = (last < sma200).reindex(valid).fillna(False)
+
+    if not level["require_trend"]:
+        trend_ok = pd.Series(True, index=valid)
+    elif side == "long":
+        trend_ok = (sma20 > sma50).reindex(valid).fillna(False)
+    else:
+        trend_ok = (sma20 < sma50).reindex(valid).fillna(False)
+
+    if level["vol_ratio_min"] <= 0:
+        vol_ok = pd.Series(True, index=valid)
+    else:
+        vol_ok = (vol_today > vsma20 * level["vol_ratio_min"]).reindex(valid).fillna(False)
+
+    mask = price_ok & trend_ok & vol_ok
+    return [t for t in valid if bool(mask.get(t, False))]
+
+
+def _step1_with_relaxation(
+    side: str, valid: list[str], top_n: int,
+    last: pd.Series, sma20: pd.Series, sma50: pd.Series, sma100: pd.Series, sma200: pd.Series,
+    vol_today: pd.Series, vsma20: pd.Series,
+) -> tuple[list[str], int, str]:
+    """후보가 top_n 이상 모일 때까지, 또는 마지막 단계에 이를 때까지 완화 단계를 순서대로 시도."""
+    for i, level in enumerate(_RELAX_LEVELS):
+        cands = _step1_candidates(side, level, valid, last, sma20, sma50, sma100, sma200, vol_today, vsma20)
+        if len(cands) >= top_n or i == len(_RELAX_LEVELS) - 1:
+            return cands, i, level["label"]
+    return [], 0, _RELAX_LEVELS[0]["label"]  # 이론상 도달하지 않음(안전망)
+
+
 def sma_macd_rsi_scan(
     close_df: pd.DataFrame,
     volume_df: "pd.DataFrame | None",
@@ -336,11 +469,19 @@ def sma_macd_rsi_scan(
     Step 1 — 벡터 SMA 필터로 유니버스 축소 (for 문 없이 마지막 행만 비교):
       · 매수 통과: 현재가 > SMA100  AND  SMA20 > SMA50  AND  당일거래량 > 20일평균거래량
       · 매도 통과: 현재가 < SMA200  AND  SMA20 < SMA50  AND  당일거래량 > 20일평균거래량
-    Step 2 — 통과 종목만 MACD 히스토그램 / RSI(14) 로 통합점수(0~100) 산출 후 상위 top_n.
+      통과 종목이 top_n 에 못 미치면 `_RELAX_LEVELS` 순서대로 조건을 완화해 재시도한다
+      (long/short 독립적으로). 응답의 `*_filter_level`/`*_filter_note` 로 실제 적용된
+      단계를 알 수 있다 — 0 이면 원래 기준 그대로 통과한 것이고, 그보다 크면 완화가
+      적용된 것이니 화면에서 그 사실을 사용자에게 알려줘야 한다.
+    Step 2 — 후보만 MACD 히스토그램 / RSI(14) 로 통합점수(0~100) 산출 후 상위 top_n.
 
-    거래량 데이터가 없는 티커는 '수급' 조건을 판정할 수 없어 후보에서 빠진다.
+    거래량 데이터가 아예 없는 티커는 완화 최종 단계 전까지는 후보에서 빠진다.
     """
-    empty = {"long_picks": [], "short_picks": [], "scanned": 0, "as_of": None}
+    empty = {
+        "long_picks": [], "short_picks": [], "scanned": 0, "as_of": None,
+        "long_filter_level": 0, "long_filter_note": _RELAX_LEVELS[0]["label"],
+        "short_filter_level": 0, "short_filter_note": _RELAX_LEVELS[0]["label"],
+    }
     if close_df is None or close_df.empty:
         return empty
 
@@ -367,7 +508,7 @@ def sma_macd_rsi_scan(
             close = close.loc[:asof]
             vol   = vol.loc[:asof]
 
-    # ── Step 1: 벡터 1차 필터 ────────────────────────────────────────────────
+    # ── Step 1: 벡터 1차 필터 (완화 단계 포함) ─────────────────────────────────
     last   = close.iloc[-1]
     sma20  = close.rolling(20).mean().iloc[-1]
     sma50  = close.rolling(50).mean().iloc[-1]
@@ -375,81 +516,21 @@ def sma_macd_rsi_scan(
     sma200 = close.rolling(200).mean().iloc[-1]
 
     if vol.shape[1]:
-        vol_today = vol.iloc[-1]
-        vsma20    = vol.rolling(20).mean().iloc[-1]
-        vol_surge = (vol_today > vsma20).reindex(valid).fillna(False)
+        vol_today = vol.iloc[-1].reindex(valid)
+        vsma20    = vol.rolling(20).mean().iloc[-1].reindex(valid)
     else:
-        vol_surge = pd.Series(False, index=valid)
+        vol_today = pd.Series(index=valid, dtype=float)
+        vsma20    = pd.Series(index=valid, dtype=float)
 
-    long_pass  = ((last > sma100) & (sma20 > sma50)).reindex(valid).fillna(False) & vol_surge
-    short_pass = ((last < sma200) & (sma20 < sma50)).reindex(valid).fillna(False) & vol_surge
-
-    long_cands  = [t for t in valid if bool(long_pass.get(t, False))]
-    short_cands = [t for t in valid if bool(short_pass.get(t, False))]
+    long_cands, long_level, long_note = _step1_with_relaxation(
+        "long", valid, top_n, last, sma20, sma50, sma100, sma200, vol_today, vsma20)
+    short_cands, short_level, short_note = _step1_with_relaxation(
+        "short", valid, top_n, last, sma20, sma50, sma100, sma200, vol_today, vsma20)
 
     # ── Step 2: 스코어링 ────────────────────────────────────────────────────
     def _score(ticker: str, side: str) -> "dict | None":
-        c = close[ticker].dropna()
-        if len(c) < min_history or ticker not in vol.columns:
-            return None
-        vt = vol[ticker].dropna()
-        if len(vt) < 20:
-            return None
-        avg20 = float(vt.iloc[-20:].mean())
-        if avg20 <= 0:
-            return None
-        vratio = float(vt.iloc[-1] / avg20)
-
-        hist    = _macd_hist(c)
-        h_today = float(hist.iloc[-1])
-        h_prev  = float(hist.iloc[-2])
-        rsi_val = float(_rsi(c).iloc[-1])
-        price   = float(c.iloc[-1])
-
-        # 수급 폭발 (0~40, 캡)
-        s_vol = min(40.0, vratio * 15.0)
-
-        # MACD 가속도 (0~30): 히스토그램 확장 + 영선 돌파
-        if side == "long":
-            s_mom = 15.0 if (h_today - h_prev) > 0 else 0.0
-            if h_prev < 0 <= h_today:
-                s_mom += 15.0
-        else:
-            s_mom = 15.0 if (h_today - h_prev) < 0 else 0.0
-            if h_prev > 0 >= h_today:
-                s_mom += 15.0
-
-        # RSI 골디락스 존 (-10~30)
-        if side == "long":
-            if   50 <= rsi_val <= 65: s_rsi = 30.0
-            elif 40 <= rsi_val < 50:  s_rsi = 20.0
-            elif rsi_val >= 70:       s_rsi = -10.0
-            else:                     s_rsi = 0.0
-        else:
-            if   35 <= rsi_val <= 50: s_rsi = 30.0
-            elif 50 < rsi_val <= 60:  s_rsi = 20.0
-            elif rsi_val <= 30:       s_rsi = -10.0
-            else:                     s_rsi = 0.0
-
-        score = max(0.0, min(100.0, s_vol + s_mom + s_rsi))
-        arrow = "▲" if h_today >= h_prev else "▼"
-        trend = "정배열 (20>50일선)" if side == "long" else "역배열 (20<50일선)"
-        anchor = "100일선 위" if side == "long" else "200일선 아래"
-        return {
-            "ticker":         ticker,
-            "price":          round(price, 2),
-            "score":          round(score),
-            "volume_ratio":   round(vratio, 2),
-            "rsi":            round(rsi_val, 1),
-            "macd_hist":      round(h_today, 4),
-            "macd_hist_prev": round(h_prev, 4),
-            "components": {
-                "volume":   round(s_vol, 1),
-                "momentum": round(s_mom, 1),
-                "trend":    round(s_rsi, 1),
-            },
-            "reason": f"{anchor} · {trend} · 거래량 {vratio:.1f}배 · RSI {rsi_val:.0f} · MACD {arrow}",
-        }
+        vt = vol[ticker] if ticker in vol.columns else None
+        return _score_ticker_side(ticker, close[ticker], vt, side, min_history)
 
     longs  = [r for r in (_score(t, "long")  for t in long_cands)  if r]
     shorts = [r for r in (_score(t, "short") for t in short_cands) if r]
@@ -462,6 +543,47 @@ def sma_macd_rsi_scan(
         "short_picks": shorts[:top_n],
         "scanned":     len(valid),
         "as_of":       as_of.strftime("%Y-%m-%d") if hasattr(as_of, "strftime") else str(as_of),
+        "long_filter_level":  long_level,
+        "long_filter_note":   long_note,
+        "short_filter_level": short_level,
+        "short_filter_note":  short_note,
+    }
+
+
+def score_ticker_both_sides(
+    ticker: str,
+    close: pd.Series,
+    volume: "pd.Series | None",
+    min_history: int = 210,
+) -> dict:
+    """검색된 임의의 단일 종목의 매수/매도 참고 점수.
+
+    Signal Scan 상위 top_n 리스트에 없는 종목(비 S&P500 포함)도 검색하면 볼 수 있게
+    한다. 1차 필터(추세·가격) 통과 여부와 무관하게 점수를 계산해 반환하고,
+    `*_filter_pass` 로 오늘 실제로 1차 필터를 통과했을지도 함께 알려준다.
+    """
+    c = close.dropna()
+    if len(c) < min_history:
+        return {
+            "ticker": ticker, "price": None, "insufficient_history": True,
+            "long": None, "long_filter_pass": False,
+            "short": None, "short_filter_pass": False,
+        }
+
+    price  = float(c.iloc[-1])
+    sma20  = float(c.rolling(20).mean().iloc[-1])
+    sma50  = float(c.rolling(50).mean().iloc[-1])
+    sma100 = float(c.rolling(100).mean().iloc[-1])
+    sma200 = float(c.rolling(200).mean().iloc[-1])
+
+    return {
+        "ticker": ticker,
+        "price": round(price, 2),
+        "insufficient_history": False,
+        "long":              _score_ticker_side(ticker, close, volume, "long", min_history),
+        "long_filter_pass":  price > sma100 and sma20 > sma50,
+        "short":             _score_ticker_side(ticker, close, volume, "short", min_history),
+        "short_filter_pass": price < sma200 and sma20 < sma50,
     }
 
 

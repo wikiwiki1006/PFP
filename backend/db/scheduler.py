@@ -531,9 +531,15 @@ def _update_signal_scan():
     valid = [c for c in universe if c in close_df.columns]
     result = sma_macd_rsi_scan(close_df[valid], volume_df, top_n=10)
     save_common("signal_scan_sp500", result, ttl_seconds=_SIGNAL_SCAN_INTERVAL * 5)
+    # 완화 단계가 적용됐으면(level > 0) 로그에 남긴다 — '진짜 통과 종목이 없는 시장
+    # 상황'인지 '수집 타이밍 등으로 인한 일시적 결핍'인지 나중에 원인을 추적할 때 쓴다.
+    long_lv, short_lv = result.get("long_filter_level", 0), result.get("short_filter_level", 0)
+    relax_note = ""
+    if long_lv or short_lv:
+        relax_note = f" [완화 적용: 매수 L{long_lv}({result.get('long_filter_note')}) / 매도 L{short_lv}({result.get('short_filter_note')})]"
     logger.info(
         f"신호 스캔 갱신 완료: {result.get('scanned', 0)}개 스캔 · "
-        f"매수 {len(result.get('long_picks', []))} / 매도 {len(result.get('short_picks', []))}"
+        f"매수 {len(result.get('long_picks', []))} / 매도 {len(result.get('short_picks', []))}{relax_note}"
     )
 
 

@@ -413,6 +413,54 @@ def signal_scan(top_n: int = Query(default=10, ge=1, le=30)):
     }
 
 
+@router.get("/signal-score")
+def signal_score(ticker: str = Query(..., description="점수를 조회할 티커. 예: AAPL")):
+    """
+    단일 종목의 매수/매도 통합 점수 — Signal Scan 상위 N개 리스트에 없어도(순위 밖,
+    또는 S&P500 유니버스 밖 종목이어도) 검색하면 참고 점수를 볼 수 있게 한다.
+    `sma_macd_rsi_scan` 과 완전히 동일한 스코어링 공식을 쓴다.
+
+    종가는 DB 우선(없으면 즉석 수집)이고, 거래량은 DB(S&P500 백필분)에 없으면
+    이 요청 한정으로만 짧게 온디맨드 조회한다 — 결과를 DB에 저장하지 않는다.
+    """
+    from backend.db.market_cache import get_volume_from_db
+    from backend.services.trading_signals import score_ticker_both_sides
+
+    sym = ticker.upper().strip()
+    if not sym:
+        raise HTTPException(status_code=400, detail="티커를 입력하세요")
+
+    close_df = get_close_df([sym], period="1y", ttl=300)
+    if sym not in close_df.columns:
+        raise HTTPException(status_code=404, detail=f"{sym} 데이터를 찾을 수 없습니다")
+
+    def _volume_series():
+        vdf = get_volume_from_db([sym], "1y")
+        if vdf is not None and sym in vdf.columns:
+            return vdf[sym]
+        # S&P500 밖 종목 등 DB에 거래량이 없는 경우 — 이 조회 한정으로만 온디맨드 수집
+        try:
+            import yfinance as yf
+            from backend.db.market_cache import _yf_sem
+            with _yf_sem:
+                hist = yf.Ticker(sym).history(period="6mo")
+            if hist.empty or "Volume" not in hist.columns:
+                return None
+            vol = hist["Volume"]
+            if getattr(vol.index, "tz", None) is not None:
+                vol.index = vol.index.tz_localize(None)
+            return vol
+        except Exception as e:
+            logger.warning(f"[signal-score] {sym} 거래량 온디맨드 조회 실패: {e}")
+            return None
+
+    volume = _cached(f"signal_score_volume::{sym}", 900, _volume_series)
+    result = score_ticker_both_sides(sym, close_df[sym], volume)
+    if result.get("insufficient_history"):
+        raise HTTPException(status_code=400, detail=f"{sym}의 가격 이력이 부족해 점수를 계산할 수 없습니다")
+    return result
+
+
 def _fetch_ohlc(ticker: str) -> "pd.DataFrame | None":
     """OHLC 데이터: DB common_cache(12h) → 인메모리(1h) → yfinance(3y) 순으로 조회."""
     def _do():

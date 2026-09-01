@@ -262,6 +262,62 @@ function buildIndustryPdfHtml(result: IndustryResult, dateStr: string): string {
   </body></html>`
 }
 
+// 과거 레포트 탭 전용 — 저장된 레포트는 EquityResult/IndustryResult 구조 없이
+// {sections, raw, name} 뿐이라 위 두 빌더를 못 쓴다. 같은 톤으로 제목/부제만 주입.
+function buildGenericPdfHtml(title: string, subtitle: string, sections: Record<string, string>, accent: string): string {
+  const entries = Object.entries(sections).filter(([k]) => k !== 'header')
+  const bodyHtml = entries.map(([key, content], i) => `
+    <div class="sec-card">
+      <div class="sec-hdr"><span class="sec-badge">${i + 1}</span><span>${sectionTitle(key)}</span></div>
+      <div class="sec-body">${mdToHtml(content)}</div>
+    </div>
+  `).join('')
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:-apple-system,'Segoe UI',sans-serif;font-size:13px;color:#1f2937;background:#fff;line-height:1.7}
+    .hdr{background:linear-gradient(135deg,#1e3a5f,${accent});padding:24px 40px 20px;color:#fff}
+    .hdr .brand{font-size:9px;letter-spacing:4px;color:#bfdbfe;font-weight:700;margin-bottom:6px}
+    .hdr .title{font-size:20px;font-weight:900}
+    .hdr .sub{font-size:11px;color:#93c5fd;margin-top:6px}
+    .body{padding:24px 40px}
+    .sec-card{border:1px solid #e5e7eb;border-radius:8px;margin-bottom:14px;overflow:hidden;page-break-inside:avoid}
+    .sec-hdr{display:flex;align-items:center;gap:10px;padding:9px 16px;background:#f3f4f6;border-bottom:1px solid #e5e7eb;font-weight:700;font-size:13px;color:#1f2937}
+    .sec-badge{width:22px;height:22px;border-radius:50%;background:${accent};color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+    .sec-body{padding:14px 18px;color:#374151}
+    h1{font-size:15px;font-weight:700;color:#1e3a5f;margin:12px 0 5px}
+    h2{font-size:14px;font-weight:700;color:#1d4ed8;margin:10px 0 4px}
+    h3{font-size:13px;font-weight:700;color:#374151;margin:8px 0 3px}
+    p{margin:5px 0}
+    ul{padding-left:18px;margin:5px 0}
+    li{margin:2px 0;color:#4b5563}
+    .tbl-wrap{width:100%;overflow-x:auto;margin:10px 0}
+    table{width:100%;border-collapse:collapse;font-size:11px;table-layout:auto}
+    th{background:#eef2f7;color:#1e3a5f;border:1px solid #c7d4e0;padding:6px 9px;font-weight:700;text-align:left;white-space:nowrap}
+    td{color:#374151;border:1px solid #dde3ec;padding:5px 9px;word-break:break-word;vertical-align:top}
+    tr:nth-child(even) td{background:#f8fafc}
+    strong{color:#111827;font-weight:700}
+    em{color:#374151;font-style:italic}
+    .footer{margin-top:20px;padding-top:10px;border-top:1px solid #e5e7eb;font-size:10px;color:#9ca3af;text-align:center}
+  </style></head><body>
+  <div class="hdr">
+    <div class="brand">LENS CAPITAL RESEARCH</div>
+    <div class="title">${title}</div>
+    <div class="sub">${subtitle}</div>
+  </div>
+  <div class="body">${bodyHtml}<div class="footer">본 레포트는 AI 자동 생성 참고용으로, 투자 조언이 아닙니다.</div></div>
+  </body></html>`
+}
+
+/** 과거 레포트 파일명에서 표시용 제목을 뽑는다.
+    (예: lens_AAPL_20260901_1030.md → AAPL, lens_industry_반도체_20260901_1030.md → 반도체) */
+function reportDisplayTitle(name: string, isIndustry: boolean): string {
+  const base = name
+    .replace(/^lens_industry_/, '')
+    .replace(/^lens_/, '')
+    .replace(/_\d{8}_\d{4}\.md$/, '')
+  return isIndustry ? base.replace(/_/g, ' ') : base.toUpperCase()
+}
+
 // ── 진행 바 컴포넌트 ──────────────────────────────────────────────────────────
 function ProgressBar({ progress, elapsedMs, type }: {
   progress: number
@@ -831,18 +887,6 @@ function EquityTab() {
               <span className="text-sm text-[#94a3b8] ml-2">— {result.company_name}</span>
             )}
           </div>
-          {result.from_cache && (
-            <div className="bg-[#0b1a2e] border border-[#1e3a5f] rounded-lg px-3 py-2 flex items-center gap-2">
-              <span className="text-[10px] font-bold text-[#3b82f6] tracking-wider">공용 레포트</span>
-              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#1e2d40] text-[#94a3b8]">
-                {result.model_tier === 'deep' ? '심층' : '기본'}
-              </span>
-              <span className="text-[11px] text-[#94a3b8]">
-                {Math.round(result.cache_age_hours ?? 0)}시간 전 생성된 레포트를 재사용했습니다
-                {result.cache_ttl_hours ? ` (유효 ${result.cache_ttl_hours}시간)` : ''}
-              </span>
-            </div>
-          )}
           {headerContent && <ReportHeaderCard headerContent={headerContent} type="equity" />}
           <div className="space-y-1.5">
             {sections.filter(([k]) => k !== 'header').map(([key, content], i) => (
@@ -1244,18 +1288,6 @@ function IndustryTab() {
               <span className="text-sm text-[#64748b] ml-2">({result.industry_name_en})</span>
             )}
           </div>
-          {result.from_cache && (
-            <div className="bg-[#0b1a2e] border border-[#1e3a5f] rounded-lg px-3 py-2 flex items-center gap-2">
-              <span className="text-[10px] font-bold text-[#3b82f6] tracking-wider">공용 레포트</span>
-              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#1e2d40] text-[#94a3b8]">
-                {result.model_tier === 'deep' ? '심층' : '기본'}
-              </span>
-              <span className="text-[11px] text-[#94a3b8]">
-                {Math.round(result.cache_age_hours ?? 0)}시간 전 생성된 레포트를 재사용했습니다
-                {result.cache_ttl_hours ? ` (유효 ${result.cache_ttl_hours}시간)` : ''}
-              </span>
-            </div>
-          )}
           {headerContent && <ReportHeaderCard headerContent={headerContent} type="industry" />}
           <div className="space-y-1.5">
             {sections.filter(([k]) => k !== 'header').map(([key, content], i) => (
@@ -1279,6 +1311,7 @@ function HistoryTab() {
   const [filter,  setFilter]  = useState<'all' | 'equity' | 'industry'>('all')
   const [selected, setSelected] = useState<string | null>(null)
   const [viewResult, setViewResult] = useState<{ sections: Record<string, string>; raw: string; name: string } | null>(null)
+  const [pdfBusy, setPdfBusy] = useState(false)
 
   const { isAuthed } = useAuth()
   const histQ = useQuery({
@@ -1309,6 +1342,26 @@ function HistoryTab() {
   const viewSections = viewResult?.sections ? Object.entries(viewResult.sections) : []
   const viewHeader   = viewResult?.sections?.['header'] || ''
   const viewType     = selected?.includes('industry') ? 'industry' : 'equity'
+
+  // PDF 다운로드 — 저장된 레포트는 EquityResult/IndustryResult 구조가 없어
+  // buildGenericPdfHtml 을 쓴다(제목은 파일명에서 뽑는다).
+  const downloadPDF = async () => {
+    if (!viewResult || !selected) return
+    setPdfBusy(true)
+    try {
+      const isIndustry = viewType === 'industry'
+      const title    = reportDisplayTitle(selected, isIndustry)
+      const subtitle = `${isIndustry ? '산업 리서치' : '종목 리서치'} 레포트 · 과거 이력`
+      await downloadPdfFromHtml(
+        buildGenericPdfHtml(title, subtitle, viewResult.sections, isIndustry ? '#9b59b6' : '#2e75b6'),
+        `${selected.replace(/\.md$/, '')}.pdf`,
+      )
+    } catch (e) {
+      console.error('PDF 생성 실패:', e)
+    } finally {
+      setPdfBusy(false)
+    }
+  }
 
   // 과거 이력은 전부 개인 데이터다. 로그인 전에는 목록 자체를 만들지 않는다.
   if (!isAuthed) {
@@ -1388,9 +1441,27 @@ function HistoryTab() {
       )}
       {viewResult && !fileMut.isPending && (
         <div className="space-y-3 mt-4">
-          <div className="bg-[#060b14] border border-[#1e2d40] rounded-lg p-3">
-            <span className="text-[10px] text-[#4a5568] font-bold tracking-wider">레포트: </span>
-            <span className="text-xs text-[#94a3b8]">{viewResult.name}</span>
+          <div className="bg-[#060b14] border border-[#1e2d40] rounded-lg p-3 flex items-center justify-between gap-2">
+            <div>
+              <span className="text-[10px] text-[#4a5568] font-bold tracking-wider">레포트: </span>
+              <span className="text-xs text-[#94a3b8]">{viewResult.name}</span>
+            </div>
+            <button
+              onClick={downloadPDF}
+              disabled={pdfBusy}
+              className={cn(
+                'flex-shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] rounded font-bold transition-colors',
+                pdfBusy
+                  ? 'border border-[#1e2d40] text-[#64748b] opacity-50 cursor-not-allowed'
+                  : 'border border-[#2e75b6]/50 bg-[#2e75b6]/10 text-[#60a5fa] hover:bg-[#2e75b6]/20'
+              )}
+            >
+              {pdfBusy
+                ? <span className="w-3.5 h-3.5 border-2 border-[#2e75b6] border-t-transparent rounded-full animate-spin" />
+                : <Download className="w-3.5 h-3.5" />
+              }
+              PDF
+            </button>
           </div>
           {viewHeader && <ReportHeaderCard headerContent={viewHeader} type={viewType} />}
           <div className="space-y-1.5">

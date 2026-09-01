@@ -65,14 +65,14 @@ echo -e "${YELLOW}[3/3] 백엔드 시작 (포트 8000)…${NC}"
 pkill -f "uvicorn backend.main:app" 2>/dev/null || true
 sleep 1
 
-# 가상환경 활성화
-source "$SCRIPT_DIR/venv/bin/activate"
-
 # 로그 파일
 LOG="$SCRIPT_DIR/pfp_server.log"
 
-# 백엔드 백그라운드 실행
-nohup uvicorn backend.main:app \
+# 백엔드 백그라운드 실행.
+# "venv/bin/python -m uvicorn"로 부른다 — venv/bin/uvicorn 의 셔뱅(#!)이 이
+# venv 가 예전에 있던 경로(다른 디렉터리)를 그대로 가리키고 있어 옮겨온 뒤로는
+# 깨져 있다. venv/bin/python 자체는 정상이라 -m 으로 불러야 확실히 동작한다.
+nohup "$SCRIPT_DIR/venv/bin/python" -m uvicorn backend.main:app \
     --host 0.0.0.0 \
     --port 8000 \
     --log-level info \

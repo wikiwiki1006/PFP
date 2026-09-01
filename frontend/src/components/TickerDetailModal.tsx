@@ -17,6 +17,7 @@ import { X, Search, TrendingUp, TrendingDown, Minus } from 'lucide-react'
 import { getTickerDetail, searchTickers } from '@/api'
 import type { TickerDetail, OHLCVPoint } from '@/types'
 import { useTheme } from '@/lib/ThemeContext'
+import { useIsMobile } from '@/lib/useIsMobile'
 
 // ── 색상 팔레트 ──────────────────────────────────────────────────────────────
 /**
@@ -99,20 +100,9 @@ const LIGHT: typeof DARK = {
   backdrop:'rgba(15,23,42,0.45)',
 }
 
-/** 좁은 화면인지. 이 파일은 색과 크기를 전부 인라인 style 로 넣기 때문에
- *  CSS 미디어 쿼리가 닿지 않는다 — 분기를 JS 에서 해야 한다.
- *  기준값 768px 은 Tailwind 의 md 와 같아서 나머지 화면과 어긋나지 않는다. */
-function useIsMobile(): boolean {
-  const [m, setM] = useState(() =>
-    typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches)
-  useEffect(() => {
-    const mq = window.matchMedia('(max-width: 767px)')
-    const on = () => setM(mq.matches)
-    mq.addEventListener('change', on)
-    return () => mq.removeEventListener('change', on)
-  }, [])
-  return m
-}
+// 좁은 화면 판별은 lib/useIsMobile 공용 훅을 쓴다(아래 import). 이 파일은
+// 색과 크기를 전부 인라인 style 로 넣기 때문에 CSS 미디어 쿼리가 닿지 않아
+// 분기를 JS 에서 해야 하는데, AlphaTerminal.tsx 도 같은 이유로 이 훅을 쓴다.
 
 type Palette = typeof DARK
 
@@ -343,9 +333,47 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
   const [viewStart, setViewStart] = useState(0)
   const [viewEnd,   setViewEnd]   = useState(0)
   const chartRef  = useRef<HTMLDivElement>(null)
+  const candleWrapRef = useRef<HTMLDivElement>(null)  // 캔들 서브차트만 — BB 안/밖 판정용
   const panRef    = useRef<{ x: number; start: number; end: number } | null>(null)
   const isPanning = useRef(false)
   const sugTimer  = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // 볼린저밴드 안/밖 판정 함수의 최신 버전을 담아 둔다. 판정 함수는 visData·
+  // priceDomain(아래에서 정의)에 의존하는데, 그걸 팬/핀치 리스너 effect 의
+  // 의존성에 넣으면 뷰가 바뀔 때마다(팬 중 매 프레임) 리스너를 뗐다 다시
+  // 달게 돼 그 자체가 버벅임의 원인이 된다. ref 로 우회한다.
+  const hitTestRef = useRef<((x: number, y: number) => boolean) | null>(null)
+  // 터치로 차트를 짚으면 뜨는 툴팁 — recharts 는 mouseleave 로 지우는데 터치엔
+  // 그에 대응하는 이벤트가 없어 손을 떼도 안 사라진다. 포인터업에서 강제로 숨긴다.
+  const [touchTooltipHidden, setTouchTooltipHidden] = useState(false)
+
+  // 드래그로 팬(좌우 이동)할 때 매 pointermove 마다 setState 로 바로 반영하면
+  // 터치 샘플링 주기(최대 120Hz)마다 캔들·거래량·스토캐스틱 3개 차트가 전부
+  // 다시 그려져 저사양 기기에서 버벅인다. viewRef 를 실제 진행 중인 값의
+  // 기준으로 두고, 화면에 반영(=setState, 리렌더)은 rAF 로 프레임당 한 번만 한다.
+  const viewRef = useRef({ start: 0, end: 0 })
+  const rafRef  = useRef<number | null>(null)
+
+  const scheduleView = useCallback((start: number, end: number) => {
+    viewRef.current = { start, end }
+    if (rafRef.current == null) {
+      rafRef.current = requestAnimationFrame(() => {
+        rafRef.current = null
+        setViewStart(viewRef.current.start)
+        setViewEnd(viewRef.current.end)
+      })
+    }
+  }, [])
+
+  // 버튼 클릭 · 초기 로드처럼 드문 조작은 프레임을 기다리지 않고 바로 반영한다.
+  const commitView = useCallback((start: number, end: number) => {
+    if (rafRef.current != null) { cancelAnimationFrame(rafRef.current); rafRef.current = null }
+    viewRef.current = { start, end }
+    setViewStart(start)
+    setViewEnd(end)
+  }, [])
+
+  // 언마운트 시 예약돼 있던 프레임이 뒤늦게 실행되며 setState 하는 것을 막는다.
+  useEffect(() => () => { if (rafRef.current != null) cancelAnimationFrame(rafRef.current) }, [])
 
   // ── 데이터 로드 ──────────────────────────────────────────────────────────
   const load = useCallback(async (sym: string, p: Period) => {
@@ -354,34 +382,43 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
     try {
       const d = await getTickerDetail(sym, p)
       setData(d)
-      setViewStart(0); setViewEnd(d.ohlcv.length)
+      commitView(0, d.ohlcv.length)
     } catch (e: any) {
       setError(e?.response?.data?.detail || '데이터 로드 실패')
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [commitView])
 
   useEffect(() => { if (ticker) load(ticker, period) }, [ticker, period, load])
 
   // ── 줌 · 팬 ────────────────────────────────────────────────────────────
   // 예전에는 mousedown/mousemove 만 붙어 있어 휴대폰에서는 차트가 아예
   // 움직이지 않았다. 포인터 이벤트는 마우스와 터치를 같은 방식으로 주므로
-  // 하나로 둘 다 처리한다. 두 손가락 간격 변화로 확대/축소도 받는다.
+  // 하나로 둘 다 처리한다.
+  // 확대/축소는 휠(데스크탑) · 버튼(모바일) · 두 손가락 핀치로 한다. 핀치는
+  // 예전에 뺐다가 다시 넣었다 — 이번엔 zoomBy 와 마찬가지로 scheduleView(rAF
+  // 배칭)로 넣어서, 터치 샘플링 주기마다 리렌더하던 예전의 버벅임을 없앴다.
+  // 터치 한 손가락일 때는 시작 지점이 볼린저밴드 채널 '안'이면 스크럽(값 표시,
+  // 뷰는 안 움직임), '밖'이면 팬(좌우 이동)으로 나뉜다 — hitTestRef 참고.
+  // data 에만 의존하도록 viewStart/viewEnd 는 state 대신 viewRef 에서 읽는다 —
+  // 그래야 이 함수의 참조가 팬 중에도(매 프레임) 안 바뀌고, 아래 포인터
+  // 이벤트를 붙이는 effect 도 그때마다 리스너를 떼었다 다시 달지 않는다.
   const zoomBy = useCallback((factor: number) => {
     if (!data) return
     const total = data.ohlcv.length
-    const center = (viewStart + viewEnd) / 2
-    const half   = ((viewEnd - viewStart) / 2) * factor
+    const { start, end } = viewRef.current
+    const center = (start + end) / 2
+    const half   = ((end - start) / 2) * factor
     const ns = Math.max(0,     Math.floor(center - half))
     const ne = Math.min(total, Math.ceil(center  + half))
-    if (ne - ns >= 10) { setViewStart(ns); setViewEnd(ne) }
-  }, [data, viewStart, viewEnd])
+    if (ne - ns >= 10) scheduleView(ns, ne)
+  }, [data, scheduleView])
 
   const resetZoom = useCallback(() => {
     if (!data) return
-    setViewStart(0); setViewEnd(data.ohlcv.length)
-  }, [data])
+    commitView(0, data.ohlcv.length)
+  }, [data, commitView])
 
   useEffect(() => {
     const el = chartRef.current
@@ -403,15 +440,25 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
     }
 
     const onDown = (e: PointerEvent) => {
+      if (e.pointerType === 'touch') setTouchTooltipHidden(false)
       pts.set(e.pointerId, { x: e.clientX, y: e.clientY })
+
       if (pts.size === 2) {
-        pinchStart = { dist: spread(), start: viewStart, end: viewEnd }
+        // 두 번째 손가락 → 핀치로 전환. 진행 중이던 팬/스크럽은 취소.
+        pinchStart = { dist: spread(), start: viewRef.current.start, end: viewRef.current.end }
         isPanning.current = false
         panRef.current = null
       } else if (pts.size === 1) {
-        isPanning.current = true
-        panRef.current = { x: e.clientX, start: viewStart, end: viewEnd }
-        el.style.cursor = 'grabbing'
+        pinchStart = null
+        // 볼린저밴드 채널 '안'에서 시작한 터치는 스크럽(값 표시)만 하고 뷰는
+        // 그대로 둔다 — recharts 자체 터치 추적이 손가락을 따라 툴팁을 보여준다.
+        // '밖'(또는 마우스)이면 기존처럼 좌우 팬.
+        const startsInsideBB = e.pointerType === 'touch' && (hitTestRef.current?.(e.clientX, e.clientY) ?? false)
+        if (!startsInsideBB) {
+          isPanning.current = true
+          panRef.current = { x: e.clientX, start: viewRef.current.start, end: viewRef.current.end }
+          el.style.cursor = 'grabbing'
+        }
       }
     }
 
@@ -427,7 +474,10 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
           const half   = (range / 2) * (pinchStart.dist / d)
           const ns = Math.max(0,     Math.floor(center - half))
           const ne = Math.min(total, Math.ceil(center  + half))
-          if (ne - ns >= 10) { setViewStart(ns); setViewEnd(ne) }
+          // 확대도 팬과 똑같이 rAF 로 묶는다 — 예전 핀치가 버벅였던 건 손가락
+          // 움직임마다(최대 120Hz) 바로 setState 해 매번 캔들·거래량·스토캐스틱
+          // 3개 차트를 다시 그렸기 때문이다. 프레임당 한 번만 반영한다.
+          if (ne - ns >= 10) scheduleView(ns, ne)
         }
         e.preventDefault()
         return
@@ -440,8 +490,8 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
       if (Math.abs(dx) < 4) return
       const shift = Math.round(dx / el.offsetWidth * range)
       const ns = Math.max(0, Math.min(total - range, panRef.current.start + shift))
-      setViewStart(ns)
-      setViewEnd(ns + range)
+      // setState 를 바로 부르지 않고 rAF 로 묶는다 — 프레임당 한 번만 리렌더.
+      scheduleView(ns, ns + range)
     }
 
     const onUp = (e: PointerEvent) => {
@@ -451,6 +501,7 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
         isPanning.current = false
         panRef.current = null
         el.style.cursor = 'default'
+        if (e.pointerType === 'touch') setTouchTooltipHidden(true)
       }
     }
 
@@ -466,7 +517,10 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
       window.removeEventListener('pointerup', onUp)
       window.removeEventListener('pointercancel', onUp)
     }
-  }, [data, viewStart, viewEnd, zoomBy])
+    // viewStart/viewEnd 를 의도적으로 뺐다 — 팬 중 매 프레임 좌표는 viewRef 로
+    // 읽으므로, 이 리스너들을 매번 떼었다 다시 달 필요가 없다(그 자체도 비용이다).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, zoomBy, scheduleView])
 
   // ── 자동완성 ─────────────────────────────────────────────────────────────
   const onQueryChange = (v: string) => {
@@ -510,6 +564,39 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
     const pad = (hi - lo) * 0.05
     return [Math.max(0, lo - pad), hi + pad]
   }, [visData, showMA])
+
+  // 캔들 차트 JSX 에 준 margin/축 크기와 반드시 같아야 한다(아래 렌더 부분 참조).
+  const CANDLE_MARGIN = { top: 8, right: 12, bottom: 0 }
+  const CANDLE_Y_AXIS_WIDTH  = 60
+  const CANDLE_X_AXIS_HEIGHT = 20
+
+  /** 터치 시작 지점이 캔들 차트의 볼린저밴드 채널(상단~하단) 안인지 판정.
+      팬/핀치 리스너가 매 프레임 다시 붙지 않도록, 이 함수 자체가 아니라
+      hitTestRef.current 를 통해 호출된다(아래 effect 에서 최신 버전을 넣어준다). */
+  const isInsideBollingerBand = useCallback((clientX: number, clientY: number): boolean => {
+    const el = candleWrapRef.current
+    if (!el || !showBB || !visData.length) return false
+    const rect = el.getBoundingClientRect()
+    const plotLeft   = rect.left + CANDLE_Y_AXIS_WIDTH
+    const plotRight  = rect.right - CANDLE_MARGIN.right
+    const plotTop    = rect.top + CANDLE_MARGIN.top
+    const plotBottom = rect.bottom - CANDLE_X_AXIS_HEIGHT - CANDLE_MARGIN.bottom
+    if (plotRight <= plotLeft || plotBottom <= plotTop) return false
+    if (clientX < plotLeft || clientX > plotRight || clientY < plotTop || clientY > plotBottom) return false
+
+    const relX = (clientX - plotLeft) / (plotRight - plotLeft)
+    const idx  = Math.max(0, Math.min(visData.length - 1, Math.round(relX * (visData.length - 1))))
+    const point = visData[idx]
+    const bbU = point?.bb_upper, bbL = point?.bb_lower
+    if (bbU == null || bbL == null) return false
+
+    const relY = (clientY - plotTop) / (plotBottom - plotTop)
+    const [dMin, dMax] = priceDomain
+    const price = dMax - relY * (dMax - dMin)
+    return price >= bbL && price <= bbU
+  }, [showBB, visData, priceDomain])
+
+  useEffect(() => { hitTestRef.current = isInsideBollingerBand }, [isInsideBollingerBand])
 
   // 캔들스틱 레이어: priceDomain이 바뀔 때마다 재생성 (클로저로 최신 데이터 캡처)
   const CandleLayer = useMemo(() => makeCandleRenderer(visData, priceDomain, C), [visData, priceDomain, C])
@@ -708,20 +795,23 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
               }}>
 
                 {/* 메인 캔들 차트 */}
-                <div style={{ flex: isMobile ? '0 0 auto' : '0 0 55%', height: isMobile ? 300 : undefined, borderBottom: `1px solid ${C.border}` }}>
+                <div ref={candleWrapRef} style={{ flex: isMobile ? '0 0 auto' : '0 0 55%', height: isMobile ? 300 : undefined, borderBottom: `1px solid ${C.border}` }}>
                   <ResponsiveContainer width="100%" height="100%">
                     <ComposedChart
                       data={visData}
                       margin={{ top: 8, right: 12, left: 0, bottom: 0 }}
                     >
                       <CartesianGrid strokeDasharray="3 3" stroke={C.grid} opacity={0.5} />
-                      <XAxis dataKey="date" tick={axisStyle} interval={xInterval}
+                      <XAxis dataKey="date" tick={axisStyle} interval={xInterval} height={20}
                         tickFormatter={v => v?.slice(5)} />
                       <YAxis domain={priceDomain} tick={axisStyle} width={60}
                         tickFormatter={v => `$${v.toFixed(0)}`} />
-                      <Tooltip content={<CandleTooltip />} />
+                      <Tooltip active={touchTooltipHidden ? false : undefined} content={<CandleTooltip />} />
 
-                      {/* 볼린저밴드 */}
+                      {/* 볼린저밴드 — recharts <Area> 는 기본적으로 선 아래를 축 바닥까지
+                          전부 채운다. bb_upper 만 회색으로 채우면 bb_lower 밑까지 다 회색이
+                          돼버려서(실제로 그렇게 보였다), bb_lower 를 모달 배경색으로 '덧칠'해
+                          그 아래를 지운다 — 남는 건 두 밴드 사이뿐이다. */}
                       {showBB && (
                         <>
                           <Area dataKey="bb_upper" fill={C.bbFill} stroke={C.bbUpper}
@@ -729,7 +819,7 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                             dot={false} activeDot={false} legendType="none" isAnimationActive={false} />
                           <Line dataKey="bb_mid" stroke={C.bbUpper} strokeWidth={1}
                             dot={false} activeDot={false} strokeDasharray="2 2" isAnimationActive={false} />
-                          <Area dataKey="bb_lower" fill="transparent" stroke={C.bbUpper}
+                          <Area dataKey="bb_lower" fill={C.bg} fillOpacity={1} stroke={C.bbUpper}
                             strokeWidth={1} strokeDasharray="4 2"
                             dot={false} activeDot={false} legendType="none" isAnimationActive={false} />
                         </>
@@ -775,8 +865,8 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                         <span style={{ color: C.muted }}>BB(20,2)</span>
                       </div>
                     )}
-                    {/* 휴대폰에는 스크롤 휠이 없다. 핀치도 되지만 한 손으로는
-                        어려우므로 확실히 눌리는 버튼을 함께 둔다. */}
+                    {/* 휴대폰에는 스크롤 휠이 없다. 이 버튼 또는 두 손가락 핀치로 확대/축소한다.
+                        볼린저밴드 안쪽을 한 손가락으로 짚으면 값 스크럽, 바깥쪽이면 좌우 이동(팬). */}
                     {isMobile ? (
                       <div style={{ marginLeft: 'auto', display: 'flex', gap: 6, flexShrink: 0 }}>
                         {([['−', () => zoomBy(1.3), '축소'],
@@ -828,7 +918,8 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                         dot={false} isAnimationActive={false} connectNulls />
                       <Line dataKey="stoch_d" stroke={C.stochD} strokeWidth={1.5}
                         dot={false} isAnimationActive={false} connectNulls strokeDasharray="4 2" />
-                      <Tooltip formatter={(v: any) => [typeof v === 'number' ? v.toFixed(1) : v, '']}
+                      <Tooltip active={touchTooltipHidden ? false : undefined}
+                        formatter={(v: any) => [typeof v === 'number' ? v.toFixed(1) : v, '']}
                         contentStyle={{ background: C.inputBg, border: `1px solid ${C.border}`, color: C.text, fontSize: 10 }} />
                     </LineChart>
                   </ResponsiveContainer>

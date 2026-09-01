@@ -29,6 +29,10 @@ interface Row extends SetupHolding {
   /** 티커별 가격 자동조회 진행 표시 */
   loading?: boolean
   error?: string
+  /** 참고용 현재 시장가 — 매수 단가(price) 입력에 자동으로 채우지 않는다.
+      실제 매수한 단가는 오늘 시세와 다른 경우가 대부분이라, 자동 채움은
+      사용자가 못 알아채고 잘못된 평단가를 그대로 등록하게 만든다. */
+  currentPrice?: number
 }
 
 const today = () => new Date().toISOString().slice(0, 10)
@@ -56,16 +60,15 @@ export default function SetupWizard({ open, replace = false, onClose, onDone }: 
   const setRow = (i: number, patch: Partial<Row>) =>
     setRows(rs => rs.map((r, k) => (k === i ? { ...r, ...patch } : r)))
 
-  /** 티커를 확정하면 현재가를 받아 매수 단가의 기본값으로 채운다. */
+  /** 티커를 확정하면 현재가를 받아 '현재가' 참고란에 표시한다.
+      매수 단가(price)는 사용자가 직접 입력해야 한다 — 자동으로 채우지 않는다. */
   const fillPrice = async (i: number, ticker: string) => {
     const t = ticker.trim().toUpperCase()
     if (!t) return
-    setRow(i, { ticker: t, loading: true, error: '' })
+    setRow(i, { ticker: t, loading: true, error: '', currentPrice: undefined })
     try {
       const r = await getTickerPrice(t)
-      // 이미 사용자가 단가를 적었으면 덮어쓰지 않는다.
-      setRows(rs => rs.map((row, k) =>
-        k === i ? { ...row, loading: false, price: row.price || r.price } : row))
+      setRow(i, { loading: false, currentPrice: r.price })
     } catch {
       setRow(i, { loading: false, error: '확인할 수 없는 종목입니다' })
     }
@@ -235,6 +238,11 @@ export default function SetupWizard({ open, replace = false, onClose, onDone }: 
                   </div>
 
                   {r.error && <p className="mt-1 pl-1 text-[11px] text-[#ef4444]">{r.error}</p>}
+                  {!r.error && r.currentPrice != null && (
+                    <p className="mt-1 pl-1 text-[11px] text-[#4a5568]">
+                      현재가 {usd(r.currentPrice)} — 매수 단가는 직접 입력하세요
+                    </p>
+                  )}
 
                   {sug.i === i && sug.list.length > 0 && (
                     <div className="absolute left-0 top-full z-20 mt-1 max-h-44 w-72 overflow-y-auto rounded-lg border border-[#1e2d40] bg-[#0b1220] shadow-xl">

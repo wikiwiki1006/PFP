@@ -6,6 +6,7 @@ import {
 import { Search, Star } from 'lucide-react'
 import { getMarketRegime } from '@/api'
 import { COLOR_UP, COLOR_DOWN, COLOR_NEUTRAL, regimeColor, regimeLabel } from './colors'
+import { useTouchDismissTooltip } from '@/lib/useTouchDismissTooltip'
 import type { HoldingsMap } from '@/types'
 
 const YEAR_OPTIONS = [1, 2, 3, 5] as const
@@ -34,6 +35,7 @@ export default function RegimePanel({ holdings = {} }: RegimePanelProps) {
   const [tickerInitialized, setTickerInitialized] = useState(false)
   const [input, setInput]   = useState('')
   const [years, setYears]   = useState<1 | 2 | 3 | 5>(1)
+  const { tooltipActive, onPointerDown, onPointerUp } = useTouchDismissTooltip()
 
   const holdingTickers = Object.keys(holdings).filter(t => t !== 'CASH')
 
@@ -185,18 +187,21 @@ export default function RegimePanel({ holdings = {} }: RegimePanelProps) {
             </div>
           )}
 
+          {/* 터치로 짚어 값을 보다가 손을 떼면 팝업이 안 사라지는 문제 — onPointerDown/Up 으로 강제 정리 */}
+          <div onPointerDown={onPointerDown} onPointerUp={onPointerUp}>
           <ResponsiveContainer width="100%" height={320}>
             <ComposedChart data={chartData} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#1e2d40" vertical={false} />
               <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} minTickGap={50} />
               <YAxis tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} domain={['auto', 'auto']} width={55} />
-              <Tooltip content={<ChartTooltip />} />
+              <Tooltip active={tooltipActive} content={<ChartTooltip />} />
               <Legend wrapperStyle={{ fontSize: '11px', color: '#64748b' }} />
               <Line type="monotone" dataKey="bull"     stroke={COLOR_UP}      strokeWidth={2.5} dot={false} connectNulls={false} name="상승" isAnimationActive={false} />
               <Line type="monotone" dataKey="sideways" stroke={COLOR_NEUTRAL} strokeWidth={2.5} dot={false} connectNulls={false} name="횡보" isAnimationActive={false} />
               <Line type="monotone" dataKey="bear"     stroke={COLOR_DOWN}    strokeWidth={2.5} dot={false} connectNulls={false} name="하락" isAnimationActive={false} />
             </ComposedChart>
           </ResponsiveContainer>
+          </div>
         </>
       )}
     </div>

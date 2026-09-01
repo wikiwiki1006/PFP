@@ -242,6 +242,22 @@ export interface SignalScanResult {
   short_picks: SignalScanPick[]
   scanned: number
   as_of?: string | null
+  /** 완화 사다리 적용 단계. 0 = 원래 기준 그대로 통과. */
+  long_filter_level?: number
+  long_filter_note?: string
+  short_filter_level?: number
+  short_filter_note?: string
+}
+
+/** 검색된 임의 종목의 매수/매도 참고 점수 — Signal Scan 상위 N개에 없어도 조회 가능. */
+export interface SignalScoreResult {
+  ticker: string
+  price: number | null
+  insufficient_history: boolean
+  long: SignalScanPick | null
+  long_filter_pass: boolean
+  short: SignalScanPick | null
+  short_filter_pass: boolean
 }
 
 export interface TechnicalChartPoint {
