@@ -7,6 +7,7 @@ routers/macro.py
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 import uuid
@@ -40,6 +41,8 @@ from backend.services.market_data import (
     GICS_SECTOR_ETFS,
 )
 from backend.services.portfolio_calculator import calculate_metrics, build_equity_curve
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/macro", tags=["macro"])
 
@@ -100,11 +103,22 @@ def analyze_macro(
     tier = resolve_model_tier("deep" if "sonnet" in req_model else "basic", _auth)
     if tier == "deep":
         enforce_deep_limit(_auth, "macro_scenario")
+        # 기록이 실패해도 이 요청은 계속 진행하되, 조용히 넘기지는 않는다.
+        # 이 테이블이 할당량의 유일한 근거라, 기록이 안 되는 상태가 로그 없이
+        # 이어지면 그동안 제한이 사실상 없어진다 (§1.3).
+        #
+        # 여기서 예외를 다시 올리지 않는 이유는 reports.py 의 _record_deep_use
+        # 와 같다 — 이 요청은 바로 위 enforce_deep_limit 을 이미 통과했다.
+        # 기록 실패가 위태롭게 하는 것은 이 요청이 아니라 다음 요청이고,
+        # 그쪽은 count_recent 가 실패 시 예외를 올려 막는다.
         try:
             from backend.db import usage_repo
             usage_repo.record_use(uid, "macro_scenario")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(
+                f"심층 분석 사용 기록 실패. 이 사용은 할당량에 잡히지 않는다 "
+                f"(uid={uid}, kind=macro_scenario): {e}"
+            )
 
     def _run() -> None:
         try:
