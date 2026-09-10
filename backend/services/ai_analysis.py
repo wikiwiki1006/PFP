@@ -1127,18 +1127,41 @@ def generate_daily_brief(
     cur = get_market(market).currency
     holdings_summary = _format_portfolio(holdings, market)
 
+    # 금액은 전부 계산해서 넘긴다. 비율만 주면 모델이 수량을 곱해 금액을
+    # 지어내는데 그 산술이 틀린다 — 실측으로 1일 손익 +₩10,239 를
+    # +₩688,000 으로, 총자산 ₩24,480,000 을 ₩13,350,000 으로 썼다.
     price_lines = []
     for t, d in price_data.items():
         # 값이 없으면 0 을 적지 않는다. '0.00%' 는 '보합' 이지 '모름' 이 아니고,
         # 모델은 그 차이를 알 수 없다 (§1.3).
         chg = d.get("chg_pct")
         pnl = d.get("pnl_pct")
+        day_pnl = d.get("day_pnl")
         chg_str = f"{chg:+.2f}%" if chg is not None else "전일 대비 불명"
         pnl_str = f"{pnl:+.2f}%" if pnl is not None else "불명"
+        day_str = _fmt_price(day_pnl, cur) if day_pnl is not None else "불명"
         price_lines.append(
-            f"  {t}: {_fmt_price(d.get('price'), cur)} ({chg_str}) | P&L: {pnl_str}"
+            f"  {t}: {_fmt_price(d.get('price'), cur)} ({chg_str})"
+            f" | 평가액 {_fmt_price(d.get('pos_val'), cur)}"
+            f" | 1일 손익 {day_str}"
+            f" | 누적 P&L {pnl_str}"
         )
     price_block = "\n".join(price_lines) if price_lines else "  (데이터 없음)"
+
+    stock_val = sum(d["pos_val"] for d in price_data.values() if d.get("pos_val") is not None)
+    day_pnls  = [d["day_pnl"] for d in price_data.values() if d.get("day_pnl") is not None]
+    cash_val  = float(holdings.get("CASH", {}).get("q") or 0)
+    total_line = (
+        f"  주식 평가액 {_fmt_price(stock_val, cur)}"
+        f" + 현금 {_fmt_price(cash_val, cur)}"
+        f" = 총자산 {_fmt_price(stock_val + cash_val, cur)}"
+    )
+    if len(day_pnls) == len(price_data) and day_pnls:
+        total_line += f"  ·  오늘 손익 합계 {_fmt_price(sum(day_pnls), cur)}"
+    elif day_pnls:
+        # 일부만 계산되면 합계를 내지 않는다. 부분 합을 전체 합처럼 적으면
+        # 모델은 그걸 포트폴리오 전체 손익으로 인용한다.
+        total_line += "  ·  오늘 손익 합계: 일부 종목 데이터 없음 — 합산 불가"
 
     top_news = "\n".join(f"  - [{n['ticker']}] {n['title']}" for n in news_items[:8])
 
@@ -1152,6 +1175,10 @@ def generate_daily_brief(
 
 # 오늘의 등락
 {price_block}
+{total_line}
+
+금액은 위에 계산해 두었습니다. 직접 곱하거나 더해서 새 금액을 만들지 말고
+그대로 인용하세요. 없는 값은 '불명' 으로 적혀 있으니 추정하지 마세요.
 
 # 매크로 지표
 {macro_block}

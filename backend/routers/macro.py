@@ -359,18 +359,32 @@ def daily_brief(
     close_df = get_close_df(tickers, period="5d", ttl=60)
 
     # 가격 데이터 수집
+    #
+    # 비율만 넘기면 모델이 수량을 곱해 금액을 만들어 내는데, 그 산술이 맞지
+    # 않는다 (실측: 1일 손익 +₩10,239 을 +₩688,000 으로 썼다). daily_report
+    # 쪽은 pos_val·day_pnl 을 미리 계산해 넘겨서 이 문제가 없다. 같은 방식을
+    # 쓴다 — 모델에게 시킬 일이 아니라 여기서 끝낼 일이다.
     price_data = {}
     if not close_df.empty and len(close_df) >= 2:
         cur, prev = close_df.iloc[-1], close_df.iloc[-2]
         for t in tickers:
             if t not in close_df.columns:
                 continue
-            p = float(cur.get(t, 0))
-            pp = float(prev.get(t, p))
+            p  = cur.get(t)
+            pp = prev.get(t)
+            p  = float(p) if p is not None and p == p else None
+            pp = float(pp) if pp is not None and pp == pp else None
+            if p is None:
+                continue
+            qty = float(holdings[t].get("q") or 0)
+            avg = float(holdings[t].get("avg") or 0)
             price_data[t] = {
                 "price":   round(p, 2),
-                "chg_pct": round((p / pp - 1) * 100 if pp else 0, 4),
-                "pnl_pct": round((p / holdings[t]["avg"] - 1) * 100 if holdings[t]["avg"] else 0, 4),
+                # 값이 없으면 0 이 아니라 None. '0.00%' 는 '보합'으로 읽힌다 (§1.3).
+                "chg_pct": round((p / pp - 1) * 100, 4) if pp else None,
+                "pnl_pct": round((p / avg - 1) * 100, 4) if avg else None,
+                "pos_val": round(p * qty, 2),
+                "day_pnl": round((p - pp) * qty, 2) if pp is not None else None,
             }
 
     # 거시지표는 여기서 고르지 않는다. 시장에 맞는 것을 고르는 분기가
