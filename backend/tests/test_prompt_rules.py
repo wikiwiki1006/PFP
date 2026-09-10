@@ -184,19 +184,10 @@ _FILL_THE_GAP = [
     "학습 지식", "사전 지식", "알고 있는", "기억하는",
 ]
 
-_C_XFAIL = {
-    "daily_report._build_prompt[KR]": (
-        "_build_prompt tells the model to combine the data with a web search "
-        "and to 'fill in' when news is missing, but the call that sends this "
-        "prompt (daily_report._generate_with_claude) passes no tools. The "
-        "model cannot search, so it answers from memory and stale news lands "
-        "in a report dated today. Delete this marker once the instruction is "
-        "removed or the call is given tools."
-    ),
-    "daily_report._build_prompt[US]": (
-        "Same builder, same instruction, same toolless call."
-    ),
-}
+# reportmanage 가 f72813b 에서 지시를 제거했다 — 이제 "제공된 데이터로만
+# 작성하라. 검색하거나 기억에 의존하지 마라" 로 되어 있다. 위반이 없으므로
+# 목록이 비어 있고, 다시 생기면 이 검사가 잡는다.
+_C_XFAIL: dict[str, str] = {}
 
 
 @pytest.mark.parametrize("prompt", _cases(xfail=_C_XFAIL))
