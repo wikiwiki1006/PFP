@@ -69,3 +69,11 @@ secrets/
 
 # Firebase CLI 배포 캐시
 .firebase/
+
+# 프로모 영상 제작 파이프라인 (스크립트에 로그인 자격증명 포함 — 절대 커밋 금지)
+.promo-pipeline/
+
+# 프로모 영상 원본 (코드에서 참조하지 않음, 합계 80MB+ — git 에 넣지 않는다)
+prom_video/
+*.mp4
+*.MP4
