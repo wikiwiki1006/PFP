@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { Monitor, Globe, TrendingUp, Zap, BookOpen, Activity } from 'lucide-react'
 import { getPortfolioMetrics } from '@/api'
-import { formatCurrency } from '@/lib/utils'
+import { formatCurrency, formatPct } from '@/lib/utils'
 
 const MODULES = [
   {
@@ -86,7 +86,7 @@ export default function Home() {
           <StatusCard
             label="포트폴리오"
             value={m ? `${Object.keys(metricsQ.data || {}).length > 0 ? formatCurrency(m.total_equity) : '로드 중'}` : '미로드'}
-            sub={m ? `총 ${m.total_return_pct >= 0 ? '+' : ''}${m.total_return_pct.toFixed(2)}%` : ''}
+            sub={m ? `총 ${formatPct(m.total_return_pct)}` : ''}
             ok={!!m}
           />
           <StatusCard

@@ -856,12 +856,23 @@ def get_metrics(_auth: dict = Depends(current_user), market: str = Depends(marke
 
     # total_return_pct: TWRR(날짜 보정 없는 시간가중수익률)의 마지막 값으로 덮어쓰기
     # calculate_metrics는 equity_curve(날짜 보정 포함)를 쓰므로 추가 입금 시 왜곡 가능
+    #
+    # 보정에 실패하면 보정 전 값을 남겨두지 않고 None 을 준다. 바로 위 주석대로
+    # 그 값은 **이미 왜곡된 것으로 알려져 있다.** 그대로 내보내면 사용자는 틀린
+    # 수익률을 정상처럼 본다 — 화면에 '—' 가 아니라 그럴듯한 숫자가 뜨므로
+    # 아무도 눈치채지 못한다. 계산 불가는 계산 불가로 보여야 한다.
     try:
         twrr, _, _, _, _ = build_return_pct_curve(holdings, trade_log, close_df, market=market)
-        if not twrr.empty:
-            metrics["total_return_pct"] = round(float(twrr.dropna().iloc[-1]), 4)
-    except Exception:
-        pass
+        # twrr.empty 만으로는 부족하다. 행은 있는데 값이 전량 NaN 이면
+        # dropna() 결과가 비어 iloc[-1] 이 IndexError 를 낸다.
+        series = twrr.dropna()
+        metrics["total_return_pct"] = (
+            round(float(series.iloc[-1]), 4) if not series.empty else None
+        )
+    except Exception as e:
+        logger.warning(f"TWRR 보정 실패 — total_return_pct 를 비운다 "
+                       f"(uid={uid}, market={market}): {e}")
+        metrics["total_return_pct"] = None
     return metrics
 
 
