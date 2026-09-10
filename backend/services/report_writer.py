@@ -429,6 +429,10 @@ def gather_equity_yfinance(ticker: str, market: str = "US") -> tuple[str, str, d
         return company_name, "\n".join(lines), raw_dict
 
     except Exception as exc:
+        # 프롬프트에는 이미 실패가 적혀 나간다(아래 반환값). 로그가 없으면
+        # 그 리포트가 왜 얇은지 나중에 알 수 없다.
+        logger.warning("yfinance 종목 데이터 수집 실패 (%s, market=%s)",
+                       ticker, market, exc_info=True)
         return ticker, f"(yfinance 데이터 수집 오류: {exc})", {}
 
 
@@ -529,6 +533,8 @@ def gather_industry_yfinance(meta: dict, market: str = "US") -> tuple[str, dict]
                 "revenueGrowth": rev_growth,
             }
         except Exception:
+            logger.warning("커버리지 종목 데이터 수집 실패 (%s, market=%s)",
+                           ct, market, exc_info=True)
             lines.append(f"  {ct}: 데이터 없음")
 
     raw["coverage_data"] = coverage_data
