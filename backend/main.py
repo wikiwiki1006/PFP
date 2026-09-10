@@ -11,6 +11,26 @@ import json
 import logging
 import math
 import os
+import sys
+
+# ── 로그가 인코딩 때문에 사라지지 않게 한다 ──────────────────────────────────
+#
+# Windows 콘솔은 cp949 다. 로그 문자열에 이 코드페이지에 없는 문자가 하나라도
+# 있으면 (em dash `—`, 화살표 `→`, 불릿 `·` 등) StreamHandler.emit 이
+# UnicodeEncodeError 를 내고 **그 로그 레코드가 통째로 버려진다.** 콘솔에는
+# "--- Logging error ---" 만 남고, 파일 핸들러라면 그 줄이 흔적 없이 빠진다.
+#
+# 이 리포의 로그 메시지는 한국어이고 `—` 를 자주 쓴다. 즉 실패를 알리려고
+# 넣은 로그가 정확히 그 이유로 사라지고 있었다 — §1.3 이 자기 자신에게
+# 걸린 경우다.
+#
+# 두 겹으로 막는다. UTF-8 로 바꾸고, 그래도 못 쓰는 문자가 나오면 버리는 대신
+# 이스케이프한다. 운영(Cloud Run)은 이미 UTF-8 이라 아무것도 바뀌지 않는다.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+    except Exception:
+        pass
 import threading
 from pathlib import Path
 from typing import Any
