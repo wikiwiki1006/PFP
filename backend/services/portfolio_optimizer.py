@@ -12,6 +12,7 @@ Pipeline (모든 IO 병렬 실행):
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -20,14 +21,16 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-import requests
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-PERPLEXITY_API_KEY  = os.getenv("PERPLEXITY_API_KEY", "")
+logger = logging.getLogger(__name__)
+
 # AI 뷰 생성 모델. 추론 + 실시간 웹 검색이 필요해 sonar-pro 사용
 # (뉴스 요약용 _fetch_news 는 더 가벼운 sonar 로 충분).
+# API 키는 여기서 읽지 않는다 — services/perplexity 가 호출 시점에 읽으므로
+# 키를 교체하거나 테스트에서 바꿔도 재로딩이 필요 없다.
 _PPLX_MODEL         = os.getenv("PERPLEXITY_MODEL", "sonar-pro")
 
 
@@ -304,7 +307,8 @@ def _gather_fundamentals(tickers: list[str]) -> dict:
                 "country":  info.get("country", ""),
             }
         except Exception as e:
-            print(f"[Fundamentals {t}] {e}")
+            logger.warning("펀더멘털 수집 실패 (%s) — 그 종목은 값 없이 진행", t,
+                           exc_info=True)
             return t, {}
 
     with ThreadPoolExecutor(max_workers=min(len(tickers), 8)) as ex:
@@ -323,9 +327,7 @@ def _gather_fundamentals(tickers: list[str]) -> dict:
 def _fetch_news(tickers: list[str], market: str = "US") -> str:
     """종목별 전망 요약. 한국이면 국내 경제지에서 회사명으로 찾는다 —
     '005930.KS' 로 물으면 국내 기사가 거의 걸리지 않는다."""
-    if not PERPLEXITY_API_KEY:
-        return ""
-    from backend.services.news_sources import focus_block, perplexity_extra
+    from backend.services.news_sources import focus_block
     if market == "KR":
         from backend.services.markets import name_map_for
         _nm = name_map_for(tickers[:12], "KR")
@@ -340,23 +342,10 @@ def _fetch_news(tickers: list[str], market: str = "US") -> str:
         "Focus on information that would change forward return expectations vs historical trends."
         + focus_block(market)
     )
-    try:
-        resp = requests.post(
-            "https://api.perplexity.ai/chat/completions",
-            json={
-                "model": "sonar",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 2000,
-                **perplexity_extra(market),
-            },
-            headers={"Authorization": f"Bearer {PERPLEXITY_API_KEY}", "Content-Type": "application/json"},
-            timeout=30,
-        )
-        if resp.ok:
-            return resp.json()["choices"][0]["message"]["content"]
-    except Exception:
-        pass
-    return ""
+    from backend.services.perplexity import search
+    # max_tokens 만 올린다 — 종목 12개의 전망을 담아야 한다. 모델·temperature·
+    # timeout·출처 범위는 공유 클라이언트의 뉴스 수집 기본값이 그대로 맞다.
+    return search(prompt, market=market, max_tokens=2000, label="Optimizer news")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -479,9 +468,6 @@ def _generate_ai_views(
     투자의견 변경을 직접 조회할 수 있다. 정량 데이터(가격·펀더멘털)는 우리가 넣어주고,
     최신 정성 정보는 모델이 스스로 찾게 하는 구조.
     """
-    if not PERPLEXITY_API_KEY:
-        return {}
-
     horizon = (
         f"{int(holding_period_years * 12)}개월"
         if holding_period_years < 1
@@ -533,40 +519,37 @@ def _generate_ai_views(
   }}
 }}"""
 
+    from backend.services.perplexity import search
+
+    raw = search(
+        prompt,
+        market=market,
+        max_tokens=3000,
+        label="Optimizer AI views",
+        # 예측용이라 모델·system·temperature·timeout 을 올린다:
+        #   sonar-pro  — 뉴스 요약보다 추론이 필요하다
+        #   system     — JSON 만 내라는 지시. 이게 없으면 마크다운·각주가 섞인다
+        #   0.2        — API 기본값보다 낮춰 예측 편차를 줄인다 (뉴스 수집용
+        #                기본값 0.0 을 쓰면 이 경로의 출력이 달라진다)
+        #   120s       — 웹 검색이 붙어 뉴스 요약보다 느리다
+        model=_PPLX_MODEL,
+        system=(
+            "You are a CFA-certified portfolio manager with a mandate to provide unbiased, "
+            "cold-blooded return forecasts. You do NOT have a bullish bias. "
+            "If data signals downside, you assign negative expected returns without hesitation. "
+            "Use your web search to verify the latest earnings, guidance and analyst actions. "
+            "Output ONLY valid JSON. No markdown, no code blocks, no citations, no explanation."
+        ),
+        temperature=0.2,
+        timeout=120,
+    )
+    if not raw:
+        # 실패 이유는 공유 클라이언트가 이미 로그에 남겼다.
+        return {}
+
     try:
-        resp = requests.post(
-            "https://api.perplexity.ai/chat/completions",
-            json={
-                "model": _PPLX_MODEL,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a CFA-certified portfolio manager with a mandate to provide unbiased, "
-                            "cold-blooded return forecasts. You do NOT have a bullish bias. "
-                            "If data signals downside, you assign negative expected returns without hesitation. "
-                            "Use your web search to verify the latest earnings, guidance and analyst actions. "
-                            "Output ONLY valid JSON. No markdown, no code blocks, no citations, no explanation."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                "max_tokens": 3000,
-                # 예측 일관성을 위해 낮은 temperature (기본값은 편차가 크다)
-                "temperature": 0.2,
-            },
-            headers={
-                "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            timeout=120,   # 웹 검색이 붙어 Claude 보다 응답이 느리다
-        )
-        if not resp.ok:
-            print(f"[AI Views] Perplexity {resp.status_code}: {resp.text[:200]}")
-            return {}
-        raw = resp.json()["choices"][0]["message"]["content"].strip()
         # Perplexity 는 각주([1] 등)를 붙이는 경우가 있어 JSON 추출 전에 제거
-        raw = re.sub(r"\[\d+\]", "", raw)
+        raw = re.sub(r"\[\d+\]", "", raw.strip())
 
         m = re.search(r"\{[\s\S]*\}", raw)
         if m:
@@ -590,7 +573,8 @@ def _generate_ai_views(
         return result
 
     except Exception as e:
-        print(f"[AI Views parse error] {e}")
+        logger.warning("AI 뷰 JSON 파싱 실패 — AI 뷰 없이 진행 (raw 앞부분: %s)",
+                       raw[:200], exc_info=True)
         return {}
 
 
@@ -658,7 +642,8 @@ def _run_pypfopt(
         # 폴백 기본값 0.0 (편향 중립)
         posterior_returns = {t: round(float(ret_bl.get(t, mu_hist.get(t, 0.0))), 4) for t in tickers}
     except Exception as e:
-        print(f"[BL error] {e}")
+        logger.warning("Black-Litterman 실패 — 사후 수익률을 과거 평균으로 대체",
+                       exc_info=True)
         ret_bl = mu_hist
         posterior_returns = {t: round(float(mu_hist.get(t, 0.0)), 4) for t in tickers}
 
@@ -696,7 +681,8 @@ def _run_pypfopt(
                 "sharpe_ratio":    round(float(sh), 4),
             }
         except Exception as ex:
-            print(f"[Opt {method} error] {ex}")
+            logger.warning("최적화 실패 (%s) — 그 조합은 결과에서 빠진다", method,
+                           exc_info=True)
             return None
 
     def _attach_ext(result: dict | None) -> dict | None:
@@ -755,7 +741,8 @@ def _run_pypfopt(
                 "sharpe_ratio":    round(sharpe, 4),
             }
         except Exception as ex:
-            print(f"[Opt HRP error] {ex}")
+            logger.warning("HRP 최적화 실패 — 그 조합은 결과에서 빠진다",
+                           exc_info=True)
             return None
 
     # ── Step 1: max_sharpe 두 가지 ───────────────────────────────────────────
