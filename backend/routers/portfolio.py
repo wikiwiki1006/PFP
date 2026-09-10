@@ -881,12 +881,12 @@ def get_metrics(_auth: dict = Depends(current_user), market: str = Depends(marke
         # twrr.empty 만으로는 부족하다. 행은 있는데 값이 전량 NaN 이면
         # dropna() 결과가 비어 iloc[-1] 이 IndexError 를 낸다.
         #
-        # 이 dropna() 는 표시 문제가 아니라 **엔드포인트 가용성** 문제다.
-        # 빼면 마지막 값이 NaN 인 경우 float('nan') 이 그대로 metrics 에 담기고,
-        # JSONResponse 가 `ValueError: Out of range float values are not JSON
-        # compliant` 를 내면서 /metrics 응답 전체가 500 이 된다. 아래 except 는
-        # 직렬화 시점보다 먼저 끝나 있어 잡지 못한다 — "예외는 어차피 아래서
-        # 잡히니 중복" 이 아니다. 지우지 말 것.
+        # 빼면 마지막 값이 NaN 인 경우 float('nan') 이 그대로 metrics 에 담긴다.
+        # main.py 의 SafeJSONResponse 가 NaN 을 null 로 바꿔 주므로 요청은
+        # 실패하지 않고 화면에 '—' 가 뜬다 — 그래서 더 위험하다. "계산에 실패했다"
+        # 와 "값이 원래 없다" 가 응답에서 같은 null 이 되고, 아무도 눈치채지
+        # 못한다. 아래 except 는 직렬화보다 먼저 끝나므로 이걸 잡지도 않는다.
+        # "예외는 어차피 아래서 잡히니 중복" 이 아니다. 지우지 말 것.
         series = twrr.dropna()
         metrics["total_return_pct"] = (
             round(float(series.iloc[-1]), 4) if not series.empty else None
