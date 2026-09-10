@@ -94,12 +94,27 @@ def _cached_shared_result(
 
 
 def _record_deep_use(uid: str, kind: str) -> None:
-    """심층 분석 사용 기록. 실패해도 생성은 계속한다 — 기록은 부가 기능이다."""
+    """심층 분석 사용 기록.
+
+    실패해도 이 요청은 계속 진행한다. 다만 **조용히 넘기지는 않는다** — 예전에는
+    `except Exception: pass` 라 기록이 안 되는 상태가 로그 한 줄 없이 이어졌고,
+    이 테이블이 할당량의 유일한 근거라 그동안 제한이 사실상 없었다 (§1.3).
+
+    여기서 예외를 다시 올리지 않는 이유: 이 요청은 바로 위에서
+    `enforce_deep_limit` 을 이미 통과했다. 기록 실패가 위태롭게 하는 것은 이
+    요청이 아니라 **다음 요청**이고, 그쪽은 `usage_repo.count_recent` 가 실패 시
+    예외를 올려(=닫혀) 막는다. 여기서 500 을 내도 구멍은 안 닫히고 이미 승인된
+    작업만 죽는다.
+    """
     try:
         from backend.db import usage_repo
         usage_repo.record_use(uid, kind)
-    except Exception:
-        pass
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(
+            f"심층 분석 사용 기록 실패. 이 사용은 할당량에 잡히지 않는다 "
+            f"(uid={uid}, kind={kind}): {e}"
+        )
 
 
 def _job_set(job_id: str, data: dict, owner: str | None = None) -> None:
