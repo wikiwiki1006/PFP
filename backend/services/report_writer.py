@@ -6,6 +6,7 @@ yfinance 실제 데이터 + Perplexity 뉴스 + Haiku 구조화 + Sonnet 분석
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 import requests
@@ -20,6 +21,8 @@ from dotenv import load_dotenv
 from backend.services.job_store import JobCancelled
 
 load_dotenv(Path(__file__).parent.parent / ".env")
+
+logger = logging.getLogger(__name__)
 
 ANTHROPIC_API_KEY  = os.getenv("ANTHROPIC_API_KEY", "")
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "")
@@ -215,6 +218,19 @@ def _call_sonnet(prompt: str, system: str = "", max_tokens: int = 4096,
 
 
 # ── yfinance 데이터 수집 ──────────────────────────────────────────────────────────
+
+# 뉴스 수집이 실패했을 때 프롬프트에 넣는 문구.
+#
+# 예전에는 "(뉴스 데이터 없음 — 학습 지식 활용)" 이었다. 없다는 사실을 적는
+# 데까지는 맞았는데 마지막에 반대로 갔다 — 학습 지식으로 채우라는 지시다.
+# 뉴스는 본질적으로 시점 정보라 기억으로 대체하면 그건 뉴스가 아니고, 리포트는
+# 그 구분을 독자에게 알려주지 않는다. 오늘 날짜가 박힌 리서치 리포트에 낡은
+# 사실이 최신 동향으로 실린다.
+NO_NEWS_NOTICE = (
+    "(뉴스를 수집하지 못했습니다. 뉴스·최근 동향에 근거한 서술을 하지 말고, "
+    "기억으로 채우지 마세요. 해당 섹션에는 뉴스를 확보하지 못했다고 밝히세요.)"
+)
+
 
 def _fmt_amount(value, currency: str) -> str:
     """금액을 그 통화의 단위 체계로 적는다.
@@ -413,6 +429,10 @@ def gather_equity_yfinance(ticker: str, market: str = "US") -> tuple[str, str, d
         return company_name, "\n".join(lines), raw_dict
 
     except Exception as exc:
+        # 프롬프트에는 이미 실패가 적혀 나간다(아래 반환값). 로그가 없으면
+        # 그 리포트가 왜 얇은지 나중에 알 수 없다.
+        logger.warning("yfinance 종목 데이터 수집 실패 (%s, market=%s)",
+                       ticker, market, exc_info=True)
         return ticker, f"(yfinance 데이터 수집 오류: {exc})", {}
 
 
@@ -513,6 +533,8 @@ def gather_industry_yfinance(meta: dict, market: str = "US") -> tuple[str, dict]
                 "revenueGrowth": rev_growth,
             }
         except Exception:
+            logger.warning("커버리지 종목 데이터 수집 실패 (%s, market=%s)",
+                           ct, market, exc_info=True)
             lines.append(f"  {ct}: 데이터 없음")
 
     raw["coverage_data"] = coverage_data
@@ -529,6 +551,7 @@ def gather_equity_perplexity(ticker: str, company_name: str, market: str = "US")
     """
     from backend.services.news_sources import focus_block, perplexity_extra
     if not PERPLEXITY_API_KEY:
+        logger.warning("종목 뉴스 수집 건너뜀 (%s) — PERPLEXITY_API_KEY 미설정", ticker)
         return ""
     try:
         # 응답을 **영어로** 받는다. 이 결과는 그대로 Claude 입력이 되는데,
@@ -571,6 +594,10 @@ Collect the following **in English**, concise bullet points. Favor news and narr
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
     except Exception:
+        # 조용히 "" 를 돌려주면 뉴스로 쓴 리포트와 뉴스 없이 쓴 리포트가
+        # 구별되지 않는다. 호출자는 이 사실을 프롬프트에도 적는다 (§1.3).
+        logger.warning("종목 뉴스 수집 실패 (%s, market=%s) — 뉴스 없이 진행",
+                       ticker, market, exc_info=True)
         return ""
 
 
@@ -578,6 +605,8 @@ def gather_industry_perplexity(meta: dict, market: str = "US") -> str:
     """Perplexity sonar로 산업 최신 뉴스·트렌드·규제 동향 수집."""
     from backend.services.news_sources import focus_block, perplexity_extra
     if not PERPLEXITY_API_KEY:
+        logger.warning("산업 뉴스 수집 건너뜀 (%s) — PERPLEXITY_API_KEY 미설정",
+                       meta.get("name_en", "?"))
         return ""
     try:
         # 영어로 수집 — Claude 입력 토큰을 크게 줄인다 (한국어 대비 약 1/3)
@@ -615,6 +644,8 @@ Collect the following **in English**, concise bullet points.
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
     except Exception:
+        logger.warning("산업 뉴스 수집 실패 (%s, market=%s) — 뉴스 없이 진행",
+                       meta.get("name_en", "?"), market, exc_info=True)
         return ""
 
 
@@ -958,12 +989,6 @@ def write_equity_report(
 
     _check()
 
-    context_base = (
-        f"【yfinance 실제 데이터】\n{yf_text}\n\n"
-        f"【최신 뉴스·애널리스트 동향 (Perplexity)】\n"
-        f"{news_text if news_text else '(뉴스 데이터 없음 — 학습 지식 활용)'}"
-    )
-
     # 예전에는 Haiku 로 yf_text 를 한 번 더 요약한 뒤, 원본과 요약본을 **둘 다**
     # 컨텍스트에 넣었다. 같은 숫자가 두 형태로 중복되는 데다 요약 호출 자체가
     # 추가 비용이었다. yf_text 는 이미 정형화된 지표 목록이라 요약이 정보를 늘리지
@@ -971,7 +996,7 @@ def write_equity_report(
     context_deep = (
         f"[Market data — yfinance]\n{yf_text}\n\n"
         f"[Recent news & analyst view — Perplexity]\n"
-        f"{news_text if news_text else '(no news data — rely on model knowledge)'}"
+        f"{news_text if news_text else NO_NEWS_NOTICE}"
     )
 
     _write = _call_haiku if model_tier == "basic" else _call_sonnet
@@ -1029,7 +1054,7 @@ def write_industry_report(
     context = (
         f"【yfinance 실제 데이터】\n{yf_text}\n\n"
         f"【최신 뉴스·트렌드·규제 (Perplexity)】\n"
-        f"{news_text if news_text else '(뉴스 데이터 없음 — 학습 지식 활용)'}"
+        f"{news_text if news_text else NO_NEWS_NOTICE}"
     )
 
     _write = _call_haiku if model_tier == "basic" else _call_sonnet

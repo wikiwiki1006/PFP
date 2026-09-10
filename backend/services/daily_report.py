@@ -5,11 +5,14 @@ backend/services/daily_report.py
 """
 from __future__ import annotations
 
+import logging
 import os
 from datetime import datetime, timezone, time as _time
 from typing import Callable
 
 import yfinance as yf
+
+logger = logging.getLogger(__name__)
 
 
 def _is_market_open() -> bool:
@@ -56,7 +59,15 @@ def _fetch_price_data(holdings: dict, market: str = "US") -> dict:
             continue
         today_c = float(series.iloc[-(1 + shift)])
         prev_c  = float(series.iloc[-(2 + shift)])
-        chg_pct = (today_c / prev_c - 1) * 100 if prev_c else 0.0
+        # 0 은 주가가 아니라 깨진 데이터다. 예전에는 변동률만 0.0% 로 눌렀는데,
+        # 그러면 day_pnl 이 (today - 0) * qty 가 되어 **평가액 전부를 그날의
+        # 이익으로** 보고한다. 값을 지어내는 대신 이 종목을 빼고, 아래 합계도
+        # 이 종목 없이 낸다.
+        if prev_c <= 0:
+            logger.warning("전일 종가가 0 이하라 %s 를 브리프에서 제외한다 (prev=%s)",
+                           t, prev_c)
+            continue
+        chg_pct = (today_c / prev_c - 1) * 100
         qty      = holdings[t].get("q", 0)
         avg_cost = holdings[t].get("avg", 0)
         result[t] = {
@@ -75,10 +86,18 @@ def _fetch_price_data(holdings: dict, market: str = "US") -> dict:
         if col in close.columns:
             s = close[col].dropna()
             if len(s) >= 2 + shift:
+                b_now  = float(s.iloc[-(1 + shift)])
+                b_prev = float(s.iloc[-(2 + shift)])
+                # 지수도 마찬가지다. 0 이면 나눌 수 없고, 넣지 않으면 프롬프트가
+                # "매크로 데이터 없음" 으로 빠져 모델이 없다는 걸 안다.
+                if b_prev <= 0:
+                    logger.warning("전일 값이 0 이하라 %s 를 브리프에서 제외한다 (prev=%s)",
+                                   meta_key, b_prev)
+                    continue
                 result[f"__{meta_key}"] = {
-                    "close":   round(float(s.iloc[-(1 + shift)]), 2),
-                    "prev":    round(float(s.iloc[-(2 + shift)]), 2),
-                    "chg_pct": round((float(s.iloc[-(1 + shift)]) / float(s.iloc[-(2 + shift)]) - 1) * 100, 2),
+                    "close":   round(b_now, 2),
+                    "prev":    round(b_prev, 2),
+                    "chg_pct": round((b_now / b_prev - 1) * 100, 2),
                 }
 
     result["__date"] = close.index[-(1 + shift)].strftime("%Y년 %m월 %d일 (%a)")
@@ -192,14 +211,21 @@ def _build_prompt(holdings: dict, price_data: dict, news: dict,
     big_movers_str = ", ".join(big_movers) if big_movers else "없음 (전 종목 3% 미만 변동)"
 
     tz_label = "한국시간" if is_kr else "미국 동부시간"
+    # 이 프롬프트를 받는 호출(generate_daily_report 의 마지막 messages.create)에는
+    # web_search 도구가 없다. 검색은 그 앞 단계에서 이미 끝나 '웹서치 추가 컨텍스트'
+    # 로 붙어 온다. 여기서 "웹서치로 보완하라"고 시키면 모델은 못 한다고 말하지
+    # 않고 학습 지식으로 채우고, 그 결과가 오늘 날짜가 박힌 리포트에 최신 뉴스인
+    # 것처럼 실린다. 있는 자료로만 쓰라고 한다.
     style_line = (
-        "위 데이터와 추가 웹서치를 결합하여, 아래 형식을 엄격히 따른 데일리 브리프를 한국어로 작성하라.\n"
+        "아래 제공된 데이터로만 작성하라. 검색하거나 기억에 의존하지 마라.\n"
+        "아래 형식을 엄격히 따른 데일리 브리프를 한국어로 작성하라.\n"
         "**한국 투자자 관점**으로 쓴다. 코스피·코스닥 수급, 원/달러 환율, 외국인·기관 매매,\n"
         "국내 업황과 정책을 축으로 해석하고, 해외 이슈는 국내 시장에 전이되는 경로로만 다뤄라.\n"
         "근거는 국내 경제지(한국경제·매일경제·연합인포맥스·이데일리·조선비즈 등)를 우선한다.\n"
         "금액은 원화(조/억)로 쓰고 달러로 환산하지 마라."
         if is_kr else
-        "위 데이터와 추가 웹서치를 결합하여, 아래 형식을 엄격히 따른 월가 인텔리전스 스타일 데일리 브리프를 한국어로 작성하라."
+        "아래 제공된 데이터로만 작성하라. 검색하거나 기억에 의존하지 마라.\n"
+        "아래 형식을 엄격히 따른 월가 인텔리전스 스타일 데일리 브리프를 한국어로 작성하라."
     )
 
     return f"""아래는 {date_str} 기준 포트폴리오 데이터와 관련 뉴스입니다.
@@ -213,7 +239,7 @@ def _build_prompt(holdings: dict, price_data: dict, news: dict,
 절대 변동 3% 이상 종목: {big_movers_str}
 
 === 관련 뉴스 ===
-{news_text if news_text.strip() else "수집된 뉴스 없음 — 웹서치로 보완해 주세요."}
+{news_text if news_text.strip() else "수집된 뉴스 없음. 뉴스에 근거한 서술을 하지 말고, 뉴스를 확보하지 못했다고 밝혀라."}
 
 === 지시사항 ===
 {style_line}
@@ -251,8 +277,13 @@ PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "")
 
 
 def _perplexity_search(query: str, market: str = "US") -> str:
-    """Perplexity sonar로 실시간 웹 검색. API 키 없거나 오류 시 빈 문자열 반환."""
+    """Perplexity sonar로 실시간 웹 검색. API 키 없거나 오류 시 빈 문자열 반환.
+
+    두 경우 모두 "" 를 돌려주므로, 어느 쪽이었는지는 여기서만 알 수 있다.
+    호출자가 추측해서 기록하면 진단이 엉뚱한 곳으로 간다.
+    """
     if not PERPLEXITY_API_KEY:
+        logger.warning("Perplexity 웹서치 건너뜀 — PERPLEXITY_API_KEY 미설정")
         return ""
     try:
         import requests as _req
@@ -272,6 +303,8 @@ def _perplexity_search(query: str, market: str = "US") -> str:
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
     except Exception:
+        logger.warning("Perplexity 웹서치 실패 (market=%s) — 뉴스 없이 진행",
+                       market, exc_info=True)
         return ""
 
 
@@ -340,7 +373,11 @@ def _generate_with_claude(holdings, price_data, news, api_key, log,
         web_ctx = _perplexity_search(query, market)
 
         if not web_ctx:
-            log("Perplexity 미설정 — Claude 웹서치로 대체 중...")
+            # 원인을 여기서 단정하지 않는다. _perplexity_search 는 키 미설정과
+            # 호출 실패 둘 다 "" 를 돌려준다 — 네트워크 실패를 '미설정'으로
+            # 적어 두면 진단하는 사람이 키 설정만 들여다본다. 실제 원인은
+            # 그쪽이 로그에 남긴다.
+            log("Perplexity 결과 없음 — Claude 웹서치로 대체 중...")
             try:
                 sr = client.messages.create(
                     model="claude-sonnet-4-6",
