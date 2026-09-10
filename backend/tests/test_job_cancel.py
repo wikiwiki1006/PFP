@@ -66,10 +66,11 @@ def rw(monkeypatch):
     import backend.services.report_writer as mod
 
     calls: list[str] = []
+    # 시장 인자가 추가돼 대역도 그 형태를 받아야 한다.
     monkeypatch.setattr(mod, "gather_equity_yfinance",
-                        lambda t: (calls.append("yfinance"), ("Apple", "지표", {}))[1])
+                        lambda t, market="US": (calls.append("yfinance"), ("Apple", "지표", {}))[1])
     monkeypatch.setattr(mod, "gather_equity_perplexity",
-                        lambda t, c: (calls.append("perplexity"), "뉴스")[1])
+                        lambda *a, **k: (calls.append("perplexity"), "뉴스")[1])
     monkeypatch.setattr(mod, "_call_haiku",
                         lambda *a, **k: (calls.append("LLM"), "본문")[1])
     monkeypatch.setattr(mod, "_call_sonnet", mod._call_haiku)
