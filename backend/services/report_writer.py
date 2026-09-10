@@ -216,6 +216,19 @@ def _call_sonnet(prompt: str, system: str = "", max_tokens: int = 4096,
 
 # ── yfinance 데이터 수집 ──────────────────────────────────────────────────────────
 
+# 뉴스 수집이 실패했을 때 프롬프트에 넣는 문구.
+#
+# 예전에는 "(뉴스 데이터 없음 — 학습 지식 활용)" 이었다. 없다는 사실을 적는
+# 데까지는 맞았는데 마지막에 반대로 갔다 — 학습 지식으로 채우라는 지시다.
+# 뉴스는 본질적으로 시점 정보라 기억으로 대체하면 그건 뉴스가 아니고, 리포트는
+# 그 구분을 독자에게 알려주지 않는다. 오늘 날짜가 박힌 리서치 리포트에 낡은
+# 사실이 최신 동향으로 실린다.
+NO_NEWS_NOTICE = (
+    "(뉴스를 수집하지 못했습니다. 뉴스·최근 동향에 근거한 서술을 하지 말고, "
+    "기억으로 채우지 마세요. 해당 섹션에는 뉴스를 확보하지 못했다고 밝히세요.)"
+)
+
+
 def _fmt_amount(value, currency: str) -> str:
     """금액을 그 통화의 단위 체계로 적는다.
 
@@ -958,12 +971,6 @@ def write_equity_report(
 
     _check()
 
-    context_base = (
-        f"【yfinance 실제 데이터】\n{yf_text}\n\n"
-        f"【최신 뉴스·애널리스트 동향 (Perplexity)】\n"
-        f"{news_text if news_text else '(뉴스 데이터 없음 — 학습 지식 활용)'}"
-    )
-
     # 예전에는 Haiku 로 yf_text 를 한 번 더 요약한 뒤, 원본과 요약본을 **둘 다**
     # 컨텍스트에 넣었다. 같은 숫자가 두 형태로 중복되는 데다 요약 호출 자체가
     # 추가 비용이었다. yf_text 는 이미 정형화된 지표 목록이라 요약이 정보를 늘리지
@@ -971,7 +978,7 @@ def write_equity_report(
     context_deep = (
         f"[Market data — yfinance]\n{yf_text}\n\n"
         f"[Recent news & analyst view — Perplexity]\n"
-        f"{news_text if news_text else '(no news data — rely on model knowledge)'}"
+        f"{news_text if news_text else NO_NEWS_NOTICE}"
     )
 
     _write = _call_haiku if model_tier == "basic" else _call_sonnet
@@ -1029,7 +1036,7 @@ def write_industry_report(
     context = (
         f"【yfinance 실제 데이터】\n{yf_text}\n\n"
         f"【최신 뉴스·트렌드·규제 (Perplexity)】\n"
-        f"{news_text if news_text else '(뉴스 데이터 없음 — 학습 지식 활용)'}"
+        f"{news_text if news_text else NO_NEWS_NOTICE}"
     )
 
     _write = _call_haiku if model_tier == "basic" else _call_sonnet
