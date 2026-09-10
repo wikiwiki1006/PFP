@@ -110,15 +110,22 @@ def user_write_lock(user_id: str = "default"):
     잃은 매매는 되돌릴 수 없고 사용자에게 보이지도 않는 반면, 503 은 다시
     누르면 된다.
     """
-    if not is_available():
+    import backend.db as _db
+
+    # 이 블록이 쓸 풀을 고정한다. 전역을 나중에 다시 읽으면 안 된다 —
+    # 도중에 `_try_reinit_pool()` 이 돌면 전역이 새 풀로 바뀌고, 거기에 옛
+    # 커넥션을 반납하면 `trying to put unkeyed connection` 이 난다. 그러면
+    # 그 커넥션이 옛 풀의 `_used` 에 영영 남아 옛 풀 자체가 GC 되지 않는다.
+    # 예전에는 재초기화가 `closeall()` 을 해서 이 결함이 가려져 있었다.
+    pool = _db._pool
+    if pool is None:
         yield
         return
 
     key = f"pfp:{user_id}"
     conn = None
     try:
-        import backend.db as _db
-        conn = _db._pool.getconn()          # type: ignore[union-attr]
+        conn = pool.getconn()
         conn.autocommit = True
         with conn.cursor() as cur:
             cur.execute("SELECT pg_advisory_lock(hashtext(%s))", (key,))
@@ -127,10 +134,9 @@ def user_write_lock(user_id: str = "default"):
         logger.error(f"user_write_lock({user_id}) 획득 실패, 요청을 거절한다: {e}")
         if conn is not None:
             try:
-                import backend.db as _db
-                _db._pool.putconn(conn)     # type: ignore[union-attr]
-            except Exception:
-                pass
+                pool.putconn(conn)
+            except Exception as put_err:
+                logger.warning(f"user_write_lock({user_id}) 커넥션 반납 실패: {put_err}")
             conn = None
         raise WriteLockUnavailable(
             "요청이 몰려 지금 처리할 수 없습니다. 잠시 후 다시 시도해 주세요."
@@ -143,13 +149,22 @@ def user_write_lock(user_id: str = "default"):
             try:
                 with conn.cursor() as cur:
                     cur.execute("SELECT pg_advisory_unlock(hashtext(%s))", (key,))
-            except Exception:
-                pass
+            except Exception as e:
+                # 커넥션이 끊겼으면 락도 이미 풀렸다. 다만 조용히 넘기지 않는다 —
+                # 이 줄이 곧 "직렬화가 언제 끊겼는가" 의 유일한 단서다.
+                logger.warning(f"user_write_lock({user_id}) 해제 실패: {e}")
             try:
-                import backend.db as _db
-                _db._pool.putconn(conn)     # type: ignore[union-attr]
-            except Exception:
-                pass
+                # 빌릴 때 켠 autocommit 을 되돌린다. 풀은 커넥션 상태를
+                # 정리해주지 않으므로, 이대로 반납하면 다음에 이 커넥션을 받는
+                # 쪽이 트랜잭션 없이 돌게 된다.
+                if not conn.closed:
+                    conn.autocommit = False
+            except Exception as e:
+                logger.warning(f"user_write_lock({user_id}) autocommit 복원 실패: {e}")
+            try:
+                pool.putconn(conn)
+            except Exception as e:
+                logger.warning(f"user_write_lock({user_id}) 커넥션 반납 실패: {e}")
 
 
 def update_holding_sector(ticker: str, sector: str, user_id: str = "default",
