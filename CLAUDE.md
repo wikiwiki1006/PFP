@@ -221,6 +221,11 @@ Cloud Run 은 `ENABLE_SCHEDULER=false` 다. **프로세스 내 스케줄러는 �
 
 ## 6. 개발
 
+새 머신에서 클론했으면 먼저 `./setup.sh` 를 한 번 돌린다. venv·node_modules·
+`backend/.env`·`secrets/firebase-admin.json` 은 전부 추적되지 않아 클론에 딸려오지
+않고, 없으면 백엔드가 기동조차 하지 않는다. 비밀값은 Secret Manager 에서 받으므로
+`gcloud auth login` 이 먼저다. 멱등이라 여러 번 돌려도 된다.
+
 ```bash
 # 백엔드 (venv 사용, uvicorn 은 -m 으로 부른다)
 PYTHONPATH=$PWD venv/bin/python -m uvicorn backend.main:app --port 8000
@@ -243,7 +248,118 @@ cd frontend && npm run build
 
 ---
 
-## 7. 배포
+## 7. 병렬 에이전트 협업
+
+Claude Code 세션 여러 개가 역할을 나눠 이 리포를 **동시에** 개발할 때의 규약이다.
+혼자 작업 중이면 이 절은 무시하고 `./dev.sh` 만 쓰면 된다.
+
+병렬로 들어가는 순간 세 가지가 충돌한다. **워킹트리·포트·DB** 다. 셋 다 갈라야
+병렬이지, 안 가르면 그냥 서로 덮어쓰기다.
+
+### 7.1 워크트리를 만든다
+
+```bash
+./worktree-setup.sh <역할> <슬롯>     # 예: ./worktree-setup.sh feature 1
+```
+
+`../pfp-<역할>` 에 워크트리를, `agent/<역할>` 브랜치를 만들고 포트 슬롯을 준다.
+
+`git worktree` 는 추적되는 파일만 준다. 그래서 이 스크립트가 추가로 해 주는 것:
+
+- `venv` (784M) 와 `frontend/node_modules` (413M) 는 **심볼릭 링크**. 복사하면
+  슬롯 5개에 6GB 다. 링크해도 되는 이유는 항상 `venv/bin/python -m uvicorn` 으로
+  부르고 `python -m` 이 cwd 를 `sys.path` 에 넣기 때문이다 — 인터프리터는 공유하되
+  `backend` 패키지는 각 워크트리 것을 import 한다.
+- `backend/.env` 와 `frontend/.env.local` 은 **복사**. 링크하면 한 에이전트가 키를
+  바꿔 실험하다 메인 파일을 덮어써 나머지가 같이 죽는다.
+- `ROLE.md` 생성 — 역할·슬롯·소유 경로가 파일로 남아야 컨텍스트가 밀려도 유지된다.
+
+### 7.2 소유 경로 — 한 경로는 한 에이전트만 쓴다
+
+충돌을 막는 유일하게 확실한 규칙이다. 이게 없으면 에이전트는 눈에 보이는 버그를
+그냥 고치는데, 그 파일은 다른 창도 고치고 있다.
+
+| 역할 | 브랜치 | 슬롯 | 소유 경로 |
+|---|---|---|---|
+| 통합 | `main` | 0 | `CLAUDE.md`, main 병합 전담 |
+| 기능 개발 | `agent/feature` | 1 | `frontend/src/pages/` `frontend/src/components/` `backend/routers/` |
+| DB | `agent/db` | 2 | `backend/db/` `backend/services/cash_ledger.py` |
+| 테스트 | `agent/test` | 3 | `backend/tests/` `frontend/e2e/` |
+| 리포트 품질 | `agent/report` | 4 | `services/report_writer.py` `services/ai_analysis.py` `services/daily_report.py` |
+| 최적화 | `agent/perf` | 5 | `services/quant_metrics.py` `services/portfolio_*.py` |
+
+`frontend/src/lib/market.ts` 와 `backend/services/markets.py` 는 모두가 건드리고
+싶어하는 파일이다. **통합 소유로 둔다.**
+
+소유하지 않은 경로가 필요하면 직접 고치지 않는다. 통합 세션에 요청 → 통합이 담당
+창에 전달 → 담당이 고치고 커밋 → 통합이 알림. 느려 보이지만 두 창이 같은 파일을
+다르게 고쳐 병합에서 터지는 것보다 빠르다.
+
+### 7.3 대화는 별 구조로
+
+세션끼리는 `SendMessage({to: "<세션이름>", ...})` 로 직접 말할 수 있다. 하지만
+역할끼리 자유롭게 말하면 채널이 10개가 되고 같은 결정이 창마다 다르게 내려진다.
+**역할 창은 통합 세션하고만 말한다.**
+
+세션 이름은 `ListAgents` 로 확인한다. **재시작하면 바뀐다** — 배치표에 적어둔
+이름을 믿지 말고 보내기 전에 확인한다.
+
+보고는 네 줄로 고정한다. 자유 서술로 주고받으면 통합이 매번 되물어야 한다.
+
+```
+브랜치: agent/feature @ <커밋해시>
+건드린 경로: frontend/src/pages/AlphaTerminal.tsx
+테스트: pytest 163 passed / npm run build OK
+요청: (남의 경로가 필요하면 여기에)
+```
+
+### 7.4 DB 를 가른다
+
+`holdings` 기본키가 `(user_id, market, ticker)` 다. 여러 창이 같은 테스트 계정으로
+같은 DB 를 쓰면 같은 종목 행을 서로 덮는다. 테스트 창이 보유를 지우면 기능 창의
+화면이 빈다.
+
+Neon 은 DB 를 git 처럼 브랜치한다. 역할마다 하나씩 만들고 연결 문자열을 넣는다.
+
+```bash
+export PFP_DB_feature="postgres://..."     # 하이픈은 밑줄로
+./dev.sh --slot 1 --db-branch feature
+```
+
+`--prod-db` 는 통합 세션에서 재현이 필요할 때만, 조회로만 쓴다.
+
+### 7.5 병합
+
+- **`main` 에 직접 커밋하지 않는다.** 지금까지 모든 커밋이 main 에 직접 올라갔는데,
+  병렬에서는 그 방식이 바로 충돌이다.
+- 핸드오프 전 게이트: `pytest backend/tests -q` 와 `npm run build` 를 통과시킨다.
+  통과 못 하면 통합에 보고하지 않는다.
+- `CLAUDE.md` 는 통합만 고친다. 다섯 창이 전부 규칙을 추가하고 싶어하고, 매 병합마다
+  충돌한다. 고칠 내용은 통합에 요청한다.
+- 브랜치가 오래 갈라져 있을수록 병합 비용이 폭증한다. 작업 단위마다, 최소 하루
+  두 번은 `main` 으로 합치고 각 창이 `git rebase main` 한다.
+- 병합 후 `pytest backend/tests/test_market_isolation.py` 를 돌린다. `market` 을
+  빼먹은 조회가 반복해서 사고를 냈다.
+
+### 7.6 함정
+
+- **venv 는 공유된다.** 한 창의 `pip install` 이 다섯 창 전부에 즉시 반영된다.
+  버전을 올렸다 다른 창의 테스트가 깨지면 원인을 자기 코드에서 찾게 된다. 패키지를
+  건드리는 작업은 통합 세션에서만 하고, `requirements.txt` 를 바꿨으면 전 창에 알린다.
+- **`.env` 는 복사본이다.** 키를 회전하면 메인 + 워크트리 전부를 고쳐야 한다.
+- **Firebase 프로젝트가 로컬과 운영이 같다.** 창마다 새 계정으로 가입하면 운영
+  사용자 목록이 오염된다. 전 창이 고정 테스트 계정만 쓴다 (`dev.sh` 주석 참고).
+- **서브에이전트는 서로 대화하지 못한다.** `Agent` 툴로 띄우는 서브에이전트는 부모에게만
+  보고하고 끝난다. 역할끼리 주고받는 구조가 필요하면 독립 세션(창)이어야 한다.
+  서브에이전트는 창 안에서 조사를 병렬로 돌릴 때 쓴다.
+- **포트가 겹치면 조용히 넘어가지 않는다.** `strictPort` 라 즉시 실패한다. 일부러
+  그렇게 뒀다 — 두 창이 자기도 모르게 같은 백엔드를 보고 있는 것보다 낫다.
+
+체크리스트: https://claude.ai/code/artifact/8fe11e8f-d846-424b-ae28-9fad554f5d5c
+
+---
+
+## 8. 배포
 
 프론트만 바뀌었으면 2번만 한다.
 
@@ -269,7 +385,7 @@ npx firebase-tools deploy --only hosting
 
 ---
 
-## 8. 작업 방식
+## 9. 작업 방식
 
 - **브라우저로 확인한다.** 코드만 봐서는 안 보이는 버그가 반복해서 나왔다
   (전환 시 재조회 0건, 5일 묵은 지수, 잘못된 기본 지수). Playwright 는
@@ -282,7 +398,7 @@ npx firebase-tools deploy --only hosting
 
 ---
 
-## 9. 미해결
+## 10. 미해결
 
 - 비밀번호 로테이션: 관리자·개인 계정(`10october@`), Neon DB.
   옛 이미지에 `.env` 가 들어간 건도 있어 우선순위가 높다.
