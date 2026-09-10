@@ -370,9 +370,13 @@ Claude Code 세션 여러 개가 역할을 나눠 이 리포를 **동시에** �
 화면이 빈다.
 
 **창마다 독립 데이터베이스가 있다.** 로컬 도커 postgres(5433) 안에 역할별로
-하나씩 — `pfp_develop`, `pfp_dbmanage`, `pfp_test`, `pfp_reportmanage`,
-`pfp_programoptimize`. 전부 개발 데이터 사본을 그대로 갖고 시작하므로
-(시세 69만 행 포함) 빈 DB 로 시작하는 불편이 없다.
+하나씩 — `pfp_main`, `pfp_develop`, `pfp_dbmanage`, `pfp_test`,
+`pfp_reportmanage`, `pfp_programoptimize`. 전부 개발 데이터 사본을 그대로 갖고
+시작하므로 (시세 69만 행 포함) 빈 DB 로 시작하는 불편이 없다.
+
+**`postgres` 데이터베이스는 순수 템플릿이다. 아무도 쓰지 않는다.** 통합 창도
+`pfp_main` 을 쓴다. 새 창을 만들 때 `CREATE DATABASE pfp_<역할> TEMPLATE postgres`
+로 뜨는 원본이라, 여기에 테스트 데이터가 섞이면 이후 모든 창이 그걸 물려받는다.
 
 ```bash
 ./dev.sh --slot 1 --db-branch develop
@@ -381,6 +385,17 @@ Claude Code 세션 여러 개가 역할을 나눠 이 리포를 **동시에** �
 연결 문자열은 `db-targets.env` 에 있다 (gitignore, 워크트리마다 복사본).
 `dev.sh` 가 그 파일을 읽어 `PFP_DB_<이름>` 을 찾는다. 이름을 틀리면 기동을
 거부한다 — 조용히 공유 DB 로 떨어지면 격리했다고 믿는 채로 서로 덮어쓴다.
+
+**`db-targets.env` 는 `dev.sh` 만 읽는다.** `pytest` 와 `python -c` 직접 실행은
+`backend/.env` 의 `DB_HOST`/`DB_PORT`/`DB_NAME` 폴백으로 붙는다. 그래서 각
+워크트리의 `backend/.env` 에도 자기 `DB_NAME` 이 박혀 있다. 한때 여기가 전부
+`postgres` 였고, 격리를 `dev.sh` 에만 걸어 둔 탓에 **게이트를 돌리는 순간 다섯
+창이 같은 DB 를 만지고 있었다.** 새 워크트리를 만들면 두 곳을 다 맞춰라.
+
+실DB 를 쓰는 테스트는 붙은 DB 가 자기 것인지 직접 확인한다
+(`backend/tests/test_holdings_write_race.py` 의 `guard_target` 참고).
+`inet_server_addr()` 로 판단하면 안 된다 — 도커 포트매핑 때문에 컨테이너
+내부 IP 가 나와서 로컬을 원격으로 오판한다. `conn.info.host` 를 본다.
 
 한 창이 `delete from holdings` 를 해도 다른 창은 그대로다. 실제로 그렇게
 검증했다.
