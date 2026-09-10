@@ -14,6 +14,38 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# ── 인증 에뮬레이터로는 절대 공개 배포하지 않는다 ────────────────────────────
+#
+# firebase_admin 은 FIREBASE_AUTH_EMULATOR_HOST 가 있으면 에뮬레이터 모드로
+# 들어가고, 그 모드에서는 ID 토큰의 **서명 검증을 건너뛴다**
+# (_token_gen.py: `if emulated: verified_claims = payload`). kid·alg 검사도
+# 함께 빠지므로 남는 검사는 aud/iss/sub 뿐이고 셋 다 위조가 자유롭다.
+#
+# 이 스크립트는 그 백엔드를 cloudflared 터널로 인터넷에 그대로 노출한다.
+# 두 개가 겹치면 아무나 토큰을 위조해 임의 사용자로 로그인할 수 있다.
+#
+# 로컬 병렬 개발에서 에뮬레이터를 쓸 때는 이 변수를 .env 에 넣지 말고
+# `./dev.sh --auth-emulator` 처럼 그 프로세스 환경에만 넣는다. 그러면 이
+# 스크립트가 읽는 파일에는 존재하지 않는다.
+check_no_auth_emulator() {
+  [ -n "${FIREBASE_AUTH_EMULATOR_HOST:-}" ] && return 1
+  # .env 는 uvicorn 이 읽으므로 셸 환경에 없어도 백엔드에는 켜진다.
+  grep -qsE '^[[:space:]]*FIREBASE_AUTH_EMULATOR_HOST[[:space:]]*=[[:space:]]*[^[:space:]]'     "$SCRIPT_DIR/backend/.env" && return 1
+  return 0
+}
+if ! check_no_auth_emulator; then
+  echo "중단: FIREBASE_AUTH_EMULATOR_HOST 가 설정돼 있습니다." >&2
+  echo "" >&2
+  echo "에뮬레이터 모드에서는 ID 토큰 서명 검증이 생략됩니다. 이 스크립트는" >&2
+  echo "백엔드를 cloudflared 로 인터넷에 공개하므로, 그대로 띄우면 누구나" >&2
+  echo "토큰을 위조해 임의 사용자로 로그인할 수 있습니다." >&2
+  echo "" >&2
+  echo "환경변수에서 지우고, backend/.env 에 있으면 그 줄도 지운 뒤 다시" >&2
+  echo "실행하세요. 로컬 개발용 에뮬레이터는 ./dev.sh 쪽에서 켭니다." >&2
+  exit 1
+fi
+
+
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
