@@ -12,8 +12,13 @@ echo  Frontend : http://0.0.0.0:3000   (LAN 공개)
 echo ============================================
 echo.
 
-REM 이전에 실행 중인 uvicorn/node 프로세스 종료 (충돌 방지)
-taskkill /F /IM "uvicorn.exe" >nul 2>&1
+REM 이 스크립트가 띄운 창만 정리한다.
+REM
+REM 예전에는 taskkill /F /IM "uvicorn.exe" 로 머신 전체의 uvicorn 을 죽였다.
+REM 병렬 개발 창이 여럿이면 남의 백엔드까지 끈다. 창 제목으로만 잡는다.
+REM
+REM 참고: 병렬로 개발할 때는 이 스크립트 대신 dev.sh 를 쓴다. 여기는 포트가
+REM 8000/3000 고정이라 슬롯 0(메인 창)과 충돌한다.
 taskkill /F /FI "WINDOWTITLE eq PFP Backend*" >nul 2>&1
 taskkill /F /FI "WINDOWTITLE eq PFP Frontend*" >nul 2>&1
 timeout /t 1 /nobreak >nul

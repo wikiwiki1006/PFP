@@ -155,7 +155,13 @@ def on_startup():
     # 서버리스(Cloud Run 등)에서는 요청이 없으면 인스턴스가 0으로 내려가므로
     # 백그라운드 스레드 스케줄러가 신뢰성 있게 돌지 않는다. 그런 환경에서는
     # ENABLE_SCHEDULER=false 로 꺼두고, 시세는 온디맨드 경로로만 수집한다.
-    if os.getenv("ENABLE_SCHEDULER", "true").lower() not in ("1", "true", "yes"):
+    # 기본값은 false 다. 이 리포에서 true 로 세팅하는 실행 경로가 하나도 없다 —
+    # Dockerfile 은 false, dev.sh 는 --scheduler 를 줬을 때만 true. 그래서 기본
+    # true 는 아무도 쓰지 않으면서 환경변수를 주지 않은 사람만 함정에 빠뜨렸다:
+    # start.bat 이나 문서의 uvicorn 예시로 띄우면 프리패치·SP500 수집·1분
+    # 스케줄러가 조용히 돌았고, 병렬 창 다섯이면 그게 다섯 배가 된다.
+    # 켜는 쪽을 명시하게 한다.
+    if os.getenv("ENABLE_SCHEDULER", "false").lower() not in ("1", "true", "yes"):
         logger.info("ENABLE_SCHEDULER=false — 백그라운드 스케줄러/프리패치 비활성화")
         return
 
