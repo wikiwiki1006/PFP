@@ -20,12 +20,14 @@ services/price_series.py
 from __future__ import annotations
 
 from datetime import datetime
+from functools import lru_cache
 from typing import NamedTuple, Optional
 
+import numpy as np
 import pandas as pd
 
 from backend.services.market_calendar import (
-    is_us_trading_day,
+    _holidays_for_year,
     now_et,
     us_price_cutoff,
     uses_us_session_calendar,
@@ -40,6 +42,41 @@ class DailyChange(NamedTuple):
     as_of:      pd.Timestamp       # price 의 기준 날짜
     prev_as_of: Optional[pd.Timestamp]
     is_live:    bool               # 장중 실시간 가격 사용 여부
+
+
+def _us_trading_day_mask(idx: pd.DatetimeIndex) -> np.ndarray:
+    """각 날짜가 NYSE 정규 거래일인지 (주말·공휴일 제외) — 인덱스 단위로 한 번에.
+
+    `is_us_trading_day` 를 날짜마다 부르면 DatetimeIndex 를 파이썬으로 순회하며
+    Timestamp 를 하나씩 만든다. 보유 종목 상세는 이걸 종목마다 반복하므로
+    60종목 × 2500일 = 호출 15만 번이 되고, 그것이 그 화면 시간의 대부분이었다.
+
+    판정 규칙은 `is_us_trading_day` 와 같다 — 주말이거나 그 해 NYSE 휴장일
+    집합에 있으면 거래일이 아니다. 휴장일 집합은 이미 연도별로 캐시돼 있어,
+    날짜당 한 번이던 조회가 인덱스에 등장하는 연도당 한 번이 된다.
+    """
+    if len(idx) == 0:
+        return np.zeros(0, dtype=bool)
+    # tz-aware 인덱스에서 `Timestamp.date()` 는 그 타임존의 날짜를 준다.
+    # tz_localize(None) 이 같은 벽시계 날짜를 주므로 판정이 일치한다.
+    days = (idx.tz_localize(None) if idx.tz is not None else idx).normalize()
+    years = tuple(sorted(int(y) for y in days.year.unique()))
+    return np.asarray((days.dayofweek < 5) & ~days.isin(_holiday_index(years)))
+
+
+@lru_cache(maxsize=64)
+def _holiday_index(years: tuple[int, ...]) -> pd.DatetimeIndex:
+    """여러 연도의 NYSE 휴장일을 하나의 DatetimeIndex 로 — 연도 조합 단위 캐시.
+
+    `_holidays_for_year` 자체는 이미 캐시돼 있지만, 그것을 합쳐 DatetimeIndex 를
+    만드는 비용은 호출마다 다시 든다. 이 함수는 보유 종목마다 불리고 종목들의
+    날짜 범위는 대개 같으므로, 연도 조합으로 캐시하면 그 고정비가 한 번으로 준다.
+    DatetimeIndex 는 불변이라 캐시된 객체를 공유해도 안전하다.
+    """
+    holidays: set = set()
+    for year in years:
+        holidays |= set(_holidays_for_year(year))
+    return pd.DatetimeIndex(sorted(holidays))
 
 
 def _clean_series(raw_df: pd.DataFrame, ticker: str, now: Optional[datetime]) -> pd.Series:
@@ -58,8 +95,7 @@ def _clean_series(raw_df: pd.DataFrame, ticker: str, now: Optional[datetime]) ->
 
     if uses_us_session_calendar(ticker):
         # ① NYSE 비거래일(주말·공휴일) 행 제거 — DB에 유령 행이 남아 있어도 안전
-        mask = pd.Series([is_us_trading_day(ts.date()) for ts in s.index], index=s.index)
-        s = s[mask]
+        s = s[_us_trading_day_mask(s.index)]
         # ② 아직 거래가 시작되지 않은 날짜(장전의 오늘) 행 절단
         cutoff = pd.Timestamp(us_price_cutoff(now))
         s = s[s.index.normalize() <= cutoff]
