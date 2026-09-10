@@ -136,7 +136,11 @@ export function formatCompact(value: number | null | undefined, market?: Market)
   if (spec.code === 'KR') {
     if (v >= 1e12) return `${sign}${spec.symbol}${(v / 1e12).toFixed(2)}조`
     if (v >= 1e8)  return `${sign}${spec.symbol}${(v / 1e8).toFixed(2)}억`
-    if (v >= 1e4)  return `${sign}${spec.symbol}${Math.round(v / 1e4).toLocaleString('ko-KR')}만`
+    // 만 구간은 소수 1자리까지 쓰되 필요할 때만 붙인다. 정수로 반올림하면
+    // 12,340 이 ₩1만 이 되어 19% 어긋나고, 14,999 는 33% 어긋난다. 달러 쪽
+    // 같은 자릿수 구간(K)이 이미 소수 1자리라 정수 반올림은 비대칭이었다.
+    // maximumFractionDigits 라 850 은 ₩850만 그대로고 1.234 만 ₩1.2만 이 된다.
+    if (v >= 1e4)  return `${sign}${spec.symbol}${(v / 1e4).toLocaleString('ko-KR', { maximumFractionDigits: 1 })}만`
     return `${sign}${spec.symbol}${Math.round(v).toLocaleString('ko-KR')}`
   }
   if (v >= 1e12) return `${sign}${spec.symbol}${(v / 1e12).toFixed(2)}T`
