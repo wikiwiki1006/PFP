@@ -7,6 +7,7 @@ yfinance 실제 데이터 + Perplexity 뉴스 + Haiku 구조화 + Sonnet 분석
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 from datetime import datetime
@@ -238,8 +239,16 @@ def _fmt_amount(value, currency: str) -> str:
     매출 333조원(KRW)을 10억으로 나눈 뒤 달러를 붙인 값이다. 받아 본 모델은
     이걸 달러로 해석해 기업 규모를 1,300배 부풀려 서술한다.
 
-    원화는 조·억으로 끊는다. 'B'(십억)는 원화에 쓰지 않는 단위라, 숫자가
+    원화는 조·억·만으로 끊는다. 'B'(십억)는 원화에 쓰지 않는 단위라, 숫자가
     맞더라도 모델이 달러로 오해하기 쉽다.
+
+    구간과 자릿수는 프론트의 `frontend/src/lib/market.ts::formatCompact` 와
+    **같아야 한다.** 같은 금액이 화면과 리포트에서 다르게 적히면 어느 쪽이
+    맞는지 사용자가 알 수 없다. CLAUDE.md §1.4 의 표가 그 함수에서 나왔다.
+
+    여기가 갈라져 있었다. 억을 소수점 없이 적어서 1.49억이 `₩1억` 으로
+    나갔다 — **33% 어긋난 금액이 리포트에 실린다.** 0 을 적는 것과 달리
+    그럴듯해서 아무도 의심하지 않는다 (§1.3b).
     """
     try:
         v = float(value)
@@ -248,18 +257,27 @@ def _fmt_amount(value, currency: str) -> str:
     sign = "-" if v < 0 else ""
     a = abs(v)
 
+    def _round_half_up(x: float) -> int:
+        # JS 의 Math.round 는 .5 를 올린다. 파이썬 round()·format 은 짝수로
+        # 내린다(bankers rounding). 프론트와 같은 값을 적으려면 여기서 맞춘다.
+        return int(math.floor(x + 0.5))
+
     if currency == "KRW":
         if a >= 1e12:
-            return f"{sign}₩{a / 1e12:,.1f}조"
+            return f"{sign}₩{a / 1e12:,.2f}조"
         if a >= 1e8:
-            return f"{sign}₩{a / 1e8:,.0f}억"
-        return f"{sign}₩{a:,.0f}"
+            return f"{sign}₩{a / 1e8:,.2f}억"
+        if a >= 1e4:
+            return f"{sign}₩{_round_half_up(a / 1e4):,}만"
+        return f"{sign}₩{_round_half_up(a):,}"
     if a >= 1e12:
         return f"{sign}${a / 1e12:,.2f}T"
     if a >= 1e9:
         return f"{sign}${a / 1e9:,.2f}B"
     if a >= 1e6:
         return f"{sign}${a / 1e6:,.2f}M"
+    if a >= 1e3:
+        return f"{sign}${a / 1e3:,.1f}K"
     return f"{sign}${a:,.2f}"
 
 
