@@ -61,18 +61,7 @@ def _cases(*, xfail: dict[str, str] | None = None, market: str | None = None):
 
 # ── A1. 한국 프롬프트에 달러 기호가 없다 ────────────────────────────────────────
 
-_A1_XFAIL = {
-    "portfolio_optimizer._build_ticker_section[KR]": (
-        "_build_ticker_section takes no market argument, so a KR ticker is "
-        "rendered as '$500000.0B'. This is the CLAUDE.md 1.4 incident "
-        "(333 trillion won read as $333605.94B, a 1300x overstatement) "
-        "surviving in a builder the earlier fix never reached. "
-        "Delete this marker once the section knows its market."
-    ),
-    "portfolio_optimizer._build_ticker_section(빈값)[KR]": (
-        "Same builder, same missing market argument -- '$?B'."
-    ),
-}
+_A1_XFAIL: dict[str, str] = {}
 
 
 @pytest.mark.parametrize("prompt", _cases(xfail=_A1_XFAIL, market="KR"))
@@ -129,7 +118,10 @@ def test_won_amounts_use_korean_units(prompt: Prompt):
 
 # ── A4. 원화에 소수점이 없다 ───────────────────────────────────────────────────
 
-_WON_WITH_DECIMAL = re.compile(r"₩[\d,]+\.\d")
+# 조·억·만으로 끊은 금액의 소수점은 호가 미만 정밀도가 아니다 — `₩4.2조` 의
+# `.2` 는 2,000억이다. `_fmt_amount` 가 큰 원화 금액을 그렇게 적고 CLAUDE.md §1.4
+# 표도 `₩4.20조` 로 규정한다. 단위 접미사가 뒤따르면 잡지 않는다.
+_WON_WITH_DECIMAL = re.compile(r"₩[\d,]+\.\d+(?!\d*\s*[조억만])")
 
 
 @pytest.mark.parametrize("prompt", _cases())
@@ -149,16 +141,7 @@ def test_won_amounts_have_no_decimals(prompt: Prompt):
 # 판정을 좁게 둔다: 산문 속 물음표가 아니라 **값 자리**의 자리표시자만 잡는다.
 _PLACEHOLDER = re.compile(r"(?:[:\s(|])\?(?=[\sB%|)])|\bN/A\b|\$\?")
 
-_B2_XFAIL = {
-    "portfolio_optimizer._build_ticker_section(빈값)[KR]": (
-        "_build_ticker_section falls back to '?' for missing fundamentals and "
-        "puts it straight into the prompt ('$?B | ? -- ?'). Drop the row "
-        "instead. Delete this marker once missing values are omitted."
-    ),
-    "portfolio_optimizer._build_ticker_section(빈값)[US]": (
-        "Same builder, same '?' placeholders."
-    ),
-}
+_B2_XFAIL: dict[str, str] = {}
 
 
 @pytest.mark.parametrize("prompt", _cases(xfail=_B2_XFAIL))
