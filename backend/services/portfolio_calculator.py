@@ -6,10 +6,13 @@ Streamlit / yfinance 의존 없음 — 순수 NumPy/Pandas.
 """
 from __future__ import annotations
 
+import logging
 import math
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 
 def _safe(v, default: float = 0.0) -> float:
@@ -493,8 +496,12 @@ def calculate_metrics(
                 today_chg_val = _safe(_v)
                 today_chg_pct = _safe(_p)
                 as_of_str = _a.strftime("%Y-%m-%d") if _a is not None else None
-        except Exception as e:
-            print(f"[portfolio_daily_change error] {e}")
+        except Exception:
+            # 실패하면 아래 폴백이 에쿼티 곡선의 마지막 두 점으로 계산한다 —
+            # 그 경로는 ffill 로 복제된 유령 행을 구분하지 못해 0% 를 낼 수 있다.
+            # 어느 쪽 값이 화면에 떴는지는 이 로그로만 구별된다.
+            logger.warning("일변동 primitive 실패 — 에쿼티 곡선 기반 폴백으로 계산",
+                           exc_info=True)
 
     # 폴백: raw_df 를 넘기지 않는 기존 호출자(analyst-feedback, 리포트)는 종전 방식 유지
     if today_chg_val is None:

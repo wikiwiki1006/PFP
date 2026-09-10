@@ -8,10 +8,13 @@ routers/portfolio.py 에 섞여 있던 시세 수집 헬퍼를 분리했다.
 """
 from __future__ import annotations
 
+import logging
 import time as _time
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 try:
     from zoneinfo import ZoneInfo as _ZI
@@ -98,9 +101,11 @@ def _get_live_prices(tickers: list[str]) -> dict[str, float]:
                     if not col.empty:
                         cached[t] = (float(col.iloc[-1]), fetched)
         _live_px["next_attempt"] = _time.time() + _LIVE_RETRY_OK
-    except Exception as e:
-        # 침묵하지 않는다 — 이 상태가 안 보여서 오래된 가격이 실시간으로 표시됐다
-        print(f"[live prices] 수집 실패 ({len(need)}개): {e}")
+    except Exception:
+        # 침묵하지 않는다 — 이 상태가 안 보여서 오래된 가격이 실시간으로 표시됐다.
+        # print 로는 운영 로그 파이프라인에서 사라져 결국 침묵과 같았다 (§1.3).
+        logger.warning("실시간 시세 수집 실패 (%d개) — 직전 캐시 값으로 표시된다",
+                       len(need), exc_info=True)
         _live_px["next_attempt"] = _time.time() + _LIVE_RETRY_FAIL
 
     now2 = _time.time()
