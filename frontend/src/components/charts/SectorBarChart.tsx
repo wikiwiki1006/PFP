@@ -32,12 +32,15 @@ const CustomTooltip = ({
         {payload.map((p) => (
           <div key={p.name} className="flex items-center gap-2 mb-1">
             <div className="w-2 h-2 rounded-full" style={{ backgroundColor: p.color }} />
+            {/* null 을 0 으로 채우지 않는다. 이 차트가 CLAUDE.md 1.3 에 적힌
+                사고의 화면 쪽이다 — 데이터가 없는 섹터들이 전부 '+0.00%' 초록으로
+                떠서 사용자에게 "모든 섹터가 보합" 으로 보였다. 보합과 데이터
+                없음은 다르다. */}
             <span
               className="font-mono font-medium"
-              style={{ color: (p.value ?? 0) >= 0 ? '#10b981' : '#ef4444' }}
+              style={{ color: p.value == null ? '#64748b' : p.value >= 0 ? '#10b981' : '#ef4444' }}
             >
-              {(p.value ?? 0) >= 0 ? '+' : ''}
-              {(p.value ?? 0).toFixed(2)}%
+              {p.value == null ? '—' : `${p.value >= 0 ? '+' : ''}${p.value.toFixed(2)}%`}
             </span>
             <span className="text-[#64748b]">{p.name}</span>
           </div>
@@ -57,9 +60,15 @@ export default function SectorBarChart({ data, view = '1d' }: SectorBarChartProp
 
   const dataKey = keyMap[view]
 
-  const sorted = [...data].sort(
-    (a, b) => (b[dataKey] ?? 0) - (a[dataKey] ?? 0)
-  )
+  // 데이터 없는 섹터를 0 으로 취급하면 등락률 0 근처의 실제 섹터들 사이에
+  // 섞여 순위가 왜곡된다. '모름' 은 순위가 없으므로 끝으로 보낸다.
+  const sorted = [...data].sort((a, b) => {
+    const av = a[dataKey], bv = b[dataKey]
+    if (av == null && bv == null) return 0
+    if (av == null) return 1
+    if (bv == null) return -1
+    return bv - av
+  })
 
   return (
     <ResponsiveContainer width="100%" height={320}>
@@ -90,7 +99,8 @@ export default function SectorBarChart({ data, view = '1d' }: SectorBarChartProp
           {sorted.map((entry, index) => (
             <Cell
               key={`cell-${index}`}
-              fill={(entry[dataKey] ?? 0) >= 0 ? '#10b981' : '#ef4444'}
+              fill={entry[dataKey] == null ? '#64748b'
+                    : entry[dataKey]! >= 0 ? '#10b981' : '#ef4444'}
               fillOpacity={0.8}
             />
           ))}

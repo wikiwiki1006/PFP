@@ -168,7 +168,10 @@ function makeCandleRenderer(visData: OHLCVPoint[], priceDomain: [number, number]
 }
 
 // ── Quant 게이지 (반원 SVG) ───────────────────────────────────────────────────
-const QuantGauge = ({ score }: { score: number }) => {
+// score 가 null 이면 바늘을 그리지 않는다. 예전에는 호출부가 `?? 0` 으로
+// 채워서 계산 불가가 **0점(최악)** 으로 그려졌다 — 바로 옆 텍스트는 '—/100'
+// 인데 바늘만 바닥을 가리키는 상태였다. 0 은 이 척도에서 실제 판단값이다.
+const QuantGauge = ({ score }: { score: number | null }) => {
   const C = usePalette()
   const r = 52, sw = 12
   const cx = 70, cy = 70
@@ -195,11 +198,11 @@ const QuantGauge = ({ score }: { score: number }) => {
     return `M ${p1.x} ${p1.y} A ${r} ${r} 0 0 1 ${p2.x} ${p2.y}`
   }
 
-  const needlePct = score / 100
-  const needleAngle = Math.PI - needlePct * Math.PI
+  const needleAngle = Math.PI - (score ?? 0) / 100 * Math.PI
   const nx = cx + (r - 10) * Math.cos(needleAngle)
   const ny = cy - (r - 10) * Math.sin(needleAngle)
-  const needleColor = score >= 67 ? C.up : score >= 33 ? C.warn : C.down
+  const needleColor = score == null ? C.muted
+    : score >= 67 ? C.up : score >= 33 ? C.warn : C.down
 
   return (
     <svg width={140} height={80} viewBox="0 0 140 80">
@@ -210,20 +213,27 @@ const QuantGauge = ({ score }: { score: number }) => {
         <path key={i} d={arcPath(s.from, s.to)} fill="none"
           stroke={s.color} strokeWidth={sw - 2} strokeLinecap="butt" opacity={0.6} />
       ))}
-      {/* Needle */}
-      <line x1={cx} y1={cy} x2={nx} y2={ny} stroke={needleColor} strokeWidth={2.5} strokeLinecap="round" />
-      <circle cx={cx} cy={cy} r={4} fill={needleColor} />
+      {/* Needle — 점수가 없으면 그리지 않는다 (바닥을 가리키는 것도 판단이다) */}
+      {score != null && (
+        <>
+          <line x1={cx} y1={cy} x2={nx} y2={ny} stroke={needleColor} strokeWidth={2.5} strokeLinecap="round" />
+          <circle cx={cx} cy={cy} r={4} fill={needleColor} />
+        </>
+      )}
       {/* Score text */}
       <text x={cx} y={cy - 18} textAnchor="middle" fill={needleColor}
-        fontSize={22} fontWeight="bold" fontFamily="monospace">{score}</text>
+        fontSize={22} fontWeight="bold" fontFamily="monospace">{score ?? '—'}</text>
     </svg>
   )
 }
 
 // ── Panic 점수 바 ─────────────────────────────────────────────────────────────
-const PanicBar = ({ score }: { score: number }) => {
+// score 가 null 이면 채우지 않는다. 호출부가 `?? 0` 으로 채우면 이 척도에서
+// 0 은 'Extreme Fear' — 계산 불가가 가장 강한 신호로 그려졌다.
+const PanicBar = ({ score }: { score: number | null }) => {
   const C = usePalette()
-  const color = score <= 25 ? C.down : score <= 50 ? C.warn : C.up
+  const color = score == null ? C.muted
+    : score <= 25 ? C.down : score <= 50 ? C.warn : C.up
   return (
     <div>
       <div className="flex justify-between mb-1">
@@ -232,7 +242,7 @@ const PanicBar = ({ score }: { score: number }) => {
         <span style={{ fontSize: 10, color: C.muted }}>100</span>
       </div>
       <div style={{ height: 8, background: C.track, borderRadius: 4, overflow: 'hidden' }}>
-        <div style={{ height: '100%', width: `${score}%`, background: color, borderRadius: 4, transition: 'width 0.5s' }} />
+        <div style={{ height: '100%', width: `${score ?? 0}%`, background: color, borderRadius: 4, transition: 'width 0.5s' }} />
       </div>
     </div>
   )
@@ -973,10 +983,12 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                     퀀트 스코어보드
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <QuantGauge score={data.quant.score ?? 0} />
+                    <QuantGauge score={data.quant.score ?? null} />
                     <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: 10, color: C.muted }}>퀀트 점수: <span style={{ color: C.up, fontWeight: 700 }}>{data.quant.score ?? '—'}/100</span></div>
-                      <div style={{ fontSize: 11, color: C.up, fontWeight: 700, marginTop: 2 }}>{data.quant.score_label}</div>
+                      {/* 점수가 없으면 라벨도 '계산 불가' 다. 그걸 초록으로 칠하면
+                          긍정 판단처럼 읽힌다 — 값과 색이 같은 말을 해야 한다. */}
+                      <div style={{ fontSize: 10, color: C.muted }}>퀀트 점수: <span style={{ color: data.quant.score == null ? C.muted : C.up, fontWeight: 700 }}>{data.quant.score ?? '—'}/100</span></div>
+                      <div style={{ fontSize: 11, color: data.quant.score == null ? C.muted : C.up, fontWeight: 700, marginTop: 2 }}>{data.quant.score_label}</div>
                       {/* 합성 점수만 보여주면 실제보다 정밀해 보인다 — 팩터별 근거를 함께 표시 */}
                       {data.quant.factors && (
                         <div style={{ display: 'flex', gap: 8, marginTop: 5 }}>
@@ -1056,7 +1068,7 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                     </span>
                     <span style={{ fontSize: 11, color: C.muted }}>/100</span>
                   </div>
-                  <PanicBar score={data.quant.panic_score ?? 0} />
+                  <PanicBar score={data.quant.panic_score ?? null} />
                   {data.quant.panic_components && (
                     <div style={{ display: 'flex', gap: 8, marginTop: 6, flexWrap: 'wrap' }}>
                       {([['RSI','rsi'],['낙폭','drawdown'],['고점대비','vs_52w_high'],['거래량','volume'],['변동성','volatility']] as const).map(([ko,k]) => {
