@@ -226,25 +226,36 @@ Cloud Run 은 `ENABLE_SCHEDULER=false` 다. **프로세스 내 스케줄러는 �
 않고, 없으면 백엔드가 기동조차 하지 않는다. 비밀값은 Secret Manager 에서 받으므로
 `gcloud auth login` 이 먼저다. 멱등이라 여러 번 돌려도 된다.
 
+venv 인터프리터 경로는 OS 마다 다르다. 아래 `$PY` 로 적은 자리에
+macOS/Linux 는 `venv/bin/python`, Windows 는 `venv/Scripts/python.exe` 를 넣는다.
+`dev.sh` 와 `worktree-setup.sh` 는 이걸 자동으로 고른다.
+
 ```bash
 # 백엔드 (venv 사용, uvicorn 은 -m 으로 부른다)
-PYTHONPATH=$PWD venv/bin/python -m uvicorn backend.main:app --port 8000
+PYTHONPATH=$PWD $PY -m uvicorn backend.main:app --port 8000
 
 # 프론트
 cd frontend && npm run dev          # :3000, /api 는 :8000 으로 프록시
 
 # 테스트 — 커밋·배포 전 필수
-venv/bin/python -m pytest backend/tests -q
+$PY -m pytest backend/tests -q
 
 # 타입체크는 tsc -b 로만 유효하다
 cd frontend && npm run build
 ```
 
+pytest 는 `requirements.txt` 가 아니라 `requirements-dev.txt` 에 있다. 없다고 나오면
+`$PY -m pip install -r requirements-dev.txt` 를 한 번 돌린다.
+
+**게이트 명령을 파이프에 물리지 마라.** `npm run build 2>&1 | tail -20` 의 종료코드는
+`tail` 것이라 빌드가 깨져도 0 이 나온다. 실패를 통과로 읽는다. 종료코드가 필요하면
+`npm run build > log 2>&1; echo $?` 처럼 파일로 받는다.
+
 `npx tsc --noEmit -p tsconfig.json` 은 솔루션 스타일 config 라 **아무것도 검사하지
 않는다.** 통과해도 빌드가 깨질 수 있다. 반드시 `npm run build` 로 확인한다.
 
-`venv/bin/uvicorn` 의 셔뱅은 옛 경로를 가리켜 깨져 있다. `venv/bin/python -m uvicorn`
-으로 부른다.
+`venv/bin/uvicorn` (Windows 는 `venv/Scripts/uvicorn.exe`) 의 셔뱅은 옛 경로를
+가리켜 깨져 있다. 언제나 `$PY -m uvicorn` 으로 부른다.
 
 ---
 
@@ -259,7 +270,7 @@ Claude Code 세션 여러 개가 역할을 나눠 이 리포를 **동시에** �
 ### 7.1 워크트리를 만든다
 
 ```bash
-./worktree-setup.sh <역할> <슬롯>     # 예: ./worktree-setup.sh feature 1
+./worktree-setup.sh <역할> <슬롯>     # 예: ./worktree-setup.sh develop 1
 ```
 
 `../pfp-<역할>` 에 워크트리를, `agent/<역할>` 브랜치를 만들고 포트 슬롯을 준다.
@@ -267,7 +278,7 @@ Claude Code 세션 여러 개가 역할을 나눠 이 리포를 **동시에** �
 `git worktree` 는 추적되는 파일만 준다. 그래서 이 스크립트가 추가로 해 주는 것:
 
 - `venv` (784M) 와 `frontend/node_modules` (413M) 는 **심볼릭 링크**. 복사하면
-  슬롯 5개에 6GB 다. 링크해도 되는 이유는 항상 `venv/bin/python -m uvicorn` 으로
+  슬롯 5개에 6GB 다. 링크해도 되는 이유는 항상 `<venv>/python -m uvicorn` 으로
   부르고 `python -m` 이 cwd 를 `sys.path` 에 넣기 때문이다 — 인터프리터는 공유하되
   `backend` 패키지는 각 워크트리 것을 import 한다.
 - `backend/.env` 와 `frontend/.env.local` 은 **복사**. 링크하면 한 에이전트가 키를
@@ -279,14 +290,16 @@ Claude Code 세션 여러 개가 역할을 나눠 이 리포를 **동시에** �
 충돌을 막는 유일하게 확실한 규칙이다. 이게 없으면 에이전트는 눈에 보이는 버그를
 그냥 고치는데, 그 파일은 다른 창도 고치고 있다.
 
-| 역할 | 브랜치 | 슬롯 | 소유 경로 |
-|---|---|---|---|
-| 통합 | `main` | 0 | `CLAUDE.md`, main 병합 전담 |
-| 기능 개발 | `agent/feature` | 1 | `frontend/src/pages/` `frontend/src/components/` `backend/routers/` |
-| DB | `agent/db` | 2 | `backend/db/` `backend/services/cash_ledger.py` |
-| 테스트 | `agent/test` | 3 | `backend/tests/` `frontend/e2e/` |
-| 리포트 품질 | `agent/report` | 4 | `services/report_writer.py` `services/ai_analysis.py` `services/daily_report.py` |
-| 최적화 | `agent/perf` | 5 | `services/quant_metrics.py` `services/portfolio_*.py` |
+| 역할 | 워크트리 | 브랜치 | 슬롯 | 소유 경로 |
+|---|---|---|---|---|
+| 통합 (main) | `PFP/` | `main` | 0 | `CLAUDE.md`, `*.sh`, `requirements*.txt`, `frontend/package.json`, main 병합 전담 |
+| 기능 개발 | `pfp-develop/` | `agent/develop` | 1 | `frontend/src/pages/` `frontend/src/components/` `backend/routers/` |
+| DB 관리 | `pfp-dbmanage/` | `agent/dbmanage` | 2 | `backend/db/` `backend/services/cash_ledger.py` |
+| 테스트 | `pfp-test/` | `agent/test` | 3 | `backend/tests/` `frontend/e2e/` |
+| 리포트 품질 | `pfp-reportmanage/` | `agent/reportmanage` | 4 | `backend/services/report_writer.py` `backend/services/ai_analysis.py` `backend/services/daily_report.py` |
+| 최적화 | `pfp-programoptimize/` | `agent/programoptimize` | 5 | `backend/services/quant_metrics.py` `backend/services/portfolio_*.py` |
+
+워크트리는 리포와 **형제 디렉터리**로 만들어진다 (`vscode/PFP/` 옆에 `vscode/pfp-develop/`).
 
 `frontend/src/lib/market.ts` 와 `backend/services/markets.py` 는 모두가 건드리고
 싶어하는 파일이다. **통합 소유로 둔다.**
@@ -307,7 +320,7 @@ Claude Code 세션 여러 개가 역할을 나눠 이 리포를 **동시에** �
 보고는 네 줄로 고정한다. 자유 서술로 주고받으면 통합이 매번 되물어야 한다.
 
 ```
-브랜치: agent/feature @ <커밋해시>
+브랜치: agent/develop @ <커밋해시>
 건드린 경로: frontend/src/pages/AlphaTerminal.tsx
 테스트: pytest 163 passed / npm run build OK
 요청: (남의 경로가 필요하면 여기에)
@@ -319,11 +332,21 @@ Claude Code 세션 여러 개가 역할을 나눠 이 리포를 **동시에** �
 같은 DB 를 쓰면 같은 종목 행을 서로 덮는다. 테스트 창이 보유를 지우면 기능 창의
 화면이 빈다.
 
-Neon 은 DB 를 git 처럼 브랜치한다. 역할마다 하나씩 만들고 연결 문자열을 넣는다.
+**현재는 전 창이 DB 하나를 공유한다.** `backend/.env` 가 Neon URL 이 아니라
+`DB_HOST`/`DB_USER` 형식이라 `--db-branch` 를 아직 쓸 수 없다. 가르기 전까지는
+규칙으로 막는다:
+
+- 전 창이 고정 테스트 계정 하나만 쓴다 (`test@gmail.com`).
+- **보유 종목을 지우거나 통째로 갈아엎지 않는다.** 특히 테스트 창. 픽스처가
+  필요하면 지우지 말고 자기 티커를 추가한다.
+- 스키마 변경은 `backend/db/schema.py` 로만 간다. DB 에 직접 `ALTER TABLE` 치지
+  않는다 — 다른 창이 이유를 모른 채 깨진다.
+
+가를 준비가 되면 Neon 브랜치를 역할마다 만들고 연결 문자열을 넣는다.
 
 ```bash
-export PFP_DB_feature="postgres://..."     # 하이픈은 밑줄로
-./dev.sh --slot 1 --db-branch feature
+export PFP_DB_develop="postgres://..."     # 하이픈은 밑줄로
+./dev.sh --slot 1 --db-branch develop
 ```
 
 `--prod-db` 는 통합 세션에서 재현이 필요할 때만, 조회로만 쓴다.
@@ -333,7 +356,8 @@ export PFP_DB_feature="postgres://..."     # 하이픈은 밑줄로
 - **`main` 에 직접 커밋하지 않는다.** 지금까지 모든 커밋이 main 에 직접 올라갔는데,
   병렬에서는 그 방식이 바로 충돌이다.
 - 핸드오프 전 게이트: `pytest backend/tests -q` 와 `npm run build` 를 통과시킨다.
-  통과 못 하면 통합에 보고하지 않는다.
+  통과 못 하면 통합에 보고하지 않는다. **파이프에 물려서 확인하지 마라** —
+  `| tail` 은 종료코드를 삼켜서 깨진 빌드를 통과로 읽는다 (§6 참고).
 - `CLAUDE.md` 는 통합만 고친다. 다섯 창이 전부 규칙을 추가하고 싶어하고, 매 병합마다
   충돌한다. 고칠 내용은 통합에 요청한다.
 - 브랜치가 오래 갈라져 있을수록 병합 비용이 폭증한다. 작업 단위마다, 최소 하루

@@ -9,7 +9,7 @@
 # 로그인은 고정 테스트 계정으로만 한다:
 #     test@gmail.com / 10october@
 # 없으면 아래 명령으로 만든다:
-#     ./venv/bin/python -m backend.scripts.seed_test_user
+#     "$PY" -m backend.scripts.seed_test_user   (PY 는 아래에서 자동 탐지)
 #
 # Firebase 프로젝트는 로컬과 운영이 같다. 그래서 로컬에서 아무 이메일로나
 # 가입하면 실서비스 계정과 섞이고, 운영에 있는 이메일로는 가입도 안 된다.
@@ -27,8 +27,11 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-PY=./venv/bin/python
-[ -x "$PY" ] || { echo "venv 가 없습니다: $PY"; exit 1; }
+# venv 인터프리터 — macOS/Linux 는 bin/python, Windows 는 Scripts/python.exe
+if   [ -x ./venv/bin/python ];         then PY=./venv/bin/python
+elif [ -x ./venv/Scripts/python.exe ]; then PY=./venv/Scripts/python.exe
+else echo "venv 가 없습니다 (./setup.sh 를 먼저 돌리세요)"; exit 1
+fi
 
 SLOT=0
 PROD_DB=0
@@ -51,14 +54,37 @@ FE_PORT=$((3000 + SLOT))
 
 # 포트가 이미 물려 있으면 여기서 멈춘다. 백엔드를 띄운 뒤 프론트가 실패하면
 # 고아 uvicorn 이 남는다.
+# lsof 는 Windows Git Bash 에 없다. 없으면 netstat 으로 본다.
+port_busy() {
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -ano -p tcp 2>/dev/null | grep -qE "[:.]$1[[:space:]].*(LISTENING|LISTEN)"
+  else
+    return 1   # 검사할 수단이 없으면 막지 않는다. vite 의 strictPort 가 뒤에서 잡는다.
+  fi
+}
 for p in "$BE_PORT" "$FE_PORT"; do
-  if lsof -nP -iTCP:"$p" -sTCP:LISTEN >/dev/null 2>&1; then
+  if port_busy "$p"; then
     echo "포트 $p 가 이미 사용 중입니다. 다른 --slot 을 쓰세요."
     exit 1
   fi
 done
 
-cleanup() { pkill -P $$ 2>/dev/null || true; }
+# 프론트가 죽었을 때 고아 uvicorn 이 남지 않게 한다. pkill 은 Git Bash 에 없어서
+# 백엔드 PID 를 직접 들고 있다가 죽인다 — Windows 에선 --reload 가 자식을 하나 더
+# 띄우므로 taskkill //T 로 트리째 정리한다.
+BE_PID=""
+cleanup() {
+  if [ -n "$BE_PID" ]; then
+    if command -v taskkill >/dev/null 2>&1; then
+      WINPID="$(ps -p "$BE_PID" -o winpid= 2>/dev/null | tr -d ' ')"
+      [ -n "$WINPID" ] && taskkill //PID "$WINPID" //T //F >/dev/null 2>&1 || true
+    fi
+    kill "$BE_PID" 2>/dev/null || true
+  fi
+  pkill -P $$ 2>/dev/null || true
+}
 trap cleanup EXIT INT TERM
 
 if [ "$PROD_DB" = 1 ]; then
@@ -83,6 +109,7 @@ if [ -n "$DB_URL" ]; then
 else
   "$PY" -m uvicorn backend.main:app --reload --port "$BE_PORT" &
 fi
+BE_PID=$!
 
 echo "▸ 프론트엔드 ($FE_PORT)  ·  로그인: test@gmail.com / 10october@"
 (cd frontend && PFP_FE_PORT="$FE_PORT" PFP_BE_PORT="$BE_PORT" npm run dev)
