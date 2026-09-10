@@ -99,6 +99,21 @@ def _price_matrix(prices: pd.DataFrame, tickers: list[str]) -> np.ndarray:
 
 # ── 에쿼티 커브 ────────────────────────────────────────────────────────────────
 
+def _empty_curve() -> pd.Series:
+    """빈 에쿼티 곡선. **인덱스 타입까지 맞춘다.**
+
+    `pd.Series(dtype=float)` 의 기본 인덱스는 `RangeIndex` 다. 이 곡선을 받는
+    쪽은 전부 `curve.index.dayofweek` 로 주말 행을 걸러내므로, 거기서
+    `AttributeError: 'RangeIndex' object has no attribute 'dayofweek'` 가 난다.
+
+    빈 곡선이 나오는 경로가 실제로 있다 — `_trim_to_session` 이 프레임을 비우면
+    (예: DB 에 확정 종가보다 뒤인 잠정 행만 있는 경우) `close_df` 는 비어 있지
+    않은데 곡선만 빈다. 그러면 `calculate_metrics` 의 close_df 가드를 통과한
+    뒤 곡선 쪽에서 터져 `/metrics` 가 500 이 된다.
+    """
+    return pd.Series(dtype=float, index=pd.DatetimeIndex([]))
+
+
 def build_equity_curve(
     holdings: dict,
     trade_log: list,
@@ -112,12 +127,12 @@ def build_equity_curve(
     비거래일(주말·공휴일) 이벤트는 다음 거래일에 자동 적용.
     """
     if close_df.empty:
-        return pd.Series(dtype=float)
+        return _empty_curve()
 
     # 미국 거래일 기준으로 정리 (KST 오늘로 연장하면 하루 밀린 가짜 행이 생긴다)
     close_df = _trim_to_session(close_df, market)
     if close_df.empty:
-        return pd.Series(dtype=float)
+        return _empty_curve()
 
     prices = close_df.ffill()
     idx    = close_df.index
@@ -689,12 +704,12 @@ def build_return_pct_curve(
     반환: (return_pct, holdings_by_date, initial_equity, cash_events, equity)
     """
     if close_df.empty:
-        return pd.Series(dtype=float), {}, 0.0, {}, pd.Series(dtype=float)
+        return _empty_curve(), {}, 0.0, {}, _empty_curve()
 
     # 미국 거래일 기준으로 정리 (KST 오늘로 연장하면 하루 밀린 가짜 행이 생긴다)
     close_df = _trim_to_session(close_df, market)
     if close_df.empty:
-        return pd.Series(dtype=float), {}, 0.0, {}, pd.Series(dtype=float)
+        return _empty_curve(), {}, 0.0, {}, _empty_curve()
 
     prices = close_df.ffill()
     idx    = close_df.index
@@ -821,7 +836,7 @@ def build_return_pct_curve(
     # ── 초기 자산: 첫 번째 양수 값 ───────────────────────────────────────────
     meaningful = equity[equity > 0]
     if meaningful.empty:
-        return pd.Series(dtype=float), {}, 0.0, {}, pd.Series(dtype=float)
+        return _empty_curve(), {}, 0.0, {}, _empty_curve()
     initial_equity = float(meaningful.iloc[0])
     first_idx      = meaningful.index[0]
 
