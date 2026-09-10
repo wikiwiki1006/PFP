@@ -21,13 +21,53 @@ logger = logging.getLogger(__name__)
 
 try:
     import psycopg2
-    from psycopg2.pool import ThreadedConnectionPool
+    from psycopg2.pool import PoolError, ThreadedConnectionPool
     from psycopg2.extras import RealDictCursor
     _PSYCOPG2_OK = True
 except ImportError:
     _PSYCOPG2_OK = False
 
+    class PoolError(Exception):      # type: ignore[no-redef]
+        """psycopg2 가 없을 때의 자리표시자 — 아래 except 절이 참조한다."""
+
 _pool: Optional[Any] = None
+
+
+class DBBusy(RuntimeError):
+    """지금은 처리할 수 없지만 **다시 시도하면 되는** 상태.
+
+    고장이 아니라 혼잡이다. 그래서 500(우리가 망가졌다)이 아니라 503 으로
+    번역돼야 한다 — 500 은 사용자에게 재시도해도 되는지를 알려주지 않는다.
+    `main.py` 의 예외 핸들러가 이 계열을 503 + `str(exc)` 로 내려보낸다.
+    """
+
+
+class PoolExhausted(DBBusy):
+    """풀에 남은 커넥션이 없다. **커넥션 장애가 아니라 백프레셔다.**
+
+    둘을 구분하는 이유는 대응이 정반대이기 때문이다. 커넥션이 죽었으면 풀을
+    새로 만드는 게 맞지만, 고갈은 새 풀을 만들어도 똑같이 만석이 된다 —
+    동시 요청 수가 줄어야 풀린다. 그런데 재초기화는 `closeall()` 을 하므로
+    **진행 중인 다른 요청들의 커넥션까지 끊는다.** 즉 부하 스파이크 하나가
+    그 순간의 모든 트랜잭션을 죽이는 구조였다.
+
+    advisory lock 이 세션 단위라 피해가 더 크다. `portfolio_repo.user_write_lock`
+    이 쥐고 있던 락이 `closeall()` 로 함께 풀리는데, 재초기화를 유발한 요청
+    하나만 에러를 받고 나머지는 **락이 사라진 줄도 모른 채 계속 진행한다.**
+    (실측: 풀을 채운 뒤 pg_locks 를 관찰하니 advisory lock 이 1 → 0 이 됐다.)
+    """
+
+
+class WriteLockUnavailable(DBBusy):
+    """사용자별 쓰기 락을 잡지 못했다.
+
+    예전에는 못 잡아도 그냥 진행했다(가용성 우선). 그런데 락 획득이 실패하는
+    주된 원인이 풀 고갈이고, **풀이 고갈됐다는 건 동시 요청이 몰렸다는 뜻이라
+    바로 그때가 경쟁이 실제로 터지는 순간이다.** 가장 위험한 지점에서만
+    보호가 사라지는 셈이었다.
+
+    유실은 되돌릴 수 없고 사용자가 알지도 못한다. 503 은 다시 누르면 된다.
+    """
 
 
 def _dsn() -> str:
@@ -79,14 +119,25 @@ def _dsn_label() -> str:
 def init_pool(minconn: int = 2, maxconn: Optional[int] = None) -> bool:
     """연결 풀 초기화. 성공 시 True, 실패 시 False(파일 폴백).
 
-    maxconn 기본값은 Cloud Run 의 인스턴스당 동시 요청 수(40)에 맞춘다.
+    maxconn 기본값은 Cloud Run 의 인스턴스당 동시 요청 수(40)의 **두 배**다.
     이보다 작으면 요청은 스레드풀에 올라갔는데 커넥션이 없어 대기하게 되고,
     동시 접속이 늘수록 그 대기가 그대로 응답 지연이 된다.
-    DB(Neon) 는 900 연결까지 받으므로 5 인스턴스 × 40 = 200 은 여유가 있다.
+    DB(Neon) 는 900 연결까지 받으므로 5 인스턴스 × 80 = 400 은 여유가 있다.
+
+    **두 배인 이유는 쓰기 요청이 커넥션을 두 개 쥐기 때문이다.**
+    `portfolio_repo.user_write_lock` 이 advisory lock 용으로 하나를 잡아
+    핸들러가 끝날 때까지 놓지 않고, 그 안의 실제 쿼리가 `get_conn()` 으로
+    또 하나를 꺼낸다 (실측으로 확인: 요청 1건 = 커넥션 2개).
+    예전 값 40 은 "1요청 = 1커넥션" 을 가정한 값이었고, 락이 들어오면서 그
+    가정이 깨졌는데 숫자는 그대로였다. 그래서 쓰기 20건이면 40개가 다 나갔다.
+
+    락과 본문 쿼리가 같은 커넥션을 쓰도록 바꾸면(그게 근본 해법이다) 다시
+    1요청 = 1커넥션이 되므로 **이 두 배도 같이 되돌려야 한다.** 그때 이 주석을
+    고치지 않으면 80 이 근거를 잃은 채 굳는다 — 지금 40 이 그랬던 것처럼.
     """
     global _pool
     if maxconn is None:
-        maxconn = max(4, int(os.getenv("DB_POOL_MAX", "40")))
+        maxconn = max(4, int(os.getenv("DB_POOL_MAX", "80")))
     if not _PSYCOPG2_OK:
         logger.warning("psycopg2 미설치 → 파일 폴백 모드")
         return False
@@ -108,9 +159,27 @@ def is_available() -> bool:
 
 
 def _try_reinit_pool() -> bool:
-    """풀이 죽었을 때 재초기화 시도. 성공 시 True."""
+    """풀이 죽었을 때 재초기화 시도. 성공 시 True.
+
+    **커넥션이 실제로 죽었을 때만 부른다.** 고갈에는 부르지 않는다 —
+    PoolExhausted 의 설명 참고.
+
+    그 진짜 경우에도 `closeall()` 은 지금 나가 있는 커넥션을 전부 끊는다.
+    advisory lock 을 쥔 요청이 있으면 그 락도 함께 풀리고, 그 요청은 아무
+    신호도 받지 못한다. 완전한 해법은 락과 본문 쿼리가 같은 커넥션을 쓰는
+    것인데 구조 변경이 커서 아직 안 했다. 그때까지는 **몇 개를 끊었는지라도
+    남긴다** — 나중에 "락이 걸렸어야 하는데 안 걸렸다" 를 추적할 단서다.
+    """
     global _pool
-    logger.warning("DB 연결 풀 재초기화 시도 중...")
+    in_use = 0
+    try:
+        in_use = len(_pool._used) if _pool is not None else 0   # type: ignore[union-attr]
+    except Exception:
+        pass
+    logger.warning(
+        f"DB 연결 풀 재초기화 시도 중... 사용 중이던 커넥션 {in_use}개를 닫는다. "
+        f"그중 advisory lock 을 쥔 것이 있으면 그 락도 함께 풀린다."
+    )
     try:
         if _pool is not None:
             try:
@@ -124,19 +193,41 @@ def _try_reinit_pool() -> bool:
         return False
 
 
+def _is_exhaustion(e: BaseException) -> bool:
+    """이 예외가 '풀에 남은 게 없다'인가, 아니면 커넥션 장애인가.
+
+    메시지 문자열로 가르지 않는다. `PoolError` 는 고갈 말고 "pool is closed"
+    에도 쓰이는데, 그쪽은 진짜로 재초기화가 필요한 상태다. 풀 객체의 `closed`
+    를 직접 보는 편이 문구 변경에 흔들리지 않는다.
+    """
+    if not isinstance(e, PoolError):
+        return False
+    try:
+        return not _pool.closed      # type: ignore[union-attr]
+    except Exception:
+        return False
+
+
 @contextmanager
 def get_conn():
-    """풀에서 커넥션을 꺼내 컨텍스트 매니저로 제공. 완료 시 commit, 예외 시 rollback."""
+    """풀에서 커넥션을 꺼내 컨텍스트 매니저로 제공. 완료 시 commit, 예외 시 rollback.
+
+    커넥션 장애는 재시도하고, 마지막엔 풀을 새로 만든다. **고갈은 그 경로로
+    보내지 않고 PoolExhausted 로 올린다** — 이유는 그 예외의 설명에 있다.
+    """
     import time
-    if _pool is None:
+    pool = _pool          # 이 요청이 쓸 풀을 고정한다. 도중에 다른 스레드가
+                          # 재초기화하면 전역 _pool 이 바뀌는데, 그때 새 풀에
+                          # 옛 커넥션을 반납하면 "unkeyed connection" 이 난다.
+    if pool is None:
         raise RuntimeError("DB 풀 미초기화 (is_available() == False)")
     conn = None
     for attempt in range(3):
         try:
-            conn = _pool.getconn()
+            conn = pool.getconn()
             # 끊긴 커넥션 감지 후 교체
             if conn.closed:
-                _pool.putconn(conn, close=True)
+                pool.putconn(conn, close=True)
                 conn = None
                 time.sleep(0.2)
                 continue
@@ -147,14 +238,26 @@ def get_conn():
         except Exception as e:
             if conn is not None:
                 try:
-                    _pool.putconn(conn, close=True)
+                    pool.putconn(conn, close=True)
                 except Exception:
                     pass
                 conn = None
+            exhausted = _is_exhaustion(e)
             if attempt < 2:
+                # 고갈이어도 잠깐은 기다려 본다 — 다른 요청이 끝나면 자리가 난다.
                 time.sleep(0.3)
+            elif exhausted:
+                maxconn = getattr(pool, "maxconn", "?")
+                logger.error(
+                    f"DB 커넥션 풀 고갈 (maxconn={maxconn}). 풀은 그대로 두고 "
+                    f"요청을 거절한다 — 재초기화해도 새 풀이 똑같이 만석이 되고, "
+                    f"진행 중인 다른 요청의 커넥션과 advisory lock 만 끊긴다."
+                )
+                raise PoolExhausted(
+                    "DB 커넥션이 부족해 요청을 처리하지 못했다"
+                ) from e
             else:
-                # 마지막 시도 실패 시 풀 전체 재초기화
+                # 커넥션이 실제로 죽은 경우에만 풀 전체 재초기화
                 if _try_reinit_pool():
                     raise RuntimeError("풀 재초기화 완료, 다음 요청에서 재시도") from e
                 raise
@@ -166,7 +269,12 @@ def get_conn():
         raise
     finally:
         if conn is not None:
-            _pool.putconn(conn)
+            try:
+                pool.putconn(conn)
+            except Exception as e:
+                # 반납 실패로 본래 결과·예외를 덮어쓰지 않는다. 커넥션 하나가
+                # 새는 것보다 요청 결과가 바뀌는 쪽이 나쁘다.
+                logger.warning(f"커넥션 반납 실패: {e}")
 
 
 def execute(sql: str, params=None, fetch: str = "none") -> Any:

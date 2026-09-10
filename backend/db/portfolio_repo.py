@@ -102,6 +102,13 @@ def user_write_lock(user_id: str = "default"):
     락은 세션 단위이므로 획득·해제를 같은 커넥션에서 해야 한다.
     DB 미연결이면 아무것도 하지 않는다 — 직렬화할 쓰기 자체가 없다. 이 블록
     안의 쓰기 함수가 전부 그 상태에서 예외를 올리기 때문이다.
+
+    **락을 못 잡으면 요청을 거절한다** (`WriteLockUnavailable` → 503).
+    예전에는 경고만 남기고 락 없이 진행했다. 가용성을 택한 판단이었는데,
+    락 획득이 실패하는 주된 원인이 풀 고갈이고 풀 고갈은 동시 요청이 몰렸다는
+    뜻이다 — 즉 **경쟁이 실제로 터지는 바로 그 순간에만 보호가 사라졌다.**
+    잃은 매매는 되돌릴 수 없고 사용자에게 보이지도 않는 반면, 503 은 다시
+    누르면 된다.
     """
     if not is_available():
         yield
@@ -116,8 +123,8 @@ def user_write_lock(user_id: str = "default"):
         with conn.cursor() as cur:
             cur.execute("SELECT pg_advisory_lock(hashtext(%s))", (key,))
     except Exception as e:
-        # 락을 못 잡아도 요청 자체는 처리한다 (가용성 우선). 경쟁 위험만 남는다.
-        logger.warning(f"user_write_lock({user_id}) 획득 실패 — 락 없이 진행: {e}")
+        from backend.db import WriteLockUnavailable
+        logger.error(f"user_write_lock({user_id}) 획득 실패, 요청을 거절한다: {e}")
         if conn is not None:
             try:
                 import backend.db as _db
@@ -125,6 +132,9 @@ def user_write_lock(user_id: str = "default"):
             except Exception:
                 pass
             conn = None
+        raise WriteLockUnavailable(
+            "요청이 몰려 지금 처리할 수 없습니다. 잠시 후 다시 시도해 주세요."
+        ) from e
 
     try:
         yield
