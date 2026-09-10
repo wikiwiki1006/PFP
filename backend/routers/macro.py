@@ -348,9 +348,11 @@ def daily_brief(
     market: str = Depends(market_param),
 ):
     """오늘의 포트폴리오 브리프 마크다운 생성 (Claude Sonnet)."""
-    uid       = _auth["uid"]
-    holdings  = portfolio or _load_holdings(uid, market=market)
-    trade_log = _load_trade_log(uid, market=market)
+    uid      = _auth["uid"]
+    holdings = portfolio or _load_holdings(uid, market=market)
+    # 매매 이력은 읽지 않는다. 이 브리프는 자산곡선을 만들지 않고, 취득원가는
+    # holdings 의 avg 에서 온다. (예전에는 여기서 _load_trade_log 를 부른 뒤
+    # 결과를 쓰지 않고 버렸다 — 요청마다 도는 빈 조회였다.)
 
     if not holdings:
         raise HTTPException(status_code=400, detail="보유 종목 없음")
