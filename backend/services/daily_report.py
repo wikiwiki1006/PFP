@@ -158,10 +158,21 @@ def _collect_news(price_data: dict) -> dict:
 
 def _build_prompt(holdings: dict, price_data: dict, news: dict,
                   market: str = "US") -> str:
-    is_kr = market == "KR"
-    cur   = "₩" if is_kr else "$"
-    # 원화는 소수점이 없다(호가 단위 1원).
-    dec   = 0 if is_kr else 2
+    # 통화 포맷을 여기서 다시 만들지 않는다. `cur + 포맷 지정자` 로 조립하면
+    # 원화 소수 자릿수 같은 규칙이 이 파일에만 빠지는 사본이 하나 더 생긴다 —
+    # `_fmt_amount` 가 프론트와 갈렸던 것이 정확히 그렇게 시작했다 (§1.4).
+    from backend.services.report_writer import _fmt_price
+
+    is_kr    = market == "KR"
+    cur_code = "KRW" if is_kr else "USD"
+
+    def _money(v) -> str:
+        return _fmt_price(v, cur_code)
+
+    def _signed(v) -> str:
+        """손익은 부호가 보여야 한다. 음수 부호는 `_fmt_price` 가 붙인다."""
+        return f"+{_money(v)}" if v > 0 else _money(v)
+
     stock_keys = sorted(
         [k for k in price_data if not k.startswith("__")],
         key=lambda t: price_data[t]["chg_pct"],
@@ -172,8 +183,8 @@ def _build_prompt(holdings: dict, price_data: dict, news: dict,
     cash_val   = holdings.get("CASH", {}).get("q", 0)
 
     snap_lines = [
-        f"  {t}: 종가 {cur}{price_data[t]['close']:,.{dec}f}  전일대비 {price_data[t]['chg_pct']:+.2f}%  "
-        f"1일 P&L {cur}{price_data[t]['day_pnl']:+,.0f}  섹터 {price_data[t]['sector']}"
+        f"  {t}: 종가 {_money(price_data[t]['close'])}  전일대비 {price_data[t]['chg_pct']:+.2f}%  "
+        f"1일 P&L {_signed(price_data[t]['day_pnl'])}  섹터 {price_data[t]['sector']}"
         for t in stock_keys
     ]
 
@@ -232,8 +243,8 @@ def _build_prompt(holdings: dict, price_data: dict, news: dict,
 
 === 포트폴리오 스냅샷 ===
 {chr(10).join(snap_lines)}
-전체 주식 평가액: {cur}{total_val:,.0f}  현금: {cur}{cash_val:,.0f}
-전일 총 P&L: {cur}{total_pnl:+,.0f}
+전체 주식 평가액: {_money(total_val)}  현금: {_money(cash_val)}
+전일 총 P&L: {_signed(total_pnl)}
 {spy_line}
 매크로 지표: {macro_line}
 절대 변동 3% 이상 종목: {big_movers_str}
