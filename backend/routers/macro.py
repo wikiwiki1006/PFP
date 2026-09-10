@@ -86,10 +86,6 @@ def analyze_macro(
     if not req.event.strip():
         raise HTTPException(status_code=400, detail="이벤트를 입력하세요.")
 
-    job_id = str(uuid.uuid4())
-    _job_set(job_id, {"status": "pending"}, owner=_auth["uid"])
-    should_cancel = _store.cancel_token(job_id)
-
     # 스레드에 전달할 값을 미리 캡처 (req 객체가 스레드 내에서 변경될 수 있으므로)
     ev           = req.event
     req_model    = req.model
@@ -102,22 +98,26 @@ def analyze_macro(
     tier = resolve_model_tier("deep" if "sonnet" in req_model else "basic", _auth)
     if tier == "deep":
         enforce_deep_limit(_auth, "macro_scenario")
-        # 기록이 실패해도 이 요청은 계속 진행하되, 조용히 넘기지는 않는다.
-        # 이 테이블이 할당량의 유일한 근거라, 기록이 안 되는 상태가 로그 없이
-        # 이어지면 그동안 제한이 사실상 없어진다 (§1.3).
+        # 할당량은 여기서 **원자적으로** 소비한다. 위 enforce_deep_limit 은
+        # 사전 검사로 남겨 두지만, 그것과 기록이 떨어져 있으면 TOCTOU 다 —
+        # 동시 요청 둘이 모두 통과한 뒤 둘 다 기록해 1일 1회 제한에 심층
+        # 분석이 두 번 나간다. 심층은 LLM 호출이라 비용이 바로 발생한다.
         #
-        # 여기서 예외를 다시 올리지 않는 이유는 reports.py 의 _record_deep_use
-        # 와 같다 — 이 요청은 바로 위 enforce_deep_limit 을 이미 통과했다.
-        # 기록 실패가 위태롭게 하는 것은 이 요청이 아니라 다음 요청이고,
-        # 그쪽은 count_recent 가 실패 시 예외를 올려 막는다.
-        try:
-            from backend.db import usage_repo
-            usage_repo.record_use(uid, "macro_scenario")
-        except Exception as e:
-            logger.error(
-                f"심층 분석 사용 기록 실패. 이 사용은 할당량에 잡히지 않는다 "
-                f"(uid={uid}, kind=macro_scenario): {e}"
+        # 예외를 잡지 않는다. DBBusy 는 503, 나머지는 500 으로 나가야 하고
+        # 둘 다 "닫힘" 이 맞다. 확인할 수 없는 상태에서 통과시키면 제한이
+        # 사실상 없어진다 (§1.3).
+        from backend.db import usage_repo
+        if not usage_repo.consume(uid, "macro_scenario"):
+            raise HTTPException(
+                status_code=429,
+                detail="심층 분석은 24시간에 한 번만 사용할 수 있습니다.",
             )
+
+    # 잡은 할당량을 소비한 **뒤에** 만든다. 먼저 만들면 429·503·500 으로
+    # 거절된 요청도 pending 잡을 남기고, 화면은 끝나지 않는 분석을 폴링한다.
+    job_id = str(uuid.uuid4())
+    _job_set(job_id, {"status": "pending"}, owner=uid)
+    should_cancel = _store.cancel_token(job_id)
 
     def _run() -> None:
         try:
