@@ -377,5 +377,5 @@ def daily_brief(
     macro_data = get_fred_macro()
     news_items = get_portfolio_news(tickers, max_per=2)
 
-    md = generate_daily_brief(holdings, price_data, macro_data, news_items)
+    md = generate_daily_brief(holdings, price_data, macro_data, news_items, market)
     return {"markdown": md}

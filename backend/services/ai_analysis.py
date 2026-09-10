@@ -742,15 +742,33 @@ reason: 한국어 1문장.
     ]
 
 
-def _format_portfolio(holdings: dict) -> str:
+def _format_portfolio(holdings: dict, market: str) -> str:
+    """보유 종목을 프롬프트용 텍스트로 적는다.
+
+    `market` 에 기본값을 두지 않는다. 통화를 빠뜨린 호출부가 조용히 달러가
+    되는 것이 이 함수에서 실제로 일어난 일이다 — 원화 금액에 `$` 가 붙어
+    나갔고 모델은 그 숫자를 달러로 읽었다. 인자를 빠뜨리면 TypeError 로
+    즉시 드러나는 편이 낫다.
+
+    포맷은 `report_writer` 의 것을 그대로 쓴다. 같은 규칙을 두 곳에 따로
+    구현한 탓에 한쪽만 고쳐지고 이쪽이 남아 있었다 (§1.4 의 '$333605.94B').
+    """
+    from backend.services.markets import get_market
+    from backend.services.report_writer import _fmt_price
+
+    cur = get_market(market).currency
+
     if not holdings:
         return "포트폴리오 없음"
     lines = []
     for t, info in holdings.items():
         if t == "CASH":
-            lines.append(f"CASH: ${info['q']:,.0f}")
+            lines.append(f"CASH: {_fmt_price(info.get('q'), cur)}")
         else:
-            lines.append(f"{t}: {info['q']} sh @ avg ${info['avg']:,.2f} (sector: {info.get('sector', '-')})")
+            lines.append(
+                f"{t}: {info['q']} sh @ avg {_fmt_price(info.get('avg'), cur)} "
+                f"(sector: {info.get('sector', '-')})"
+            )
     return "\n".join(lines)
 
 
@@ -883,7 +901,7 @@ def run_macro_agents(
     effective_model_key = model_key  # haiku → 전체 Haiku; sonnet → _AGENT_MODEL_TIER 분기
 
     selected_ids = ANALYSIS_MODES.get(mode, ANALYSIS_MODES["fast"])
-    portfolio_str = _format_portfolio(portfolio)
+    portfolio_str = _format_portfolio(portfolio, market)
 
     def _check() -> None:
         if should_cancel is not None and should_cancel():
@@ -1042,17 +1060,32 @@ def generate_daily_brief(
     price_data: dict,
     macro_data: dict,
     news_items: list[dict],
+    market: str,
 ) -> str:
-    """Claude Haiku로 월가 스타일 데일리 브리프 마크다운 생성."""
+    """Claude Haiku로 월가 스타일 데일리 브리프 마크다운 생성.
+
+    `market` 은 필수다 — 이 브리프의 금액 표기가 여기서 갈린다.
+    """
+    from backend.services.markets import get_market
+    from backend.services.report_writer import _fmt_price
+
     if not ANTHROPIC_API_KEY:
         return "ANTHROPIC_API_KEY 미설정"
 
-    holdings_summary = _format_portfolio(holdings)
+    cur = get_market(market).currency
+    holdings_summary = _format_portfolio(holdings, market)
 
     price_lines = []
     for t, d in price_data.items():
-        chg = d.get("chg_pct", 0)
-        price_lines.append(f"  {t}: ${d.get('price', 0):.2f} ({chg:+.2f}%) | P&L: {d.get('pnl_pct', 0):+.2f}%")
+        # 값이 없으면 0 을 적지 않는다. '0.00%' 는 '보합' 이지 '모름' 이 아니고,
+        # 모델은 그 차이를 알 수 없다 (§1.3).
+        chg = d.get("chg_pct")
+        pnl = d.get("pnl_pct")
+        chg_str = f"{chg:+.2f}%" if chg is not None else "전일 대비 불명"
+        pnl_str = f"{pnl:+.2f}%" if pnl is not None else "불명"
+        price_lines.append(
+            f"  {t}: {_fmt_price(d.get('price'), cur)} ({chg_str}) | P&L: {pnl_str}"
+        )
     price_block = "\n".join(price_lines) if price_lines else "  (데이터 없음)"
 
     top_news = "\n".join(f"  - [{n['ticker']}] {n['title']}" for n in news_items[:8])
