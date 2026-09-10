@@ -462,10 +462,11 @@ def gather_industry_yfinance(meta: dict, market: str = "US") -> tuple[str, dict]
     # 커버리지 종목
     coverage_str = meta.get("coverage", "")
     coverage_tickers = [t.strip() for t in coverage_str.split(",") if t.strip()]
-    # 통화 기호는 시장이 정한다. 한국 종목에 $ 를 붙이면 34만원짜리 주식이
-    # 34만 달러로 읽히고, LLM 도 그 숫자를 달러로 해석해 리포트를 쓴다.
+    # 시장 기본 통화는 폴백일 뿐이다. 실제 통화는 종목마다 yfinance 응답에서
+    # 읽는다 (§1.4) — 커버리지는 ADR·해외 상장이 섞이는 자리라 시장으로
+    # 일괄 판단하면 달러 값에 ₩ 가, 원화 값에 $ 가 붙는다.
     from backend.services.markets import get_market as _get_market
-    cur = _get_market(market).currency
+    market_cur = _get_market(market).currency
 
     lines.append("")
     lines.append("【커버리지 종목 핵심 지표】")
@@ -473,6 +474,9 @@ def gather_industry_yfinance(meta: dict, market: str = "US") -> tuple[str, dict]
     for ct in coverage_tickers:
         try:
             info = yf.Ticker(ct).info
+            # 주가·시가총액은 거래 통화(`currency`) 기준이다. 재무제표 통화
+            # (`financialCurrency`)와 다를 수 있으나 여기서는 쓰지 않는다.
+            cur        = info.get("currency") or market_cur
             price      = info.get("currentPrice") or info.get("regularMarketPrice")
             mktcap     = info.get("marketCap")
             pe         = info.get("trailingPE")
