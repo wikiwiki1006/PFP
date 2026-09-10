@@ -1115,7 +1115,7 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                   ['산업',        data.info.industry],
                   ['시가총액',    data.info.market_cap],
                   ['P/E',         data.info.pe != null ? fn(data.info.pe, 1) : 'N/A'],
-                  ['배당수익률',  `${fn(data.info.div_yield, 2)}%`],
+                  ['배당수익률',  data.info.div_yield == null ? 'N/A' : `${fn(data.info.div_yield, 2)}%`],
                 ].map(([k, v]) => (
                   <div key={k} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 3, fontSize: 11 }}>
                     {/* 라벨은 짧다. 줄바꿈을 허용하면 '산업'이 '산/업'으로 쪼개진다. */}
