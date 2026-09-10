@@ -52,9 +52,6 @@ _CANONICAL = {
 # 아직 안 고친 위반. (파일, 감싸는 함수) -> 무엇이 문제이고 누가 소유하는가.
 # 줄 번호로 키를 잡지 않는다 — 위아래 편집만으로 목록이 흔들린다.
 _KNOWN_VIOLATIONS = {
-    ("backend/routers/portfolio.py", "_add_trade_locked"):
-        "현금 부족 에러 메시지가 '$' 와 소수점 2자리를 고정한다. 한국 거래에서 "
-        "'필요 $71,900.00' 이 사용자에게 그대로 보인다. (소유: develop)",
     ("backend/services/daily_report.py", "_build_prompt"):
         "종목 줄·합계 줄이 통화 포맷을 인라인으로 다시 구현한다 "
         "(cur + 포맷 지정자). (소유: reportmanage)",
