@@ -9,6 +9,7 @@ services/ai_analysis.py
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -24,6 +25,8 @@ from dotenv import load_dotenv
 from backend.services.job_store import JobCancelled
 
 load_dotenv(Path(__file__).parent.parent / ".env")
+
+logger = logging.getLogger(__name__)
 
 ANTHROPIC_API_KEY  = os.getenv("ANTHROPIC_API_KEY", "")
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "")
@@ -61,12 +64,53 @@ _AGENT_MODEL_TIER: dict[int, str] = {
 
 # ── yfinance + FRED: 시장 지표 수집 ──────────────────────────────────────────
 
+def build_macro_block(market: str) -> str:
+    """그 시장의 거시지표를 프롬프트에 넣을 블록으로 만든다.
+
+    한 곳에만 둔다. 이전에는 시장 분기가 `gather_yfinance_market_data` 에만
+    있고 `/daily-brief` 경로에는 없어서, 한국 브리프가 연준 금리와 미 국채
+    스프레드를 근거로 쓰였다 — 통화 포맷이 두 곳에 갈라져 한쪽만 고쳐졌던
+    것과 같은 형태다.
+
+    값이 없는 항목은 넣지 않는다. 'N/A' 를 넣으면 모델이 그걸 수치처럼
+    인용한다 (`korea_macro.format_for_prompt` 와 같은 이유).
+    """
+    from backend.services.markets import normalize
+
+    try:
+        if normalize(market) == "KR":
+            from backend.services.korea_macro import get_korea_macro, format_for_prompt
+            return format_for_prompt(get_korea_macro(ttl=3600))
+
+        from backend.services.market_data import get_fred_macro
+        fred = get_fred_macro(ttl=3600)
+        # 폴백은 FRED 를 못 읽었을 때 쓰는 하드코딩 값이다. 실제 관측치인 척
+        # 프롬프트에 넣지 않는다.
+        if fred.get("source") == "fallback":
+            logger.warning("FRED 거시지표 폴백 — 실측값 없이 진행")
+            return "[US macro indicators]\n  (unavailable — FRED lookup failed)"
+
+        rows = [
+            ("Fed funds",               fred.get("fed_rate"),        "%",  "{:.2f}"),
+            ("Unemployment",            fred.get("unemployment"),    "%",  "{:.1f}"),
+            ("CPI YoY",                 fred.get("cpi"),             "%",  "{:.1f}"),
+            ("GDP growth (latest qtr)", fred.get("gdp"),             "%",  "{:.1f}"),
+            ("10Y-2Y spread",           fred.get("t10y2y"),          "pp", "{:+.3f}"),
+            ("HY spread",               fred.get("bamlh0a0hym2"),    "bp", "{:.0f}"),
+        ]
+        lines = [f"  {label}: {fmt.format(value)}{unit}"
+                 for label, value, unit, fmt in rows if value is not None]
+        return "[US macro indicators]\n" + "\n".join(lines) if lines else ""
+    except Exception:
+        logger.warning("거시지표 수집 실패 (market=%s)", market, exc_info=True)
+        return ""
+
+
 def gather_yfinance_market_data(market: str = "US") -> str:
     """DB 캐시 우선, 핵심 지수 누락 시 직접 yfinance 다운로드로 시장 지표 수집.
     배경 스레드에서 실행되므로 블로킹 다운로드 가능."""
     try:
         import pandas as pd
-        from backend.services.market_data import get_fred_macro
 
         PRICE_TICKERS: list[tuple[str, str, str, str]] = [
             ("^GSPC",    "S&P 500",          ",.0f",  ""),
@@ -189,9 +233,15 @@ def gather_yfinance_market_data(market: str = "US") -> str:
                 p = prev_price.get(t)
                 if c is None:
                     continue
+                # 전일가가 없으면 등락을 쓰지 않는다. '+0.00% d/d' 는 모델에게
+                # '보합' 이지 '모름' 이 아니다 — 그 지수가 안 움직였다는 근거로
+                # 답을 쓰게 된다 (§1.3a).
                 try:
-                    chg = (c / p - 1) * 100 if p else 0.0
-                    lines.append(f"  {name}: {c:{fmt}}{unit} ({chg:+.2f}% d/d)")
+                    if p:
+                        chg = (c / p - 1) * 100
+                        lines.append(f"  {name}: {c:{fmt}}{unit} ({chg:+.2f}% d/d)")
+                    else:
+                        lines.append(f"  {name}: {c:{fmt}}{unit} (d/d 불명 — 전일 종가 없음)")
                 except Exception:
                     lines.append(f"  {name}: {c:{fmt}}{unit}")
 
@@ -211,26 +261,10 @@ def gather_yfinance_market_data(market: str = "US") -> str:
         # 거시 지표 — 시장에 맞는 것을 넣는다.
         # 한국 시나리오에 Fed 금리·미국 실업률을 넣으면 모델이 그걸 근거로
         # 한국 시장을 논하게 된다.
-        try:
-            if market == "KR":
-                from backend.services.korea_macro import get_korea_macro, format_for_prompt
-                block = format_for_prompt(get_korea_macro(ttl=3600))
-                if block:
-                    lines.append("")
-                    lines.append(block)
-            else:
-                fred = get_fred_macro(ttl=3600)
-                if fred.get("source") != "fallback":
-                    lines.append("")
-                    lines.append("[FRED macro indicators]")
-                    lines.append(f"  Fed funds: {fred['fed_rate']:.2f}%")
-                    lines.append(f"  Unemployment: {fred['unemployment']:.1f}%")
-                    lines.append(f"  CPI YoY: {fred['cpi']:.1f}%")
-                    lines.append(f"  GDP growth (latest qtr): {fred['gdp']:.1f}%")
-                    lines.append(f"  10Y-2Y spread: {fred['t10y2y']:+.3f}pp")
-                    lines.append(f"  HY spread: {fred['bamlh0a0hym2']:.0f}bp")
-        except Exception:
-            pass
+        macro_block = build_macro_block(market)
+        if macro_block:
+            lines.append("")
+            lines.append(macro_block)
 
         return "\n".join(lines)
 
@@ -247,6 +281,7 @@ def _call_perplexity(prompt: str, max_tokens: int = 1200, market: str = "US") ->
     프롬프트로 관점만 바꿔 봐야 한국 이야기가 나오지 않는다.
     """
     if not PERPLEXITY_API_KEY:
+        logger.warning("Perplexity 검색 건너뜀 — PERPLEXITY_API_KEY 미설정")
         return ""
     try:
         from backend.services.news_sources import perplexity_extra
@@ -268,6 +303,10 @@ def _call_perplexity(prompt: str, max_tokens: int = 1200, market: str = "US") ->
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
     except Exception:
+        # 조용히 "" 를 돌려주면 뉴스 없이 쓴 리포트와 뉴스로 쓴 리포트가
+        # 겉보기에 같아진다. 호출자는 이걸 프롬프트에도 적는다 (§1.3).
+        logger.warning("Perplexity 검색 실패 (market=%s) — 뉴스 없이 진행", market,
+                       exc_info=True)
         return ""
 
 
@@ -320,6 +359,18 @@ def gather_context(ev: str, market: str = "US") -> str:
         parts.append("")
         parts.append("[Latest news & expert commentary — Perplexity]")
         parts.append(news_data)
+    else:
+        # 뉴스 블록을 조용히 빼면, 받아 본 모델은 뉴스가 없다는 사실 자체를
+        # 알 수 없어 "최근 보도에 따르면" 같은 서술을 그대로 쓴다. 없다는
+        # 것을 적어 두면 모델도 사용자도 그 리포트의 근거 범위를 안다.
+        parts.append("")
+        parts.append("[News unavailable]")
+        parts.append(
+            "  News collection failed or returned nothing for this run. "
+            "Base the analysis on the market data above only. "
+            "Do NOT cite recent news, press coverage or analyst commentary, "
+            "and state plainly that current news was unavailable."
+        )
 
     return "\n".join(parts)
 
@@ -742,15 +793,33 @@ reason: 한국어 1문장.
     ]
 
 
-def _format_portfolio(holdings: dict) -> str:
+def _format_portfolio(holdings: dict, market: str) -> str:
+    """보유 종목을 프롬프트용 텍스트로 적는다.
+
+    `market` 에 기본값을 두지 않는다. 통화를 빠뜨린 호출부가 조용히 달러가
+    되는 것이 이 함수에서 실제로 일어난 일이다 — 원화 금액에 `$` 가 붙어
+    나갔고 모델은 그 숫자를 달러로 읽었다. 인자를 빠뜨리면 TypeError 로
+    즉시 드러나는 편이 낫다.
+
+    포맷은 `report_writer` 의 것을 그대로 쓴다. 같은 규칙을 두 곳에 따로
+    구현한 탓에 한쪽만 고쳐지고 이쪽이 남아 있었다 (§1.4 의 '$333605.94B').
+    """
+    from backend.services.markets import get_market
+    from backend.services.report_writer import _fmt_price
+
+    cur = get_market(market).currency
+
     if not holdings:
         return "포트폴리오 없음"
     lines = []
     for t, info in holdings.items():
         if t == "CASH":
-            lines.append(f"CASH: ${info['q']:,.0f}")
+            lines.append(f"CASH: {_fmt_price(info.get('q'), cur)}")
         else:
-            lines.append(f"{t}: {info['q']} sh @ avg ${info['avg']:,.2f} (sector: {info.get('sector', '-')})")
+            lines.append(
+                f"{t}: {info['q']} sh @ avg {_fmt_price(info.get('avg'), cur)} "
+                f"(sector: {info.get('sector', '-')})"
+            )
     return "\n".join(lines)
 
 
@@ -883,7 +952,7 @@ def run_macro_agents(
     effective_model_key = model_key  # haiku → 전체 Haiku; sonnet → _AGENT_MODEL_TIER 분기
 
     selected_ids = ANALYSIS_MODES.get(mode, ANALYSIS_MODES["fast"])
-    portfolio_str = _format_portfolio(portfolio)
+    portfolio_str = _format_portfolio(portfolio, market)
 
     def _check() -> None:
         if should_cancel is not None and should_cancel():
@@ -1040,22 +1109,63 @@ def get_ai_analyst_feedback(
 def generate_daily_brief(
     holdings: dict,
     price_data: dict,
-    macro_data: dict,
     news_items: list[dict],
+    market: str,
 ) -> str:
-    """Claude Haiku로 월가 스타일 데일리 브리프 마크다운 생성."""
+    """Claude Haiku로 월가 스타일 데일리 브리프 마크다운 생성.
+
+    `market` 은 필수다 — 이 브리프의 금액 표기와 거시지표가 여기서 갈린다.
+    거시지표는 `build_macro_block` 이 시장에 맞는 것을 준다. 호출자가
+    FRED 를 직접 넘기던 때에는 한국 브리프도 연준 금리를 근거로 받았다.
+    """
+    from backend.services.markets import get_market
+    from backend.services.report_writer import _fmt_price
+
     if not ANTHROPIC_API_KEY:
         return "ANTHROPIC_API_KEY 미설정"
 
-    holdings_summary = _format_portfolio(holdings)
+    cur = get_market(market).currency
+    holdings_summary = _format_portfolio(holdings, market)
 
+    # 금액은 전부 계산해서 넘긴다. 비율만 주면 모델이 수량을 곱해 금액을
+    # 지어내는데 그 산술이 틀린다 — 실측으로 1일 손익 +₩10,239 를
+    # +₩688,000 으로, 총자산 ₩24,480,000 을 ₩13,350,000 으로 썼다.
     price_lines = []
     for t, d in price_data.items():
-        chg = d.get("chg_pct", 0)
-        price_lines.append(f"  {t}: ${d.get('price', 0):.2f} ({chg:+.2f}%) | P&L: {d.get('pnl_pct', 0):+.2f}%")
+        # 값이 없으면 0 을 적지 않는다. '0.00%' 는 '보합' 이지 '모름' 이 아니고,
+        # 모델은 그 차이를 알 수 없다 (§1.3).
+        chg = d.get("chg_pct")
+        pnl = d.get("pnl_pct")
+        day_pnl = d.get("day_pnl")
+        chg_str = f"{chg:+.2f}%" if chg is not None else "전일 대비 불명"
+        pnl_str = f"{pnl:+.2f}%" if pnl is not None else "불명"
+        day_str = _fmt_price(day_pnl, cur) if day_pnl is not None else "불명"
+        price_lines.append(
+            f"  {t}: {_fmt_price(d.get('price'), cur)} ({chg_str})"
+            f" | 평가액 {_fmt_price(d.get('pos_val'), cur)}"
+            f" | 1일 손익 {day_str}"
+            f" | 누적 P&L {pnl_str}"
+        )
     price_block = "\n".join(price_lines) if price_lines else "  (데이터 없음)"
 
+    stock_val = sum(d["pos_val"] for d in price_data.values() if d.get("pos_val") is not None)
+    day_pnls  = [d["day_pnl"] for d in price_data.values() if d.get("day_pnl") is not None]
+    cash_val  = float(holdings.get("CASH", {}).get("q") or 0)
+    total_line = (
+        f"  주식 평가액 {_fmt_price(stock_val, cur)}"
+        f" + 현금 {_fmt_price(cash_val, cur)}"
+        f" = 총자산 {_fmt_price(stock_val + cash_val, cur)}"
+    )
+    if len(day_pnls) == len(price_data) and day_pnls:
+        total_line += f"  ·  오늘 손익 합계 {_fmt_price(sum(day_pnls), cur)}"
+    elif day_pnls:
+        # 일부만 계산되면 합계를 내지 않는다. 부분 합을 전체 합처럼 적으면
+        # 모델은 그걸 포트폴리오 전체 손익으로 인용한다.
+        total_line += "  ·  오늘 손익 합계: 일부 종목 데이터 없음 — 합산 불가"
+
     top_news = "\n".join(f"  - [{n['ticker']}] {n['title']}" for n in news_items[:8])
+
+    macro_block = build_macro_block(market) or "  (거시지표 수집 실패 — 인용하지 마세요)"
 
     prompt = f"""당신은 월가 톱 헤지펀드의 포트폴리오 매니저입니다.
 아래 데이터를 바탕으로 오늘의 포트폴리오 브리프를 작성하세요.
@@ -1065,11 +1175,13 @@ def generate_daily_brief(
 
 # 오늘의 등락
 {price_block}
+{total_line}
+
+금액은 위에 계산해 두었습니다. 직접 곱하거나 더해서 새 금액을 만들지 말고
+그대로 인용하세요. 없는 값은 '불명' 으로 적혀 있으니 추정하지 마세요.
 
 # 매크로 지표
-- Fed Rate: {macro_data.get('fed_rate', 'N/A')}%
-- 10Y/2Y: {macro_data.get('y10', 'N/A')}/{macro_data.get('y2', 'N/A')} (스프레드: {macro_data.get('spread_10_2', 'N/A')}%p)
-- VIX: (시장 데이터 참조)
+{macro_block}
 
 # 주요 뉴스
 {top_news if top_news else '  (없음)'}
