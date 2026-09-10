@@ -1077,7 +1077,7 @@ def parse_portfolio_actions(raw_text: str) -> list[dict] | None:
 # ── AI Analyst 실시간 피드백 ──────────────────────────────────────────────────
 
 def get_ai_analyst_feedback(
-    vix: float,
+    vix: "float | None",
     portfolio_beta: "float | None",
     today_chg_pct: float,
     sector_summary: str,
@@ -1086,7 +1086,16 @@ def get_ai_analyst_feedback(
     if not ANTHROPIC_API_KEY:
         return "ANTHROPIC_API_KEY 미설정"
 
-    vix_state = "위험" if vix >= 30 else ("주의" if vix >= 20 else "정상")
+    # VIX 도 베타와 같은 규칙을 받는다. 예전에는 `float` 만 받아서, 호출부가
+    # 조회 실패를 18.0(장기 평균)이나 20.0 같은 상수로 메워 넘겨야 했다.
+    # 그 값이 프롬프트에 실측처럼 실리면 모델은 '변동성 정상' 을 근거로
+    # 리스크를 서술한다 — 아무도 VIX 를 못 읽었는데도 (§1.3a·B4).
+    vix_line = (
+        f"- VIX 지수: {vix:.1f} "
+        f"({'위험' if vix >= 30 else ('주의' if vix >= 20 else '정상')})"
+        if vix is not None else
+        "- VIX 지수: 산출 불가 (VIX 수준이나 변동성 국면은 언급하지 말 것)"
+    )
     # 베타를 못 구했으면 '1.00' 이라고 단정하지 않는다. 1.0 은 '시장과 동일하게
     # 움직인다'는 판단이라, 모르는 것을 아는 것처럼 적으면 모델이 그 전제로
     # 리스크를 서술한다.
@@ -1098,7 +1107,7 @@ def get_ai_analyst_feedback(
         prompt = f"""다음 데이터를 바탕으로 투자자에게 3~4문장(120자 이내)의 포트폴리오 섹터 분석 피드백을 한국어로 작성해줘.
 보유 섹터의 오늘 흐름과 리스크를 관찰 기반 코멘트 톤으로, 구체적 수치를 인용해서 작성해.
 
-- VIX 지수: {vix:.1f} ({vix_state})
+{vix_line}
 {beta_line}
 - 오늘 포트폴리오 변동률: {today_chg_pct:+.2f}%
 - 보유 섹터 비중 및 오늘 변동: {sector_summary}
@@ -1108,7 +1117,7 @@ def get_ai_analyst_feedback(
         prompt = f"""다음 데이터를 바탕으로 투자자에게 1~2문장(80자 이내)의 간결한 매매 방향성 피드백을 한국어로 작성해줘.
 조언이 아닌 관찰 기반 코멘트 톤으로, 구체적 수치를 인용해서 작성해.
 
-- VIX 지수: {vix:.1f} ({vix_state})
+{vix_line}
 {beta_line}
 - 오늘 포트폴리오 변동률: {today_chg_pct:+.2f}%
 - 주도 섹터(1일): {sector_summary}
@@ -1202,6 +1211,12 @@ def generate_daily_brief(
 
     top_news = "\n".join(f"  - [{n['ticker']}] {n['title']}" for n in news_items[:8])
 
+    # `build_macro_block` 은 이제 빈 문자열을 돌려주지 않으므로 이 `or` 는
+    # 도달하지 않는다. **죽은 코드지만 일부러 남긴다** — 그 보장이 깨지는
+    # 순간(새 반환 경로가 생기거나 누가 조용히 "" 를 돌려주면) 매크로 섹션이
+    # 흔적 없이 사라지고, 모델은 그 빈자리를 기억으로 메운다. 한 줄로 사는
+    # 방어선이라 지우지 않는다. `test_daily_brief_fills_in_when_the_block_is_empty`
+    # 가 이 동작을 고정한다.
     macro_block = build_macro_block(market) or "  (거시지표 수집 실패 — 인용하지 마세요)"
 
     prompt = f"""당신은 월가 톱 헤지펀드의 포트폴리오 매니저입니다.
