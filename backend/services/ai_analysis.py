@@ -64,12 +64,53 @@ _AGENT_MODEL_TIER: dict[int, str] = {
 
 # ── yfinance + FRED: 시장 지표 수집 ──────────────────────────────────────────
 
+def build_macro_block(market: str) -> str:
+    """그 시장의 거시지표를 프롬프트에 넣을 블록으로 만든다.
+
+    한 곳에만 둔다. 이전에는 시장 분기가 `gather_yfinance_market_data` 에만
+    있고 `/daily-brief` 경로에는 없어서, 한국 브리프가 연준 금리와 미 국채
+    스프레드를 근거로 쓰였다 — 통화 포맷이 두 곳에 갈라져 한쪽만 고쳐졌던
+    것과 같은 형태다.
+
+    값이 없는 항목은 넣지 않는다. 'N/A' 를 넣으면 모델이 그걸 수치처럼
+    인용한다 (`korea_macro.format_for_prompt` 와 같은 이유).
+    """
+    from backend.services.markets import normalize
+
+    try:
+        if normalize(market) == "KR":
+            from backend.services.korea_macro import get_korea_macro, format_for_prompt
+            return format_for_prompt(get_korea_macro(ttl=3600))
+
+        from backend.services.market_data import get_fred_macro
+        fred = get_fred_macro(ttl=3600)
+        # 폴백은 FRED 를 못 읽었을 때 쓰는 하드코딩 값이다. 실제 관측치인 척
+        # 프롬프트에 넣지 않는다.
+        if fred.get("source") == "fallback":
+            logger.warning("FRED 거시지표 폴백 — 실측값 없이 진행")
+            return "[US macro indicators]\n  (unavailable — FRED lookup failed)"
+
+        rows = [
+            ("Fed funds",               fred.get("fed_rate"),        "%",  "{:.2f}"),
+            ("Unemployment",            fred.get("unemployment"),    "%",  "{:.1f}"),
+            ("CPI YoY",                 fred.get("cpi"),             "%",  "{:.1f}"),
+            ("GDP growth (latest qtr)", fred.get("gdp"),             "%",  "{:.1f}"),
+            ("10Y-2Y spread",           fred.get("t10y2y"),          "pp", "{:+.3f}"),
+            ("HY spread",               fred.get("bamlh0a0hym2"),    "bp", "{:.0f}"),
+        ]
+        lines = [f"  {label}: {fmt.format(value)}{unit}"
+                 for label, value, unit, fmt in rows if value is not None]
+        return "[US macro indicators]\n" + "\n".join(lines) if lines else ""
+    except Exception:
+        logger.warning("거시지표 수집 실패 (market=%s)", market, exc_info=True)
+        return ""
+
+
 def gather_yfinance_market_data(market: str = "US") -> str:
     """DB 캐시 우선, 핵심 지수 누락 시 직접 yfinance 다운로드로 시장 지표 수집.
     배경 스레드에서 실행되므로 블로킹 다운로드 가능."""
     try:
         import pandas as pd
-        from backend.services.market_data import get_fred_macro
 
         PRICE_TICKERS: list[tuple[str, str, str, str]] = [
             ("^GSPC",    "S&P 500",          ",.0f",  ""),
@@ -220,26 +261,10 @@ def gather_yfinance_market_data(market: str = "US") -> str:
         # 거시 지표 — 시장에 맞는 것을 넣는다.
         # 한국 시나리오에 Fed 금리·미국 실업률을 넣으면 모델이 그걸 근거로
         # 한국 시장을 논하게 된다.
-        try:
-            if market == "KR":
-                from backend.services.korea_macro import get_korea_macro, format_for_prompt
-                block = format_for_prompt(get_korea_macro(ttl=3600))
-                if block:
-                    lines.append("")
-                    lines.append(block)
-            else:
-                fred = get_fred_macro(ttl=3600)
-                if fred.get("source") != "fallback":
-                    lines.append("")
-                    lines.append("[FRED macro indicators]")
-                    lines.append(f"  Fed funds: {fred['fed_rate']:.2f}%")
-                    lines.append(f"  Unemployment: {fred['unemployment']:.1f}%")
-                    lines.append(f"  CPI YoY: {fred['cpi']:.1f}%")
-                    lines.append(f"  GDP growth (latest qtr): {fred['gdp']:.1f}%")
-                    lines.append(f"  10Y-2Y spread: {fred['t10y2y']:+.3f}pp")
-                    lines.append(f"  HY spread: {fred['bamlh0a0hym2']:.0f}bp")
-        except Exception:
-            pass
+        macro_block = build_macro_block(market)
+        if macro_block:
+            lines.append("")
+            lines.append(macro_block)
 
         return "\n".join(lines)
 
@@ -1084,13 +1109,14 @@ def get_ai_analyst_feedback(
 def generate_daily_brief(
     holdings: dict,
     price_data: dict,
-    macro_data: dict,
     news_items: list[dict],
     market: str,
 ) -> str:
     """Claude Haiku로 월가 스타일 데일리 브리프 마크다운 생성.
 
-    `market` 은 필수다 — 이 브리프의 금액 표기가 여기서 갈린다.
+    `market` 은 필수다 — 이 브리프의 금액 표기와 거시지표가 여기서 갈린다.
+    거시지표는 `build_macro_block` 이 시장에 맞는 것을 준다. 호출자가
+    FRED 를 직접 넘기던 때에는 한국 브리프도 연준 금리를 근거로 받았다.
     """
     from backend.services.markets import get_market
     from backend.services.report_writer import _fmt_price
@@ -1116,6 +1142,8 @@ def generate_daily_brief(
 
     top_news = "\n".join(f"  - [{n['ticker']}] {n['title']}" for n in news_items[:8])
 
+    macro_block = build_macro_block(market) or "  (거시지표 수집 실패 — 인용하지 마세요)"
+
     prompt = f"""당신은 월가 톱 헤지펀드의 포트폴리오 매니저입니다.
 아래 데이터를 바탕으로 오늘의 포트폴리오 브리프를 작성하세요.
 
@@ -1126,9 +1154,7 @@ def generate_daily_brief(
 {price_block}
 
 # 매크로 지표
-- Fed Rate: {macro_data.get('fed_rate', 'N/A')}%
-- 10Y/2Y: {macro_data.get('y10', 'N/A')}/{macro_data.get('y2', 'N/A')} (스프레드: {macro_data.get('spread_10_2', 'N/A')}%p)
-- VIX: (시장 데이터 참조)
+{macro_block}
 
 # 주요 뉴스
 {top_news if top_news else '  (없음)'}

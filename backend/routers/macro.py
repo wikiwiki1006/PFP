@@ -35,7 +35,6 @@ from backend.db.reports_repo import save_report, list_reports, get_report_conten
 from backend.services.market_data import (
     get_close_df,
     get_sector_changes,
-    get_fred_macro,
     get_portfolio_news,
     GICS_SECTOR_ETFS,
 )
@@ -374,8 +373,10 @@ def daily_brief(
                 "pnl_pct": round((p / holdings[t]["avg"] - 1) * 100 if holdings[t]["avg"] else 0, 4),
             }
 
-    macro_data = get_fred_macro()
+    # 거시지표는 여기서 고르지 않는다. 시장에 맞는 것을 고르는 분기가
+    # ai_analysis 에 이미 있고, 여기서 FRED 를 무조건 부르던 탓에 한국
+    # 브리프가 연준 금리를 근거로 쓰였다.
     news_items = get_portfolio_news(tickers, max_per=2)
 
-    md = generate_daily_brief(holdings, price_data, macro_data, news_items, market)
+    md = generate_daily_brief(holdings, price_data, news_items, market)
     return {"markdown": md}
