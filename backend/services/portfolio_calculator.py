@@ -74,6 +74,26 @@ def _price_or_cost(price, cost: float) -> float:
     return max(0.0, _safe(cost, default=0.0))
 
 
+def _price_matrix(prices: pd.DataFrame, tickers: list[str]) -> np.ndarray:
+    """가격 프레임을 (날짜 × 티커) float 행렬로 한 번에 변환한다.
+
+    순방향 워크는 날짜마다 그 날의 가격 행이 필요한데, `prices.iloc[i]` 는 호출마다
+    Series 객체(인덱스 포함)를 새로 만들고 이어지는 `.get(ticker)` 는 라벨 조회다.
+    날짜 2,500 × 티커 60 이면 그 부대비용이 실제 계산보다 커진다.
+    값과 열 순서는 그대로 두고 조회를 위치 기반으로만 바꾼다.
+
+    숫자로 읽을 수 없는 값은 NaN 으로 남긴다 — `_price_or_cost` 가 NaN 과 0 을
+    같은 경로(취득원가 대체 평가)로 처리하므로 결과가 달라지지 않는다.
+    """
+    sub = prices[tickers]
+    if all(pd.api.types.is_float_dtype(d) for d in sub.dtypes):
+        return sub.to_numpy(dtype=float, copy=False)
+    # object 열이 섞여 있으면 to_numpy(dtype=float) 가 예외를 낸다.
+    # build_equity_curve 는 예외를 조용히 폴백으로 흡수하므로, 여기서 죽으면
+    # 원인이 보이지 않는 성능 회귀가 아니라 값 회귀가 된다.
+    return sub.apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+
+
 # ── 에쿼티 커브 ────────────────────────────────────────────────────────────────
 
 def build_equity_curve(
@@ -116,17 +136,18 @@ def build_equity_curve(
         sort_keys = ["date", "id"] if "id" in log_df.columns else ["date"]
         log_df = log_df.sort_values(sort_keys).reset_index(drop=True)
 
+        # 티커 열을 한 번만 대문자 문자열로 정규화한다. `iterrows()` 는 행마다
+        # Series 를 만들므로 이력 300건이면 그것만으로 객체 300개이고, 아래에서
+        # 같은 프레임을 세 번 훑고 있었다.
+        tickers_up = log_df["ticker"].astype(str).str.upper()
+
         # 현재 보유 + 과거 매매 이력에 등장한 모든 종목을 추적
-        traded_tickers = {
-            str(r["ticker"]).upper()
-            for _, r in log_df.iterrows()
-            if str(r.get("ticker", "")).upper() not in ("CASH", "")
-        }
+        traded_tickers  = set(tickers_up[~tickers_up.isin(["CASH", ""])])
         current_tickers = {t for t in holdings if t != "CASH"}
         all_tickers     = sorted((traded_tickers | current_tickers) & set(prices.columns))
 
         # 거래 이력 없는 보유 종목은 최초 시점부터 현재 수량으로 고정 (레거시 대응)
-        logged_tickers = {str(r["ticker"]).upper() for _, r in log_df.iterrows()}
+        logged_tickers = set(tickers_up)
         static_qty: dict[str, float] = {
             t: float(holdings[t]["q"])
             for t in all_tickers
@@ -135,22 +156,30 @@ def build_equity_curve(
 
         # DEPOSIT 날짜 보정: 주식 BUY보다 늦게 기록된 DEPOSIT은 첫 BUY 날짜로 당겨서 처리
         # (사용자가 현금을 오늘 입력했으나 과거에 매수한 경우 자산 왜곡 방지)
-        stock_rows_mask = ~log_df["ticker"].str.upper().isin(["CASH", ""])
+        stock_rows_mask = ~tickers_up.isin(["CASH", ""])
         if stock_rows_mask.any():
             first_trade_date = log_df.loc[stock_rows_mask, "date"].min()
-            for i, row in log_df.iterrows():
-                if str(row.get("ticker", "")).upper() == "CASH" \
-                        and str(row.get("type", "")).upper() == "DEPOSIT" \
-                        and row["date"] > first_trade_date:
-                    log_df.at[i, "date"] = first_trade_date
+            # `type` 열이 아예 없는 이력도 있다 — 원래 코드의 row.get("type", "")
+            # 가 그 경우 빈 문자열이 되어 아무 행도 당기지 않았다.
+            if "type" in log_df.columns:
+                pull = (
+                    (tickers_up == "CASH")
+                    & (log_df["type"].astype(str).str.upper() == "DEPOSIT")
+                    & (log_df["date"] > first_trade_date)
+                )
+                if pull.any():
+                    log_df.loc[pull, "date"] = first_trade_date
 
         # 날짜 보정 후 재정렬
         log_df = log_df.sort_values(sort_keys).reset_index(drop=True)
 
         # 비거래일 이벤트 → 다음 거래일 포지션에 매핑 (정수 인덱스 키)
+        # 행을 Series 로 들고 다니면 뒤의 순방향 워크에서 값 접근이 전부 라벨
+        # 조회가 된다. dict 로 바꿔 두면 같은 값에 그냥 해시 조회로 닿는다.
         events_by_pos: dict[int, list] = {}
-        for _, row in log_df.iterrows():
-            pos = int(idx.searchsorted(row["date"], side="left"))
+        positions = idx.searchsorted(log_df["date"].to_numpy(), side="left")
+        for pos, row in zip(positions, log_df.to_dict("records")):
+            pos = int(pos)
             if pos < len(idx):
                 events_by_pos.setdefault(pos, []).append(row)
 
@@ -163,6 +192,7 @@ def build_equity_curve(
         }
 
         equity_vals = np.zeros(len(idx), dtype=float)
+        px_mat = _price_matrix(prices, all_tickers)
 
         for i in range(len(idx)):
             for row in events_by_pos.get(i, []):
@@ -191,13 +221,13 @@ def build_equity_curve(
                     elif trade_type == "UPDATE":
                         running_qty[ticker] = max(0.0, q)
 
-            row_prices = prices.iloc[i]
+            row_prices = px_mat[i]
             # 가격이 없는 날(상장 전·데이터 미수집)에 _safe(...)→0 으로 평가하면
             # 보유 중인 포지션이 그날만 0원이 되어 곡선에 절벽이 생긴다.
             # 시세가 없으면 취득원가로 이월해 평가한다.
             stock_val = sum(
-                _price_or_cost(row_prices.get(t), running_cost.get(t, 0.0)) * running_qty[t]
-                for t in all_tickers
+                _price_or_cost(row_prices[j], running_cost.get(t, 0.0)) * running_qty[t]
+                for j, t in enumerate(all_tickers)
             )
             equity_vals[i] = max(0.0, running_cash) + stock_val
 
@@ -273,29 +303,34 @@ def equity_curve_to_records(
         if len(b_clean) > 0:
             sp500_indexed = b / float(b_clean.iloc[0]) * float(curve.iloc[0])
 
-    def _bv(date):
-        if sp500_indexed is None or date not in sp500_indexed.index:
+    # 벤치마크는 위에서 `curve.index` 로 reindex 했으므로 행 위치가 그대로 맞는다.
+    # 날짜 라벨로 매번 `.loc` 을 걸면 날짜 수만큼 인덱스 조회가 생긴다.
+    bench_vals = None if sp500_indexed is None else sp500_indexed.to_numpy()
+
+    def _bv(i: int):
+        if bench_vals is None:
             return None
-        v = sp500_indexed.loc[date]
+        v = bench_vals[i]
         return None if pd.isna(v) else round(float(v), 2)
 
     cash_evt: dict = cash_event_amounts or {}
 
+    # 날짜 문자열도 한 번에 만든다 — 루프 안에서 Timestamp.strftime 을 날짜마다
+    # 부르면 날짜 수만큼 포맷 파싱이 반복된다.
+    date_strs = curve.index.strftime("%Y-%m-%d").tolist()
+
     # 날짜별 주식 거래 목록 (포인트 마커용)
-    trade_by_date = _trades_by_chart_date(
-        trade_markers,
-        [d.strftime("%Y-%m-%d") for d in curve.index],
-    )
+    trade_by_date = _trades_by_chart_date(trade_markers, date_strs)
 
     records = []
-    for date, val in curve.items():
+    for i, val in enumerate(curve.to_numpy()):
         if pd.isna(val):
             continue
-        date_str = date.strftime("%Y-%m-%d")
+        date_str = date_strs[i]
         records.append({
             "date":               date_str,
             "value":              round(float(val), 2),
-            "benchmark_value":    _bv(date),
+            "benchmark_value":    _bv(i),
             "cash_event":         date_str in cash_evt,
             "cash_event_amount":  cash_evt.get(date_str, 0),
             "trades":             trade_by_date.get(date_str, []),
@@ -495,7 +530,12 @@ def calculate_metrics(
         return (cur / base - 1) * 100
 
     beta = calculate_portfolio_beta(holdings, close_df)
-    vix  = float(curr.get("^VIX", 18.0))
+    # `.get()` 의 기본값 18.0(VIX 장기 평균)은 **열이 없을 때만** 쓰인다.
+    # 열은 있는데 값이 전부 NaN 이면 NaN 이 그대로 나오고, ffill 도 전량 NaN 열은
+    # 채우지 못한다 — yfinance 가 ^VIX 를 빈 열로 주는 일이 있다. 그러면 폴백을
+    # 두었는데도 화면에는 '—' 가 뜬다 (앱 전역 SafeJSONResponse 가 NaN 을 null 로
+    # 바꿔 주므로 요청이 깨지지는 않는다. 그 안전망이 이 누락을 가려 왔다.)
+    vix  = _safe(curr.get("^VIX", 18.0), 18.0)
 
     alpha = 0.0
     if "^GSPC" in close_df.columns:
@@ -589,7 +629,9 @@ def get_holdings_detail(
         else:
             price, _prev, chg_pct, as_of, is_live = ticker_px.get(t, (0.0, 0.0, None, None, False))
             avg     = _safe(info.get("avg", 0))
-            pnl_pct = _safe((price / avg - 1) * 100) if avg > 0 else 0.0
+            # 취득원가가 없으면 수익률이 정의되지 않는다 — 0% 로 내려보내면
+            # '손익 없음(보합)' 으로 읽힌다. CASH 는 손익 자체가 없어 0.0 이 맞다.
+            pnl_pct = _safe((price / avg - 1) * 100) if avg > 0 else None
 
         avg_cost = _safe(info.get("avg", 0))
         qty      = _safe(info.get("q", 0))
@@ -605,10 +647,12 @@ def get_holdings_detail(
             # 변동률을 못 구한 경우 0.0 이 아니라 null — 프론트에서 '—' 로 표시된다.
             # 0.0 으로 내려보내면 '진짜 보합'과 구분되지 않는다.
             "chg_pct":       round(chg_pct, 4) if chg_pct is not None else None,
-            "pnl_pct":       round(pnl_pct, 4),
+            "pnl_pct":       round(pnl_pct, 4) if pnl_pct is not None else None,
             "pnl":           round(pnl, 2),
             "market_value":  round(value, 2),
-            "weight":        round(_safe(value / total_equity), 4) if total_equity else 0.0,
+            # 평가액 합이 0 이면 비중이 정의되지 않는다. 이 조건은 전 종목에
+            # 동시에 걸리므로 '일부만 null' 인 상태는 생기지 않는다.
+            "weight":        round(_safe(value / total_equity), 4) if total_equity else None,
             "as_of":         as_of.strftime("%Y-%m-%d") if as_of is not None else None,
             "is_live":       bool(is_live),
         })
@@ -671,9 +715,11 @@ def build_return_pct_curve(
         static_avg: dict[str, float] = {t: _safe(holdings[t].get("avg", 0)) for t in static_qty}
 
         # 모든 이벤트(주식 + 현금)를 날짜 포지션에 매핑 — 날짜 보정 없음
+        # 행은 Series 가 아니라 dict 로 들고 간다 (build_equity_curve 와 같은 이유).
         all_events_by_pos: dict[int, list] = {}
-        for _, row in log_df.iterrows():
-            pos = int(idx.searchsorted(row["date"], side="left"))
+        positions = idx.searchsorted(log_df["date"].to_numpy(), side="left")
+        for pos, row in zip(positions, log_df.to_dict("records")):
+            pos = int(pos)
             if pos < len(idx):
                 all_events_by_pos.setdefault(pos, []).append(row)
     else:
@@ -694,9 +740,14 @@ def build_return_pct_curve(
     cash_events: dict[str, float] = {}
     holdings_by_date: dict[str, list[dict]] = {}
 
+    px_mat = _price_matrix(prices, all_tickers)
+    # 날짜 포맷도 한 번에 — 루프 안에서 Timestamp.strftime 을 날짜마다 부르면
+    # 날짜 수만큼 포맷 파싱이 반복된다.
+    date_strs = idx.strftime("%Y-%m-%d").tolist()
+
     for i in range(len(idx)):
-        row_prices = prices.iloc[i]
-        date_str   = idx[i].strftime("%Y-%m-%d")
+        row_prices = px_mat[i]
+        date_str   = date_strs[i]
 
         for row in all_events_by_pos.get(i, []):
             ticker     = str(row.get("ticker", "")).upper()
@@ -740,8 +791,8 @@ def build_return_pct_curve(
 
         # 시세 없는 날은 취득원가로 대체 평가 (0원 평가 시 곡선에 절벽 발생)
         stock_val = sum(
-            _price_or_cost(row_prices.get(t), running_avg.get(t, 0.0)) * running_qty[t]
-            for t in all_tickers
+            _price_or_cost(row_prices[j], running_avg.get(t, 0.0)) * running_qty[t]
+            for j, t in enumerate(all_tickers)
         )
         equity_arr[i] = running_cash + stock_val
 
@@ -749,12 +800,12 @@ def build_return_pct_curve(
             {
                 "ticker": t,
                 "return_pct": round(_safe(
-                    (_safe(row_prices.get(t, 0)) / running_avg[t] - 1) * 100
+                    (_safe(row_prices[j]) / running_avg[t] - 1) * 100
                     if running_avg[t] > 0 else 0.0
                 ), 2),
-                "price": round(_safe(row_prices.get(t, 0)), 2),
+                "price": round(_safe(row_prices[j]), 2),
             }
-            for t in all_tickers
+            for j, t in enumerate(all_tickers)
             if running_qty[t] > 0
         ]
 
@@ -870,31 +921,39 @@ def return_pct_to_records(
 
     cash_evts = cash_events or {}
 
-    trade_by_date = _trades_by_chart_date(
-        trade_markers,
-        [d.strftime("%Y-%m-%d") for d in curve.index],
-    )
+    # 날짜 문자열·벤치마크·자산을 모두 `curve.index` 기준 위치 배열로 맞춘다.
+    # 루프 안에서 날짜 라벨로 `.loc` 을 걸면 날짜마다 인덱스 조회가 두 번씩 생겨
+    # 이 함수 시간의 절반이 그 조회였다. b_full 은 이미 curve.index 로 reindex 돼
+    # 있고, equity 는 여기서 한 번 맞춘다 — 없는 날짜는 NaN 이 되어 원래의
+    # `date in equity.index` 검사와 같은 경로로 걸러진다.
+    # 루프 안의 `date >= first_date` 검사도 함께 뺐다 — curve 는 위에서 이미
+    # `index >= first_date` 로 잘려 있어 모든 날짜가 항상 그 조건을 만족한다.
+    date_strs = curve.index.strftime("%Y-%m-%d").tolist()
+    b_vals  = None if b_full is None else b_full.to_numpy()
+    eq_vals = None if equity is None else equity.reindex(curve.index).to_numpy()
+
+    trade_by_date = _trades_by_chart_date(trade_markers, date_strs)
 
     records = []
-    for date, pct in curve.items():
+    for i, pct in enumerate(curve.to_numpy()):
         if pd.isna(pct):
             continue
-        date_str = date.strftime("%Y-%m-%d")
+        date_str = date_strs[i]
 
         sp_val = None
-        if b_full is not None and sp_first_val and date >= first_date and date in b_full.index:
-            v = b_full.loc[date]
+        if b_vals is not None and sp_first_val:
+            v = b_vals[i]
             if not pd.isna(v):
                 sp_val = round((float(v) / sp_first_val - 1) * 100, 2)
 
         eq_val = None
-        if equity is not None and date in equity.index:
-            v = equity.loc[date]
+        if eq_vals is not None:
+            v = eq_vals[i]
             if not pd.isna(v):
                 eq_val = round(float(v), 2)
 
         # 입출금 이벤트: 양수=입금, 음수=출금 (점 마커용)
-        cf_val = cash_evts.get(date_str) if date >= first_date else None
+        cf_val = cash_evts.get(date_str)
 
         records.append({
             "date":         date_str,

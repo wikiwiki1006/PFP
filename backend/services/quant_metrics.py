@@ -216,7 +216,9 @@ def compute_optimizer_context(
     values = {t: _f(holdings.get(t, {}).get("q")) * _f(last.get(t)) for t in cols if t in holdings}
     cash = _f((holdings.get("CASH") or {}).get("q"))
     total = sum(values.values()) + cash
-    current = round(values.get(ticker, 0.0) / total * 100, 2) if total > 0 else 0.0
+    # 평가액 합이 0 이면 비중이 정의되지 않는다 — 0% 로 돌려주면 "보유하지 않음"과
+    # 구별되지 않는다. 미보유 종목의 0.0 은 진짜 0% 라서 그대로 둔다.
+    current = round(values.get(ticker, 0.0) / total * 100, 2) if total > 0 else None
 
     # ── 리스크 기여도 ─────────────────────────────────────────────────────
     # RC_i = w_i * (Σw)_i / (wᵀΣw) — 포트폴리오 총위험 중 이 종목이 차지하는 몫.

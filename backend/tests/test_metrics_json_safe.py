@@ -124,24 +124,18 @@ def test_metrics_response_is_serializable(holdings, close_df, equity):
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "portfolio_calculator.py:498 reads vix without _safe(), so an all-NaN "
-        "^VIX column reaches the response as NaN and fails the whole request. "
-        "Wrap it like every other value; delete this marker when fixed."
-    ),
-)
 def test_all_nan_vix_column_does_not_poison_the_response():
-    """`^VIX` 열이 전량 NaN 이면 `vix` 가 NaN 으로 새어 나간다.
+    """`^VIX` 열이 전량 NaN 이어도 `vix` 가 NaN 으로 새어 나가지 않아야 한다.
 
-    `vix = float(curr.get("^VIX", 18.0))` 의 기본값 18.0 은 **열이 없을 때만**
-    쓰인다. 열은 있는데 값이 전부 NaN 이면 `.get()` 이 NaN 을 돌려주고, 그
-    분기에는 다른 값들과 달리 `_safe()` 가 없다. `ffill()` 도 전량 NaN 열은
-    채우지 못한다.
+    `vix = float(curr.get("^VIX", 18.0))` 이었을 때, 기본값 18.0 은 **열이
+    없을 때만** 쓰였다. 열은 있는데 값이 전부 NaN 이면 `.get()` 이 NaN 을
+    돌려주고, 그 분기에만 다른 값들과 달리 `_safe()` 가 없었다. `ffill()` 도
+    전량 NaN 열은 채우지 못한다.
 
-    yfinance 가 ^VIX 를 빈 열로 주는 것은 실제로 일어난다. 그러면 사용자는
-    변동성 지표가 비는 게 아니라 **포트폴리오 화면 전체가 안 뜨는 것**을 본다.
+    yfinance 가 ^VIX 를 빈 열로 주는 것은 실제로 일어난다. 그때 사용자는
+    폴백값 18.0 이 아니라 **빈 값('—')** 을 봤다 — 앱 전역 `SafeJSONResponse`
+    가 NaN 을 null 로 바꿔 주기 때문에 요청이 깨지지는 않고, 그 안전망이
+    이 누락을 화면에서 가려 왔다.
     """
     metrics = calculate_metrics(
         _HOLDINGS,
@@ -151,5 +145,5 @@ def test_all_nan_vix_column_does_not_poison_the_response():
 
     bad = _non_finite(metrics)
     assert not bad, (
-        f"non-finite value(s): {bad} -- portfolio_calculator.py:498 needs _safe()"
+        f"non-finite value(s): {bad} -- the vix read in calculate_metrics needs _safe()"
     )

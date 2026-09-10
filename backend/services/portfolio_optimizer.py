@@ -165,25 +165,31 @@ def hrp_weights(cov: pd.DataFrame, corr: pd.DataFrame) -> pd.Series:
 
     # ② 준대각화 — 덴드로그램 잎 순서
     order = [int(i) for i in to_tree(link, rd=False).pre_order()]
-    ordered = [tickers[i] for i in order]
 
-    def _ivp(items: list[str]) -> np.ndarray:
+    # 이하는 티커 라벨이 아니라 **열 위치**로 다룬다. 재귀 이분할은 클러스터마다
+    # 부분행렬을 꺼내므로, 라벨로 하면 `cov.loc[items, items]` 가 단계마다 인덱스를
+    # 다시 만든다 (n=30 에서 전체 시간의 3/4 이 그 조회였다). 값과 연산 순서는
+    # 그대로 두고 조회 방식만 바꾼다.
+    cov_v = cov.to_numpy(dtype=float)
+    diag = np.diag(cov_v)
+
+    def _ivp(items: np.ndarray) -> np.ndarray:
         """역분산 비중 — 클러스터 내부 배분 및 클러스터 분산 계산에 사용."""
-        var = np.array([float(cov.loc[t, t]) for t in items])
+        var = diag[items]
         var = np.where(var > 1e-16, var, 1e-16)
         inv = 1.0 / var
         return inv / inv.sum()
 
-    def _cluster_var(items: list[str]) -> float:
+    def _cluster_var(items: np.ndarray) -> float:
         w = _ivp(items)
-        sub = cov.loc[items, items].values
+        sub = cov_v[np.ix_(items, items)]
         return float(w @ sub @ w)
 
     # ③ 재귀적 이분할
-    weights = pd.Series(1.0, index=ordered)
-    clusters = [ordered]
+    w_arr = np.ones(len(tickers), dtype=float)
+    clusters = [np.array(order, dtype=np.intp)]
     while clusters:
-        nxt: list[list[str]] = []
+        nxt: list[np.ndarray] = []
         for c in clusters:
             if len(c) <= 1:
                 continue
@@ -192,12 +198,12 @@ def hrp_weights(cov: pd.DataFrame, corr: pd.DataFrame) -> pd.Series:
             v_l, v_r = _cluster_var(left), _cluster_var(right)
             # 분산이 큰 쪽에 더 적게 — 리스크 패리티
             alpha = 1.0 - v_l / (v_l + v_r) if (v_l + v_r) > 0 else 0.5
-            weights[left]  *= alpha
-            weights[right] *= (1.0 - alpha)
+            w_arr[left]  *= alpha
+            w_arr[right] *= (1.0 - alpha)
             nxt += [left, right]
         clusters = nxt
 
-    return weights.reindex(tickers).fillna(0.0)
+    return pd.Series(w_arr, index=tickers)
 
 
 def _fetch_prices(tickers: list[str], period: str = "1y") -> pd.DataFrame:
