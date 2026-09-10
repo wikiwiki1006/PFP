@@ -9,6 +9,7 @@ services/ai_analysis.py
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -24,6 +25,8 @@ from dotenv import load_dotenv
 from backend.services.job_store import JobCancelled
 
 load_dotenv(Path(__file__).parent.parent / ".env")
+
+logger = logging.getLogger(__name__)
 
 ANTHROPIC_API_KEY  = os.getenv("ANTHROPIC_API_KEY", "")
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "")
@@ -189,9 +192,15 @@ def gather_yfinance_market_data(market: str = "US") -> str:
                 p = prev_price.get(t)
                 if c is None:
                     continue
+                # 전일가가 없으면 등락을 쓰지 않는다. '+0.00% d/d' 는 모델에게
+                # '보합' 이지 '모름' 이 아니다 — 그 지수가 안 움직였다는 근거로
+                # 답을 쓰게 된다 (§1.3a).
                 try:
-                    chg = (c / p - 1) * 100 if p else 0.0
-                    lines.append(f"  {name}: {c:{fmt}}{unit} ({chg:+.2f}% d/d)")
+                    if p:
+                        chg = (c / p - 1) * 100
+                        lines.append(f"  {name}: {c:{fmt}}{unit} ({chg:+.2f}% d/d)")
+                    else:
+                        lines.append(f"  {name}: {c:{fmt}}{unit} (d/d 불명 — 전일 종가 없음)")
                 except Exception:
                     lines.append(f"  {name}: {c:{fmt}}{unit}")
 
@@ -247,6 +256,7 @@ def _call_perplexity(prompt: str, max_tokens: int = 1200, market: str = "US") ->
     프롬프트로 관점만 바꿔 봐야 한국 이야기가 나오지 않는다.
     """
     if not PERPLEXITY_API_KEY:
+        logger.warning("Perplexity 검색 건너뜀 — PERPLEXITY_API_KEY 미설정")
         return ""
     try:
         from backend.services.news_sources import perplexity_extra
@@ -268,6 +278,10 @@ def _call_perplexity(prompt: str, max_tokens: int = 1200, market: str = "US") ->
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
     except Exception:
+        # 조용히 "" 를 돌려주면 뉴스 없이 쓴 리포트와 뉴스로 쓴 리포트가
+        # 겉보기에 같아진다. 호출자는 이걸 프롬프트에도 적는다 (§1.3).
+        logger.warning("Perplexity 검색 실패 (market=%s) — 뉴스 없이 진행", market,
+                       exc_info=True)
         return ""
 
 
@@ -320,6 +334,18 @@ def gather_context(ev: str, market: str = "US") -> str:
         parts.append("")
         parts.append("[Latest news & expert commentary — Perplexity]")
         parts.append(news_data)
+    else:
+        # 뉴스 블록을 조용히 빼면, 받아 본 모델은 뉴스가 없다는 사실 자체를
+        # 알 수 없어 "최근 보도에 따르면" 같은 서술을 그대로 쓴다. 없다는
+        # 것을 적어 두면 모델도 사용자도 그 리포트의 근거 범위를 안다.
+        parts.append("")
+        parts.append("[News unavailable]")
+        parts.append(
+            "  News collection failed or returned nothing for this run. "
+            "Base the analysis on the market data above only. "
+            "Do NOT cite recent news, press coverage or analyst commentary, "
+            "and state plainly that current news was unavailable."
+        )
 
     return "\n".join(parts)
 
