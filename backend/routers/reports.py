@@ -93,30 +93,6 @@ def _cached_shared_result(
     return result
 
 
-def _record_deep_use(uid: str, kind: str) -> None:
-    """심층 분석 사용 기록.
-
-    실패해도 이 요청은 계속 진행한다. 다만 **조용히 넘기지는 않는다** — 예전에는
-    `except Exception: pass` 라 기록이 안 되는 상태가 로그 한 줄 없이 이어졌고,
-    이 테이블이 할당량의 유일한 근거라 그동안 제한이 사실상 없었다 (§1.3).
-
-    여기서 예외를 다시 올리지 않는 이유: 이 요청은 바로 위에서
-    `enforce_deep_limit` 을 이미 통과했다. 기록 실패가 위태롭게 하는 것은 이
-    요청이 아니라 **다음 요청**이고, 그쪽은 `usage_repo.count_recent` 가 실패 시
-    예외를 올려(=닫혀) 막는다. 여기서 500 을 내도 구멍은 안 닫히고 이미 승인된
-    작업만 죽는다.
-    """
-    try:
-        from backend.db import usage_repo
-        usage_repo.record_use(uid, kind)
-    except Exception as e:
-        import logging
-        logging.getLogger(__name__).error(
-            f"심층 분석 사용 기록 실패. 이 사용은 할당량에 잡히지 않는다 "
-            f"(uid={uid}, kind={kind}): {e}"
-        )
-
-
 def _job_set(job_id: str, data: dict, owner: str | None = None) -> None:
     _store.set(job_id, data, owner=owner)
 
@@ -301,11 +277,21 @@ def equity_research_start(
         _job_set(job_id, {"status": "done", "result": cached}, owner=uid)
         return {"job_id": job_id, "cached": True}
 
-    _job_set(job_id, {"status": "pending"}, owner=uid)
-    should_cancel = _store.cancel_token(job_id)
     if model_tier == "deep":
         # 캐시로 돌려준 경우는 위에서 이미 반환됐다 — 여기 왔다는 건 실제로 만든다는 뜻.
-        _record_deep_use(uid, "equity_research")
+        # 확인과 기록을 한 트랜잭션에 묶는다. 나눠 두면 동시 요청 둘이 모두 0 을
+        # 보고 통과해 1일 1회 제한에 심층이 두 번 나간다.
+        #
+        # 잡을 만들기 **전에** 소비한다 — 뒤에 두면 429 로 끝난 요청이 pending
+        # 잡을 남긴다. 예외는 잡지 않는다: DBBusy 는 503, 나머지는 500 이고
+        # 둘 다 '닫힘' 이 맞다 (§1.3).
+        from backend.db import usage_repo
+        if not usage_repo.consume(uid, "equity_research"):
+            raise HTTPException(status_code=429,
+                                detail="심층 분석은 24시간에 한 번만 사용할 수 있습니다.")
+
+    _job_set(job_id, {"status": "pending"}, owner=uid)
+    should_cancel = _store.cancel_token(job_id)
 
     def _run() -> None:
         try:
@@ -380,10 +366,16 @@ def industry_research_start(
         _job_set(job_id, {"status": "done", "result": cached}, owner=uid)
         return {"job_id": job_id, "cached": True}
 
+    if model_tier == "deep":
+        # equity 쪽과 같다 — 캐시 반환은 위에서 끝났으므로 여기가 '실제로 만든다'
+        # 가 확정되는 지점이고, 잡을 만들기 전에 원자적으로 소비한다.
+        from backend.db import usage_repo
+        if not usage_repo.consume(uid, "industry_research"):
+            raise HTTPException(status_code=429,
+                                detail="심층 분석은 24시간에 한 번만 사용할 수 있습니다.")
+
     _job_set(job_id, {"status": "pending"}, owner=uid)
     should_cancel = _store.cancel_token(job_id)
-    if model_tier == "deep":
-        _record_deep_use(uid, "industry_research")
 
     def _run() -> None:
         try:

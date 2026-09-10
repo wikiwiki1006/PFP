@@ -273,39 +273,15 @@ def _build_prompt(holdings: dict, price_data: dict, news: dict,
 """
 
 
-PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "")
-
-
 def _perplexity_search(query: str, market: str = "US") -> str:
     """Perplexity sonar로 실시간 웹 검색. API 키 없거나 오류 시 빈 문자열 반환.
 
-    두 경우 모두 "" 를 돌려주므로, 어느 쪽이었는지는 여기서만 알 수 있다.
+    두 경우 모두 "" 를 돌려주므로, 어느 쪽이었는지는 로그에만 남는다.
     호출자가 추측해서 기록하면 진단이 엉뚱한 곳으로 간다.
     """
-    if not PERPLEXITY_API_KEY:
-        logger.warning("Perplexity 웹서치 건너뜀 — PERPLEXITY_API_KEY 미설정")
-        return ""
-    try:
-        import requests as _req
-        from backend.services.news_sources import perplexity_extra
-        resp = _req.post(
-            "https://api.perplexity.ai/chat/completions",
-            headers={"Authorization": f"Bearer {PERPLEXITY_API_KEY}", "Content-Type": "application/json"},
-            json={
-                "model": "sonar",
-                "messages": [{"role": "user", "content": query}],
-                "max_tokens": 1500,
-                "temperature": 0.0,
-                **perplexity_extra(market),
-            },
-            timeout=30,
-        )
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
-    except Exception:
-        logger.warning("Perplexity 웹서치 실패 (market=%s) — 뉴스 없이 진행",
-                       market, exc_info=True)
-        return ""
+    from backend.services import perplexity
+    return perplexity.search(query, market=market, max_tokens=1500,
+                             label="daily-report")
 
 
 def generate_daily_report(
