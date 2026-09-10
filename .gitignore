@@ -11,8 +11,12 @@ build/
 .eggs/
 
 # ── Virtual environments ───────────────────────────────────────────────────────
-venv/
-.venv/
+# 슬래시를 붙이지 않는다. 병렬 worktree 에서 venv 는 메인을 가리키는 심볼릭
+# 링크이고 git 은 링크를 파일로 본다 — `venv/` 는 디렉터리만 매칭해서 링크가
+# 그대로 새어나가고, git add -A 하면 절대경로 링크가 커밋된다.
+venv
+.venv
+ROLE.md
 env/
 .env/
 
