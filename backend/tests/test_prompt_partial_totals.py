@@ -91,19 +91,13 @@ def test_partial_day_pnl_refuses_to_sum():
     assert "$20.00" not in line, f"부분 합이 그대로 적혔다: {line}"
 
 
-# ── 아직 안 지키는 것 — 같은 줄의 평가액·총자산 ─────────────────────────────────
-
-_EQUITY_XFAIL = (
-    "generate_daily_brief guards the day-P&L total but not the equity total "
-    "three lines above it. It sums pos_val with `is not None` and labels the "
-    "result 총자산, so a holding with no price silently shrinks the portfolio. "
-    "The model has no way to know a position is missing. Apply the same "
-    "refusal the day-P&L branch already uses, and delete this marker. "
-    "(owner: reportmanage)"
-)
+# ── 평가액·총자산 — 손익 합계와 같은 보호를 받는다 ──────────────────────────────
+#
+# 합계의 기준을 `price_data` 에서 **보유 종목**으로 바꿔 해결했다. 가격을 못 받은
+# 종목은 조립부에서 통째로 빠지므로, price_data 를 세면 빠진 종목은 애초에
+# 세어지지 않는다 — "없는 것을 못 세는" 형태라 검사가 없으면 안 보인다.
 
 
-@pytest.mark.xfail(strict=True, reason=_EQUITY_XFAIL)
 def test_holding_missing_from_price_data_is_not_silently_dropped():
     """보유 종목이 `price_data` 에 없으면 총자산을 단정하지 않는다.
 
@@ -120,7 +114,6 @@ def test_holding_missing_from_price_data_is_not_silently_dropped():
     )
 
 
-@pytest.mark.xfail(strict=True, reason=_EQUITY_XFAIL)
 def test_partial_pos_val_refuses_to_sum():
     """`pos_val` 이 일부 없으면 평가액 합계를 내지 않는다.
 

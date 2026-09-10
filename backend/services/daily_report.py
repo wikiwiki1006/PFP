@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone, time as _time
+from datetime import datetime, timezone
 from typing import Callable
 
 import yfinance as yf
@@ -15,12 +15,10 @@ import yfinance as yf
 logger = logging.getLogger(__name__)
 
 
-def _is_market_open() -> bool:
-    """미국 장중 여부 (UTC 기준 13:30~20:00, 평일)."""
-    now = datetime.now(timezone.utc)
-    if now.weekday() >= 5:
-        return False
-    return _time(13, 30) <= now.time() < _time(20, 0)
+# 장중 판정이 필요해지면 `market_calendar.is_us_market_open()` 을 쓴다.
+# 이 파일에도 `_is_market_open()` 이 있었는데, 주말만 보고 공휴일을 개장으로
+# 오판하는 구현이었다 — market_calendar 가 대체한 사본 셋 중 하나다.
+# 호출자가 없어 아무 증상이 없었고, 그래서 옮겨지지 않은 채 남아 있었다.
 
 
 # 시장별 벤치마크. 한국 브리핑에 SPY·VIX 를 붙이면 "내 종목이 S&P 대비
@@ -158,10 +156,21 @@ def _collect_news(price_data: dict) -> dict:
 
 def _build_prompt(holdings: dict, price_data: dict, news: dict,
                   market: str = "US") -> str:
-    is_kr = market == "KR"
-    cur   = "₩" if is_kr else "$"
-    # 원화는 소수점이 없다(호가 단위 1원).
-    dec   = 0 if is_kr else 2
+    # 통화 포맷을 여기서 다시 만들지 않는다. `cur + 포맷 지정자` 로 조립하면
+    # 원화 소수 자릿수 같은 규칙이 이 파일에만 빠지는 사본이 하나 더 생긴다 —
+    # `_fmt_amount` 가 프론트와 갈렸던 것이 정확히 그렇게 시작했다 (§1.4).
+    from backend.services.report_writer import _fmt_price
+
+    is_kr    = market == "KR"
+    cur_code = "KRW" if is_kr else "USD"
+
+    def _money(v) -> str:
+        return _fmt_price(v, cur_code)
+
+    def _signed(v) -> str:
+        """손익은 부호가 보여야 한다. 음수 부호는 `_fmt_price` 가 붙인다."""
+        return f"+{_money(v)}" if v > 0 else _money(v)
+
     stock_keys = sorted(
         [k for k in price_data if not k.startswith("__")],
         key=lambda t: price_data[t]["chg_pct"],
@@ -172,8 +181,8 @@ def _build_prompt(holdings: dict, price_data: dict, news: dict,
     cash_val   = holdings.get("CASH", {}).get("q", 0)
 
     snap_lines = [
-        f"  {t}: 종가 {cur}{price_data[t]['close']:,.{dec}f}  전일대비 {price_data[t]['chg_pct']:+.2f}%  "
-        f"1일 P&L {cur}{price_data[t]['day_pnl']:+,.0f}  섹터 {price_data[t]['sector']}"
+        f"  {t}: 종가 {_money(price_data[t]['close'])}  전일대비 {price_data[t]['chg_pct']:+.2f}%  "
+        f"1일 P&L {_signed(price_data[t]['day_pnl'])}  섹터 {price_data[t]['sector']}"
         for t in stock_keys
     ]
 
@@ -232,8 +241,8 @@ def _build_prompt(holdings: dict, price_data: dict, news: dict,
 
 === 포트폴리오 스냅샷 ===
 {chr(10).join(snap_lines)}
-전체 주식 평가액: {cur}{total_val:,.0f}  현금: {cur}{cash_val:,.0f}
-전일 총 P&L: {cur}{total_pnl:+,.0f}
+전체 주식 평가액: {_money(total_val)}  현금: {_money(cash_val)}
+전일 총 P&L: {_signed(total_pnl)}
 {spy_line}
 매크로 지표: {macro_line}
 절대 변동 3% 이상 종목: {big_movers_str}
