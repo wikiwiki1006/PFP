@@ -327,7 +327,23 @@ def enforce_deep_limit(user: dict, kind: str) -> None:
 
     if _is_admin(user["uid"]) or not _flag("deep_analysis_daily_limit"):
         return
-    if usage_repo.count_recent(user["uid"]) < 1:
+
+    # count_recent 는 이제 실패를 삼키지 않고 올린다. 그대로 두면 500 이 나가는데,
+    # 그건 사용자에게 "우리가 망가졌다" 로만 읽히고 다시 시도해도 되는지를
+    # 알려주지 않는다. 실제 상황은 "지금은 확인할 수 없다" 이므로 503 이 맞다.
+    #
+    # 여기서 통과시키지 않는 이유: 조회가 안 되는 상황이면 잡 저장소도 리포트
+    # 저장도 같이 못 돈다. 통과시켜 봐야 LLM 비용만 쓰고 결과를 못 남긴다.
+    # 되는 기능을 막는 게 아니라 실패할 작업을 미리 거절하는 것이다.
+    try:
+        used = usage_repo.count_recent(user["uid"])
+    except Exception as e:
+        logger.warning(f"심층 분석 사용량 조회 실패 — 요청을 거절한다 (uid={user['uid']}): {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="사용량을 확인할 수 없어 심층 분석을 잠시 제한합니다. 잠시 후 다시 시도해 주세요.",
+        )
+    if used < 1:
         return
 
     when = usage_repo.next_available_at(user["uid"])
