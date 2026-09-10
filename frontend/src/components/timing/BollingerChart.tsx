@@ -113,18 +113,18 @@ function ChartTooltip({ active, payload, label }: any) {
     <div className="bg-[#1a2035] border border-[#1e2d40] rounded-lg p-3 text-[11px] shadow-xl min-w-[148px] space-y-0.5">
       <p className="text-[#64748b] mb-1">{label}</p>
       {p.price != null && <>
-        {p.open  != null && <p className="font-mono text-[#94a3b8]">O  ${p.open.toFixed(2)}</p>}
-        {p.high  != null && <p className="font-mono" style={{ color: COLOR_UP }}>H  ${p.high.toFixed(2)}</p>}
-        {p.low   != null && <p className="font-mono" style={{ color: COLOR_DOWN }}>L  ${p.low.toFixed(2)}</p>}
-        <p className="font-mono font-bold" style={{ color: isUp ? COLOR_UP : COLOR_DOWN }}>C  ${p.price.toFixed(2)}</p>
+        {p.open  != null && <p className="font-mono text-[#94a3b8]">O  {formatPrice(p.open)}</p>}
+        {p.high  != null && <p className="font-mono" style={{ color: COLOR_UP }}>H  {formatPrice(p.high)}</p>}
+        {p.low   != null && <p className="font-mono" style={{ color: COLOR_DOWN }}>L  {formatPrice(p.low)}</p>}
+        <p className="font-mono font-bold" style={{ color: isUp ? COLOR_UP : COLOR_DOWN }}>C  {formatPrice(p.price)}</p>
       </>}
-      {p.mid        != null && <p className="font-mono text-[#64748b]">BB mid  ${p.mid.toFixed(2)}</p>}
-      {p.upper      != null && <p className="font-mono text-[#64748b]">BB 상단 ${p.upper.toFixed(2)}</p>}
-      {p.lower      != null && <p className="font-mono text-[#64748b]">BB 하단 ${p.lower.toFixed(2)}</p>}
-      {p.resistance != null && <p className="font-mono" style={{ color: '#ef4444' }}>저항선  ${p.resistance.toFixed(2)}</p>}
+      {p.mid        != null && <p className="font-mono text-[#64748b]">BB mid  {formatPrice(p.mid)}</p>}
+      {p.upper      != null && <p className="font-mono text-[#64748b]">BB 상단 {formatPrice(p.upper)}</p>}
+      {p.lower      != null && <p className="font-mono text-[#64748b]">BB 하단 {formatPrice(p.lower)}</p>}
+      {p.resistance != null && <p className="font-mono" style={{ color: '#ef4444' }}>저항선  {formatPrice(p.resistance)}</p>}
       {p.zscore     != null && <p className="font-mono text-[#64748b]">Z-Score {p.zscore.toFixed(2)}</p>}
       {MA_ORDER.filter(k => p[k] != null).map(k => (
-        <p key={k} className="font-mono" style={{ color: MA_COLORS[k] }}>MA{MA_LABELS[k].replace('일', '')}  ${(p[k] as number).toFixed(2)}</p>
+        <p key={k} className="font-mono" style={{ color: MA_COLORS[k] }}>MA{MA_LABELS[k].replace('일', '')}  {formatPrice(p[k] as number)}</p>
       ))}
     </div>
   )

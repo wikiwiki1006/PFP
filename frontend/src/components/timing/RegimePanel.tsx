@@ -196,12 +196,18 @@ export default function RegimePanel({ holdings = {} }: RegimePanelProps) {
               <div className="relative h-1.5 bg-[#1e2d40] rounded-full overflow-hidden">
                 <div className="h-full rounded-full transition-all"
                   style={{ width: `${Math.min(100, q.data.current_er * 100)}%`, backgroundColor: currentColor }} />
-                <div className="absolute top-0 bottom-0 w-px bg-[#94a3b8]"
-                  style={{ left: `${(q.data.threshold ?? 0.3) * 100}%` }} />
+                {/* 임계값을 모르면 선을 긋지 않는다. 0.3 을 가정해 그리면
+                    실제로 쓰인 기준과 다른 위치를 보여주게 된다. */}
+                {q.data.threshold != null && (
+                  <div className="absolute top-0 bottom-0 w-px bg-[#94a3b8]"
+                    style={{ left: `${q.data.threshold * 100}%` }} />
+                )}
               </div>
               <p className="text-[10px] text-[#4a5568] mt-1.5 leading-relaxed">
                 기간 순변동 ÷ 일별 절대변동 합. 1에 가까울수록 한 방향으로 직진, 0에 가까울수록 제자리 등락.
-                임계값 {(q.data.threshold ?? 0.3).toFixed(2)} 미만이면 횡보로 판정합니다.
+                {q.data.threshold != null
+                  ? `임계값 ${q.data.threshold.toFixed(2)} 미만이면 횡보로 판정합니다.`
+                  : '판정 임계값을 서버에서 받지 못했습니다.'}
               </p>
             </div>
           )}
