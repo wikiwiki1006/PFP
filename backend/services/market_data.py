@@ -402,49 +402,64 @@ def get_fred_macro(ttl: int = 3600) -> dict:
                 s = df[col].dropna() if col in df else pd.Series(dtype=float)
                 return float(s.iloc[-1]) if len(s) else None
 
-            fed_rate     = _last("FEDFUNDS") or 5.33
-            unemployment = _last("UNRATE")   or 3.9
-            y10          = _last("DGS10")    or 4.2
-            y2           = _last("DGS2")     or 4.5
-            t10y2y       = round(y10 - y2, 3)
+            # `or` 를 쓰면 안 된다. `_last` 는 값이 없을 때만 None 을 주는데
+            # `or` 는 실측 0.0 도 거짓으로 보고 폴백으로 갈아치운다. 제로금리
+            # (2008-2015, 2020-2022)에 FEDFUNDS 는 실제로 0 에 가까웠다 —
+            # 그 시기를 조회하면 "기준금리 5.33%" 가 실측값인 척 나갔다.
+            #
+            # 그리고 읽지 못한 값은 하드코딩 상수로 메우지 않는다. 아래
+            # `source` 가 "FRED" 인지만 보고 실측으로 취급하는 소비자가 있는데
+            # (ai_analysis.build_macro_block), 성공 경로에서 상수를 섞으면
+            # 그 판단이 조용히 무너진다. 없으면 None 이고, 무엇이 없었는지
+            # `missing` 에 적는다.
+            fed_rate     = _last("FEDFUNDS")
+            unemployment = _last("UNRATE")
+            y10          = _last("DGS10")
+            y2           = _last("DGS2")
+            t10y2y       = round(y10 - y2, 3) if (y10 is not None and y2 is not None) else None
 
-            cpi = 0.0
+            # CPI 는 전년동월비라 13개월이 필요하다. 모자라면 계산 불가지
+            # 3.4% 가 아니다 — 예전에는 그 상수를 넣어 실측값처럼 내보냈다.
+            cpi = None
             if "CPIAUCSL" in df:
                 cpi_s = df["CPIAUCSL"].dropna()
                 if len(cpi_s) >= 13:
                     cpi = round((float(cpi_s.iloc[-1]) / float(cpi_s.iloc[-13]) - 1) * 100, 2)
-                elif len(cpi_s) > 0:
-                    cpi = 3.4
 
-            gdp = 0.0
+            gdp = None
             if "A191RL1Q225SBEA" in df:
                 gdp_s = df["A191RL1Q225SBEA"].dropna()
                 if len(gdp_s) > 0:
                     gdp = round(float(gdp_s.iloc[-1]), 2)
 
-            hy_raw = _last("BAMLH0A0HYM2") or 3.5
-            bamlh0a0hym2 = round(hy_raw * 100, 1)
+            hy_raw = _last("BAMLH0A0HYM2")
+            bamlh0a0hym2 = round(hy_raw * 100, 1) if hy_raw is not None else None
 
-            return {
-                "fed_rate":      round(fed_rate, 2),
-                "unemployment":  round(unemployment, 2),
+            out = {
+                "fed_rate":      round(fed_rate, 2) if fed_rate is not None else None,
+                "unemployment":  round(unemployment, 2) if unemployment is not None else None,
                 "cpi":           cpi,
                 "gdp":           gdp,
-                "y10":           round(y10, 3),
-                "y2":            round(y2, 3),
+                "y10":           round(y10, 3) if y10 is not None else None,
+                "y2":            round(y2, 3) if y2 is not None else None,
                 "t10y2y":        t10y2y,
                 "bamlh0a0hym2":  bamlh0a0hym2,
                 "source":        "FRED",
             }
-        except Exception:
-            return {
-                "fed_rate": 5.33, "unemployment": 3.9,
-                "cpi": 3.4, "gdp": 2.1,
-                "y10": 4.2, "y2": 4.5,
-                "t10y2y": round(4.2 - 4.5, 3),
-                "bamlh0a0hym2": 350.0,
-                "source": "fallback",
-            }
+            missing = [k for k, v in out.items() if k != "source" and v is None]
+            if missing:
+                _logger.warning(f"FRED 거시지표 일부 없음: {', '.join(missing)}")
+            out["missing"] = missing
+            return out
+        except Exception as e:
+            # 예전에는 여기서 하드코딩 상수를 돌려줬다. `source: "fallback"` 으로
+            # 표시는 했지만 그 표시를 보는 소비자는 프롬프트 쪽 하나뿐이고,
+            # 화면은 그 숫자를 그대로 그렸다 — 조회가 실패한 날에도 "기준금리
+            # 5.33%" 가 정상처럼 떴다. 그럴듯한 가짜 숫자가 빈칸보다 나쁘다.
+            _logger.warning(f"FRED 거시지표 조회 실패 — 값 없이 반환: {e}")
+            keys = ["fed_rate", "unemployment", "cpi", "gdp",
+                    "y10", "y2", "t10y2y", "bamlh0a0hym2"]
+            return {**{k: None for k in keys}, "source": "fallback", "missing": keys}
 
     return _cached("fred_macro", ttl, _fetch)
 
