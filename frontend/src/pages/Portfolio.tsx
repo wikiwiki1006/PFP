@@ -163,7 +163,7 @@ export default function Portfolio() {
                         </span>
                       </td>
                       <td className="py-2.5 px-3 text-right font-mono text-[#64748b]">
-                        {(h.weight * 100).toFixed(1)}%
+                        {h.weight == null ? '—' : `${(h.weight * 100).toFixed(1)}%`}
                       </td>
                     </tr>
                   ))}

@@ -46,9 +46,11 @@ export interface HoldingDetail {
   current_price: number
   market_value: number
   pnl: number
-  pnl_pct: number
+  /** null = 취득단가가 없어 수익률 계산 불가 (0%와 구분해야 함). */
+  pnl_pct: number | null
   sector: string
-  weight: number
+  /** null = 총 평가액이 0이라 비중 계산 불가 (0%와 구분해야 함). */
+  weight: number | null
   /** 일변동률(%). null = 관측치 부족으로 계산 불가 (0%와 구분해야 함). */
   chg_pct: number | null
   /** 이 값의 기준 거래일 (YYYY-MM-DD). */
