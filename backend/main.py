@@ -11,26 +11,7 @@ import json
 import logging
 import math
 import os
-import sys
 
-# ── 로그가 인코딩 때문에 사라지지 않게 한다 ──────────────────────────────────
-#
-# Windows 콘솔은 cp949 다. 로그 문자열에 이 코드페이지에 없는 문자가 하나라도
-# 있으면 (em dash `—`, 화살표 `→`, 불릿 `·` 등) StreamHandler.emit 이
-# UnicodeEncodeError 를 내고 **그 로그 레코드가 통째로 버려진다.** 콘솔에는
-# "--- Logging error ---" 만 남고, 파일 핸들러라면 그 줄이 흔적 없이 빠진다.
-#
-# 이 리포의 로그 메시지는 한국어이고 `—` 를 자주 쓴다. 즉 실패를 알리려고
-# 넣은 로그가 정확히 그 이유로 사라지고 있었다 — §1.3 이 자기 자신에게
-# 걸린 경우다.
-#
-# 두 겹으로 막는다. UTF-8 로 바꾸고, 그래도 못 쓰는 문자가 나오면 버리는 대신
-# 이스케이프한다. 운영(Cloud Run)은 이미 UTF-8 이라 아무것도 바뀌지 않는다.
-for _stream in (sys.stdout, sys.stderr):
-    try:
-        _stream.reconfigure(encoding="utf-8", errors="backslashreplace")
-    except Exception:
-        pass
 import threading
 from pathlib import Path
 from typing import Any
@@ -68,6 +49,7 @@ class SafeJSONResponse(JSONResponse):
             separators=(",", ":"),
         ).encode("utf-8")
 
+from backend.db import DBBusy
 from backend.routers import internal, admin, portfolio, market, macro, signals, optimizer, reports, ticker, auth
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(name)s: %(message)s")
@@ -144,6 +126,24 @@ app.include_router(signals.router)
 app.include_router(optimizer.router)
 app.include_router(reports.router)
 app.include_router(ticker.router)
+
+
+# ── DB 가 바쁠 때는 503 ────────────────────────────────────────────────────────
+#
+# backend/db 는 fastapi 를 import 하지 않는다 (services/auth.py 가 유일한 경계다).
+# 그래서 db 계층은 HTTPException 대신 도메인 예외를 올린다:
+#
+#   DBBusy ├─ PoolExhausted        커넥션 부족
+#          └─ WriteLockUnavailable 쓰기 락 획득 실패
+#
+# 둘 다 "지금은 안 되지만 다시 시도하면 된다" 이므로 503 이다. 이 핸들러가
+# 없으면 500 + "Internal Server Error" 로 나가는데, 그건 사용자에게 우리가
+# 망가졌다고만 말하고 재시도해도 되는지를 알려주지 않는다. 프론트는 detail 을
+# 그대로 띄우므로 여기서 준 문장이 화면에 보인다.
+@app.exception_handler(DBBusy)
+async def _db_busy_handler(request, exc: DBBusy):
+    logger.warning(f"DB 사용량 초과로 요청 거절: {request.url.path} — {exc}")
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
 # ── 시작 이벤트 ────────────────────────────────────────────────────────────────
