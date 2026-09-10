@@ -624,7 +624,9 @@ def get_holdings_detail(
         else:
             price, _prev, chg_pct, as_of, is_live = ticker_px.get(t, (0.0, 0.0, None, None, False))
             avg     = _safe(info.get("avg", 0))
-            pnl_pct = _safe((price / avg - 1) * 100) if avg > 0 else 0.0
+            # 취득원가가 없으면 수익률이 정의되지 않는다 — 0% 로 내려보내면
+            # '손익 없음(보합)' 으로 읽힌다. CASH 는 손익 자체가 없어 0.0 이 맞다.
+            pnl_pct = _safe((price / avg - 1) * 100) if avg > 0 else None
 
         avg_cost = _safe(info.get("avg", 0))
         qty      = _safe(info.get("q", 0))
@@ -640,10 +642,12 @@ def get_holdings_detail(
             # 변동률을 못 구한 경우 0.0 이 아니라 null — 프론트에서 '—' 로 표시된다.
             # 0.0 으로 내려보내면 '진짜 보합'과 구분되지 않는다.
             "chg_pct":       round(chg_pct, 4) if chg_pct is not None else None,
-            "pnl_pct":       round(pnl_pct, 4),
+            "pnl_pct":       round(pnl_pct, 4) if pnl_pct is not None else None,
             "pnl":           round(pnl, 2),
             "market_value":  round(value, 2),
-            "weight":        round(_safe(value / total_equity), 4) if total_equity else 0.0,
+            # 평가액 합이 0 이면 비중이 정의되지 않는다. 이 조건은 전 종목에
+            # 동시에 걸리므로 '일부만 null' 인 상태는 생기지 않는다.
+            "weight":        round(_safe(value / total_equity), 4) if total_equity else None,
             "as_of":         as_of.strftime("%Y-%m-%d") if as_of is not None else None,
             "is_live":       bool(is_live),
         })
