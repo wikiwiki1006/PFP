@@ -67,10 +67,13 @@ def save_holding(
     user_id: str = "default",
     market: str = "US",
 ):
-    """종목 upsert. DB 미연결 또는 오류 시 로깅 후 반환."""
+    """종목 upsert. DB 를 못 쓰면 예외를 올린다.
+
+    예전에는 DB 미연결일 때 로그만 남기고 조용히 반환했다. 호출자에게는 저장
+    성공과 구별되지 않아서, 사용자는 종목 추가 버튼을 누르고 200 을 받고
+    아무것도 저장되지 않았다 (§1.3)."""
     if not is_available():
-        logger.error(f"DB 미연결 — {ticker} 저장 실패")
-        return
+        raise RuntimeError(f"DB 미연결 — {ticker} 을(를) 저장할 수 없다")
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
@@ -97,7 +100,8 @@ def user_write_lock(user_id: str = "default"):
     (제출 버튼 더블클릭만으로 재현). 핸들러 전체를 사용자 단위로 직렬화한다.
 
     락은 세션 단위이므로 획득·해제를 같은 커넥션에서 해야 한다.
-    DB 미연결이면 아무것도 하지 않는다 (단일 프로세스 폴백).
+    DB 미연결이면 아무것도 하지 않는다 — 직렬화할 쓰기 자체가 없다. 이 블록
+    안의 쓰기 함수가 전부 그 상태에서 예외를 올리기 때문이다.
     """
     if not is_available():
         yield
@@ -146,10 +150,16 @@ def update_holding_sector(ticker: str, sector: str, user_id: str = "default",
     그동안 사용자가 매매하면 save_holding 으로 스냅샷 전체를 되쓰면서 그 매매가
     되돌아간다. 섹터만 UPDATE 하면 동시에 기록된 수량·평단이 보존된다.
     행이 없으면(그사이 삭제됨) False — 삭제된 종목을 되살리지 않는다.
+
+    DB 미연결이면 예외를 올린다. 반면 쿼리가 실패했을 때는 False 를 유지한다 —
+    §1.3 이 허용하는 "가용성 때문에 여는" 쪽이고, 판단 근거는 이렇다: 이 함수는
+    /auto-sector 와 등록 직후 백그라운드에서 **여러 종목을 훑으며** 호출된다.
+    한 종목의 쿼리 실패로 예외를 올리면 나머지 종목의 섹터까지 통째로 못 채운다.
+    섹터가 'Other' 로 남는 것은 사용자 데이터를 잃는 게 아니고, 실패는
+    logger.error 로 남는다. 두 경로가 갈리는 것을 알고 그렇게 둔 것이다.
     """
     if not is_available():
-        logger.error(f"DB 미연결 — {ticker} 섹터 갱신 실패")
-        return False
+        raise RuntimeError(f"DB 미연결 — {ticker} 섹터를 갱신할 수 없다")
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
@@ -166,10 +176,11 @@ def update_holding_sector(ticker: str, sector: str, user_id: str = "default",
 
 def delete_holding(ticker: str, user_id: str = "default", with_trades: bool = False,
                    market: str = "US"):
-    """보유 종목 삭제. with_trades=True 일 때만 거래 이력도 함께 삭제."""
+    """보유 종목 삭제. with_trades=True 일 때만 거래 이력도 함께 삭제.
+
+    save_holding 과 같다 — DB 미연결이면 삭제된 척하지 않고 예외를 올린다."""
     if not is_available():
-        logger.error(f"DB 미연결 — {ticker} 삭제 실패")
-        return
+        raise RuntimeError(f"DB 미연결 — {ticker} 을(를) 삭제할 수 없다")
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
@@ -223,10 +234,14 @@ def get_trade_log(user_id: str = "default", market: str = "US") -> list[dict]:
 
 def update_trade_by_id(trade_id: int, record: dict, user_id: str = "default",
                        market: str = "US") -> bool:
-    """거래 내역 수정. 성공 시 True."""
+    """거래 내역 수정. 성공 시 True, **그런 거래가 없으면** False.
+
+    False 의 뜻을 하나로 좁혔다. 예전에는 DB 미연결·쿼리 실패도 False 였는데,
+    호출자(`routers/portfolio.py`)가 그걸 404 "거래 내역 없음" 으로 바꾼다.
+    DB 가 흔들리는 동안 사용자는 자기 거래가 사라졌다는 말을 듣고, 새로고침하면
+    그대로 있다. 실패는 실패로 올린다 (§1.3)."""
     if not is_available():
-        logger.error("DB 미연결 — 거래 이력 수정 실패")
-        return False
+        raise RuntimeError("DB 미연결 — 거래 이력을 수정할 수 없다")
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
@@ -249,15 +264,16 @@ def update_trade_by_id(trade_id: int, record: dict, user_id: str = "default",
                 return cur.rowcount > 0
     except Exception as e:
         logger.error(f"DB update_trade_by_id({trade_id}) 실패: {e}")
-        return False
+        raise
 
 
 def delete_trade_by_id(trade_id: int, user_id: str = "default",
                        market: str = "US") -> bool:
-    """거래 내역 삭제. 성공 시 True."""
+    """거래 내역 삭제. 성공 시 True, **그런 거래가 없으면** False.
+
+    update_trade_by_id 와 같다 — False 는 "그런 거래가 없다" 만 뜻한다."""
     if not is_available():
-        logger.error("DB 미연결 — 거래 이력 삭제 실패")
-        return False
+        raise RuntimeError("DB 미연결 — 거래 이력을 삭제할 수 없다")
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
@@ -268,14 +284,16 @@ def delete_trade_by_id(trade_id: int, user_id: str = "default",
                 return cur.rowcount > 0
     except Exception as e:
         logger.error(f"DB delete_trade_by_id({trade_id}) 실패: {e}")
-        return False
+        raise
 
 
 def add_trade(record: dict, user_id: str = "default", market: str = "US"):
-    """거래 1건 추가. DB 미연결 또는 오류 시 로깅 후 반환."""
+    """거래 1건 추가. DB 를 못 쓰면 예외를 올린다.
+
+    save_holding 과 같은 이유다 — 조용히 반환하면 기록되지 않은 매매가 200 을
+    받는다. 그 뒤 현금 원장·보유 재계산이 없는 거래 위에서 돈다."""
     if not is_available():
-        logger.error("DB 미연결 — 거래 이력 저장 실패")
-        return
+        raise RuntimeError("DB 미연결 — 거래 이력을 저장할 수 없다")
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
@@ -299,43 +317,10 @@ def add_trade(record: dict, user_id: str = "default", market: str = "US"):
         raise
 
 
-# ── Users ──────────────────────────────────────────────────────────────────────
-
-def list_users() -> list[dict]:
-    if not is_available():
-        return [{"id": "default", "name": "Default User", "created_at": None}]
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT id, name, email, created_at FROM users ORDER BY created_at"
-                )
-                rows = cur.fetchall()
-        return [
-            {"id": r[0], "name": r[1], "email": r[2], "created_at": str(r[3])}
-            for r in rows
-        ]
-    except Exception as e:
-        logger.warning(f"DB list_users 실패: {e}")
-        return []
-
-
-def create_user(user_id: str, name: str, email: str = "") -> bool:
-    if not is_available():
-        logger.error("DB 미연결 — 유저 생성 실패")
-        return False
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO users(id, name, email) VALUES(%s,%s,%s) "
-                    "ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name, email=EXCLUDED.email",
-                    (user_id, name, email),
-                )
-        return True
-    except Exception as e:
-        logger.error(f"DB create_user 실패: {e}")
-        return False
+# 사용자 CRUD 는 `backend/db/users_repo.py` 에 있다. 여기 있던 list_users /
+# create_user 는 호출자가 리포 전체에 하나도 없는 화석이라 지웠다. list_users 는
+# DB 미연결 시 `{"id": "default", "name": "Default User"}` 를 **지어내서**
+# 돌려주기까지 했다 — 없는 사용자를 있는 것처럼 만드는 §1.3 결함이다.
 
 
 def wipe_portfolio(user_id: str, market: str = "US") -> dict:
@@ -346,9 +331,15 @@ def wipe_portfolio(user_id: str, market: str = "US") -> dict:
 
     market 으로 범위를 반드시 좁힌다. 미국·한국은 별개의 포트폴리오라
     한쪽을 새로 등록한다고 다른 쪽까지 지워서는 안 된다.
+
+    예전에는 DB 미연결이나 빈 user_id 에서 `{"holdings": 0, "trades": 0}` 을
+    돌려줬다. 로그도 없었다. 호출자에게는 "지울 게 없어서 0건" 과 구별되지
+    않으므로, 새로 등록하기가 옛 포트폴리오를 그대로 둔 채 진행된다 (§1.3).
     """
-    if not is_available() or not user_id:
-        return {"holdings": 0, "trades": 0}
+    if not user_id:
+        raise ValueError("wipe_portfolio 에 user_id 가 없다")
+    if not is_available():
+        raise RuntimeError("DB 미연결 — 포트폴리오를 비울 수 없다")
     try:
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM trade_log WHERE user_id=%s AND market=%s",
