@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Optional
@@ -31,6 +32,9 @@ except ImportError:
         """psycopg2 가 없을 때의 자리표시자 — 아래 except 절이 참조한다."""
 
 _pool: Optional[Any] = None
+# 재초기화를 한 번에 하나만 하게 한다. 여러 스레드가 동시에 실패하면 다 같이
+# 여기로 들어오는데, 각자 풀을 만들면 풀마다 minconn 만큼 커넥션이 새로 열린다.
+_reinit_lock = threading.Lock()
 
 
 class DBBusy(RuntimeError):
@@ -164,33 +168,55 @@ def _try_reinit_pool() -> bool:
     **커넥션이 실제로 죽었을 때만 부른다.** 고갈에는 부르지 않는다 —
     PoolExhausted 의 설명 참고.
 
-    그 진짜 경우에도 `closeall()` 은 지금 나가 있는 커넥션을 전부 끊는다.
-    advisory lock 을 쥔 요청이 있으면 그 락도 함께 풀리고, 그 요청은 아무
-    신호도 받지 못한다. 완전한 해법은 락과 본문 쿼리가 같은 커넥션을 쓰는
-    것인데 구조 변경이 커서 아직 안 했다. 그때까지는 **몇 개를 끊었는지라도
-    남긴다** — 나중에 "락이 걸렸어야 하는데 안 걸렸다" 를 추적할 단서다.
+    ## 옛 풀을 닫지 않는다
+
+    예전에는 `closeall()` 을 했다. 그건 지금 나가 있는 커넥션까지 전부 끊는다.
+    advisory lock 은 세션 단위라 락을 쥔 요청의 락이 함께 풀리는데, 재초기화를
+    유발한 요청 하나만 예외를 받고 나머지는 **락이 사라진 줄도 모른 채 임계구역을
+    계속 실행한다.** 복구 동작이 아직 멀쩡한 요청의 상호배제를 깨뜨린 셈이다.
+
+    지금은 새 풀만 만들고 옛 풀은 참조를 놓는다. 남는 비용을 재봤다
+    (`pg_stat_activity` 로 서버 쪽을 직접 셈):
+
+    - 옛 풀의 **유휴** 커넥션 — 참조가 끊기는 즉시 refcount 로 닫힌다.
+    - 옛 풀에서 **나가 있던** 커넥션 — 살아남는다. 그런데 이건 누수가 아니다.
+      진행 중인 요청의 것이고, `closeall()` 을 하던 때에도 같은 수가 존재했다.
+      차이는 "요청이 끝나면 반납" 이냐 "지금 강제로 끊음" 이냐뿐이다.
+
+    즉 옛 동작은 아무도 요구하지 않은 커넥션 수 보장을 위해 상호배제를 팔고
+    있었다. 상한도 문제되지 않는다 — 재초기화가 **성공**했다는 건 DB 는 멀쩡한데
+    풀의 커넥션이 상했다는 뜻이고, 그 커넥션들은 이미 서버 쪽에서 죽어 있어
+    연결 수에 잡히지 않는다. DB 자체가 안 되면 아래 `init_pool()` 이 실패해
+    새 풀조차 안 생긴다.
+
+    반납 대상이 어긋나지 않아야 성립한다 — `get_conn` 과 `user_write_lock` 은
+    시작 시점의 풀을 고정해 두고 거기로 되돌린다. 전역을 다시 읽으면 새 풀에
+    옛 커넥션을 넣어 실패하고, 그 커넥션이 옛 풀에 영영 남아 **그때는 진짜
+    누수가 된다.**
     """
     global _pool
-    in_use = 0
-    try:
-        in_use = len(_pool._used) if _pool is not None else 0   # type: ignore[union-attr]
-    except Exception:
-        pass
-    logger.warning(
-        f"DB 연결 풀 재초기화 시도 중... 사용 중이던 커넥션 {in_use}개를 닫는다. "
-        f"그중 advisory lock 을 쥔 것이 있으면 그 락도 함께 풀린다."
-    )
-    try:
-        if _pool is not None:
-            try:
-                _pool.closeall()
-            except Exception:
-                pass
-        _pool = None
-        return init_pool()
-    except Exception as e:
-        logger.error(f"DB 풀 재초기화 실패: {e}")
-        return False
+    old = _pool
+    with _reinit_lock:
+        # 기다리는 사이 다른 스레드가 이미 갈아끼웠으면 또 만들지 않는다.
+        # 풀마다 minconn 만큼 커넥션을 새로 열기 때문에 중복은 그대로 비용이다.
+        if _pool is not old:
+            return _pool is not None
+
+        in_use = 0
+        try:
+            in_use = len(old._used) if old is not None else 0   # type: ignore[union-attr]
+        except Exception:
+            pass
+        logger.warning(
+            f"DB 연결 풀 재초기화 시도 중... 옛 풀은 닫지 않는다 "
+            f"(나가 있는 커넥션 {in_use}개는 각 요청이 끝나면 반납된다)."
+        )
+        try:
+            _pool = None
+            return init_pool()
+        except Exception as e:
+            logger.error(f"DB 풀 재초기화 실패: {e}")
+            return False
 
 
 def _is_exhaustion(e: BaseException) -> bool:
