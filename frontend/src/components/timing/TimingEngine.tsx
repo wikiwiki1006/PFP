@@ -26,7 +26,7 @@ export default function TimingEngine({ holdings }: TimingEngineProps) {
             onClick={() => setTab(i)}
             className={`px-3 py-2 text-left rounded-t border-b-2 transition-colors flex-shrink-0 ${
               tab === i
-                ? 'border-[#3b82f6] text-[#e2e8f0] bg-[#0a1525]'
+                ? 'border-[#10b981] text-[#e2e8f0] bg-[#0a1525]'
                 : 'border-transparent text-[#64748b] hover:text-[#94a3b8]'
             }`}
           >

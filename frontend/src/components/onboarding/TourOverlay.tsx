@@ -100,7 +100,7 @@ export default function TourOverlay() {
       {/* 가리키는 대상 테두리 */}
       {box && (
         <div
-          className="absolute rounded-lg ring-2 ring-[#3b82f6] pointer-events-none transition-all duration-200"
+          className="absolute rounded-lg ring-2 ring-[#10b981] pointer-events-none transition-all duration-200"
           style={{
             top: box.top - 4, left: box.left - 4,
             width: box.width + 8, height: box.height + 8,
@@ -127,7 +127,7 @@ export default function TourOverlay() {
         )}
 
         <div className="mb-1 flex items-start justify-between gap-2">
-          <div className="text-[11px] font-bold tracking-wider text-[#3b82f6]">
+          <div className="text-[11px] font-bold tracking-wider text-[#10b981]">
             {step + 1} / {total}
           </div>
           <button onClick={skip} aria-label="안내 건너뛰기"
@@ -151,7 +151,7 @@ export default function TourOverlay() {
             건너뛰기
           </button>
           <button onClick={next}
-                  className="ml-auto flex items-center gap-1 rounded-lg bg-[#3b82f6] px-4 py-2 text-xs font-bold text-white transition hover:bg-[#2563eb]">
+                  className="ml-auto flex items-center gap-1 rounded-lg bg-[#10b981] px-4 py-2 text-xs font-bold text-white transition hover:bg-[#059669]">
             {isLast ? '등록 시작' : '다음'}
             {!isLast && <ChevronRight size={14} />}
           </button>

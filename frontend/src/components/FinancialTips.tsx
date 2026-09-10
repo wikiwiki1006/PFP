@@ -37,7 +37,7 @@ export function FinancialTips() {
       className="px-3 py-2 rounded border border-[#1e2d40] bg-[#06091200]"
       style={{ transition: 'opacity 0.35s ease', opacity: visible ? 1 : 0 }}
     >
-      <span className="text-[10px] font-bold text-[#9b59b6] mr-2">{tip.term}</span>
+      <span className="text-[10px] font-bold text-[#10b981] mr-2">{tip.term}</span>
       <span className="text-[10px] text-[#64748b]">{tip.desc}</span>
     </div>
   )

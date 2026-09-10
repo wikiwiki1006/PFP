@@ -323,9 +323,14 @@ export default function AuthModal({ open, onClose, initialMode = 'login' }: Prop
 
     {
       try {
-        const { data: reg } = await api.post<{ email: string | null }>('/api/auth/social/register')
+        const { data: reg } = await api.post<{ email: string | null; username?: string | null }>(
+          '/api/auth/social/register')
         // 가입 전 /auth/me 가 403 이라 프로필이 비어 있다 — 지금 다시 받는다.
         await refreshProfile()
+        // 네이버·구글이 알려준 이름을 닉네임 칸에 미리 채워 둔다.
+        // 대부분은 그대로 쓰면 되고, 바꾸고 싶으면 그 자리에서 고치면 된다 —
+        // 빈 칸을 주고 다시 입력하게 하는 것보다 손이 덜 간다.
+        if (reg.username) setNickname(reg.username)
         setSignedUpAs(reg.email || '')
       } catch (e) {
         // 이미 다른 방법으로 쓰는 이메일 등 — 가입이 끝나지 않았다.
@@ -393,6 +398,32 @@ export default function AuthModal({ open, onClose, initialMode = 'login' }: Prop
       .catch((e) => { setBusy(null); setError(e?.message || '카카오 로그인에 실패했습니다.') })
   }
 
+  const naverLogin = () => {
+    if (!providers?.naver) {
+      setError('네이버 로그인이 아직 설정되지 않았습니다.')
+      return
+    }
+    setBusy('naver'); setError('')
+
+    startNaverOAuth()
+      .then(async ({ code, state }) => {
+        setBusy(null)
+        await run('naver', async () => {
+          try {
+            const { data } = await api.post<{ custom_token: string }>('/api/auth/naver/callback', {
+              code, state, redirect_uri: naverRedirectUri(), signup: mode === 'signup',
+            })
+            await setRememberMe(remember)
+            await loginWithCustomToken(data.custom_token)
+          } catch (e) {
+            throw new Error(apiError(e, '네이버 로그인에 실패했습니다.'))
+          }
+          await afterSocialAuth()
+        }, false)
+      })
+      .catch((e) => { setBusy(null); setError(e?.message || '네이버 로그인에 실패했습니다.') })
+  }
+
   const title = mode === 'signup' ? '회원가입' : mode === 'reset' ? '비밀번호 재설정' : '로그인'
 
   return (
@@ -452,7 +483,7 @@ export default function AuthModal({ open, onClose, initialMode = 'login' }: Prop
                 <button
                   type="submit"
                   disabled={!!busy}
-                  className="flex w-[86px] shrink-0 flex-col items-center justify-center rounded-lg bg-[#3b82f6] text-sm font-bold text-white transition hover:bg-[#2f6fe0] disabled:opacity-50"
+                  className="flex w-[86px] shrink-0 flex-col items-center justify-center rounded-lg bg-[#10b981] text-sm font-bold text-white transition hover:bg-[#059669] disabled:opacity-50"
                 >
                   {busy === 'submit'
                     ? <Loader2 size={18} className="animate-spin" />
@@ -466,7 +497,7 @@ export default function AuthModal({ open, onClose, initialMode = 'login' }: Prop
                     type="checkbox"
                     checked={remember}
                     onChange={(e) => setRemember(e.target.checked)}
-                    className="h-3.5 w-3.5 accent-[#3b82f6]"
+                    className="h-3.5 w-3.5 accent-[#10b981]"
                   />
                   로그인 상태 유지
                 </label>
@@ -565,7 +596,7 @@ export default function AuthModal({ open, onClose, initialMode = 'login' }: Prop
               <button
                 type="submit"
                 disabled={!!busy}
-                className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#3b82f6] px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[#2f6fe0] disabled:opacity-50"
+                className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#10b981] px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[#059669] disabled:opacity-50"
               >
                 {(busy === 'submit' || busy === 'reset') && <Loader2 size={15} className="animate-spin" />}
                 {mode === 'signup' ? '가입하기' : '재설정 메일 보내기'}
@@ -584,7 +615,7 @@ export default function AuthModal({ open, onClose, initialMode = 'login' }: Prop
                   enabled={!!providers?.naver}
                   busy={busy === 'naver'}
                   disabled={!!busy}
-                  onClick={() => setError('네이버 로그인이 아직 설정되지 않았습니다.')}
+                  onClick={naverLogin}
                 />
                 <SocialButton
                   label={mode === 'signup' ? '카카오로 가입' : '카카오 로그인'}
@@ -620,7 +651,7 @@ export default function AuthModal({ open, onClose, initialMode = 'login' }: Prop
           {mode !== 'login' && (
             <div className="mt-4 text-xs">
               <button onClick={() => { setMode('login'); setError(''); setNotice('') }}
-                      className="text-[#60a5fa] transition hover:text-[#93c5fd]">
+                      className="text-[#10b981] transition hover:text-[#34d399]">
                 ← 로그인으로 돌아가기
               </button>
             </div>
@@ -665,7 +696,7 @@ function Field({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         autoComplete={autoComplete}
-        className="w-full rounded-lg border border-[#1e2d40] bg-[#0d1526] py-2.5 pl-9 pr-3 text-sm text-[#e2e8f0] placeholder-[#374151] outline-none transition focus:border-[#3b82f6] focus:ring-1 focus:ring-[#3b82f6]/40"
+        className="w-full rounded-lg border border-[#1e2d40] bg-[#0d1526] py-2.5 pl-9 pr-3 text-sm text-[#e2e8f0] placeholder-[#374151] outline-none transition focus:border-[#10b981] focus:ring-1 focus:ring-[#10b981]/40"
       />
     </div>
   )
@@ -700,7 +731,7 @@ function LabeledInput({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         autoComplete={autoComplete}
-        className="min-w-0 flex-1 rounded-lg border border-[#1e2d40] bg-[#0d1526] px-3 py-2.5 text-sm text-[#e2e8f0] outline-none transition focus:border-[#3b82f6] focus:ring-1 focus:ring-[#3b82f6]/40"
+        className="min-w-0 flex-1 rounded-lg border border-[#1e2d40] bg-[#0d1526] px-3 py-2.5 text-sm text-[#e2e8f0] outline-none transition focus:border-[#10b981] focus:ring-1 focus:ring-[#10b981]/40"
       />
     </label>
   )
@@ -817,6 +848,76 @@ async function startKakaoLogin(jsKey: string): Promise<string> {
       success: (r) => resolve(r.access_token),
       fail: () => reject(new Error('카카오 로그인이 취소되었습니다.')),
     })
+  })
+}
+
+
+// ── 네이버 OAuth ──────────────────────────────────────────────────────────────
+// 인가 페이지를 팝업으로 열고, 리다이렉트된 콜백 페이지가 postMessage 로
+// 인가 코드를 돌려준다. 코드를 토큰으로 바꾸는 건 서버가 한다
+// (Client Secret 이 브라우저에 노출되면 안 되므로).
+
+export function naverRedirectUri(): string {
+  return `${window.location.origin}/auth/naver/callback`
+}
+
+interface NaverOAuthMessage {
+  source: 'pfp-naver-oauth'
+  code?: string | null
+  state?: string | null
+  error?: string | null
+}
+
+async function startNaverOAuth(): Promise<{ code: string; state: string }> {
+  const redirectUri = naverRedirectUri()
+  // 네이버는 state 를 필수로 요구한다(CSRF 방지). 매 시도마다 새로 만들고,
+  // 돌아온 값이 같은지 대조해 위조된 콜백을 걸러낸다.
+  const state = crypto.randomUUID()
+
+  const { data } = await api.get<{ url: string }>('/api/auth/naver/authorize-url', {
+    params: { redirect_uri: redirectUri, state },
+  })
+
+  const w = 480, h = 700
+  const left = window.screenX + (window.outerWidth - w) / 2
+  const top  = window.screenY + (window.outerHeight - h) / 2
+  const popup = window.open(data.url, 'naver-login',
+    `width=${w},height=${h},left=${left},top=${top}`)
+  if (!popup) throw new Error('팝업이 차단됐습니다. 브라우저 설정을 확인해 주세요.')
+
+  return new Promise<{ code: string; state: string }>((resolve, reject) => {
+    let done = false
+    const cleanup = () => {
+      window.removeEventListener('message', onMessage)
+      clearInterval(closedTimer)
+    }
+
+    const onMessage = (e: MessageEvent<NaverOAuthMessage>) => {
+      // 우리 콜백 페이지가 보낸 메시지만 받는다 — 다른 출처의 위조를 막는다.
+      if (e.origin !== window.location.origin) return
+      if (e.data?.source !== 'pfp-naver-oauth') return
+      done = true; cleanup(); popup.close()
+
+      if (e.data.error || !e.data.code) {
+        reject(new Error(e.data.error || '네이버 로그인이 취소되었습니다.'))
+        return
+      }
+      if (e.data.state !== state) {
+        // 우리가 시작한 요청이 아니다.
+        reject(new Error('네이버 로그인 응답이 올바르지 않습니다. 다시 시도해 주세요.'))
+        return
+      }
+      resolve({ code: e.data.code, state })
+    }
+    window.addEventListener('message', onMessage)
+
+    // 사용자가 팝업을 그냥 닫으면 메시지가 오지 않는다 — 그 경우도 마무리한다.
+    const closedTimer = setInterval(() => {
+      if (popup.closed && !done) {
+        cleanup()
+        reject(new Error('네이버 로그인이 취소되었습니다.'))
+      }
+    }, 500)
   })
 }
 

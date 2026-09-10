@@ -1,12 +1,14 @@
 import { useState } from 'react'
 import BollingerChart from './BollingerChart'
 import type { HoldingsMap } from '@/types'
+import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
 
 interface MeanReversionPanelProps {
   holdings: HoldingsMap
 }
 
 export default function MeanReversionPanel({ holdings }: MeanReversionPanelProps) {
+  const names = useTickerNames()
   const tickers  = Object.keys(holdings).filter(t => t !== 'CASH')
   const [selected, setSelected] = useState<string | null>(tickers[0] ?? null)
 
@@ -26,13 +28,13 @@ export default function MeanReversionPanel({ holdings }: MeanReversionPanelProps
           <button
             key={t}
             onClick={() => setSelected(t)}
-            className={`w-full text-left px-3 py-2 rounded border font-mono font-bold text-sm transition-colors ${
+            className={`w-full text-left px-3 py-2 rounded border font-bold text-sm transition-colors ${
               selected === t
-                ? 'border-[#3b82f6] bg-[#3b82f6]/10 text-[#3b82f6]'
+                ? 'border-[#10b981] bg-[#10b981]/10 text-[#10b981]'
                 : 'border-[#1e2d40] text-[#e2e8f0] hover:bg-[#0a1525]'
             }`}
           >
-            {t}
+            {displayTicker(t, names)}
             <span className="text-[11px] text-[#64748b] font-normal ml-2">{holdings[t]?.q ?? 0}주</span>
           </button>
         ))}

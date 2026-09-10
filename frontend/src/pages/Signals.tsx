@@ -79,7 +79,7 @@ export default function Signals() {
           <button
             onClick={() => scanMutation.mutate()}
             disabled={scanMutation.isPending}
-            className="flex items-center gap-2 px-3 py-1.5 bg-[#3b82f6] hover:bg-[#2563eb] disabled:opacity-50 text-white text-xs rounded transition-colors"
+            className="flex items-center gap-2 px-3 py-1.5 bg-[#10b981] hover:bg-[#059669] disabled:opacity-50 text-white text-xs rounded transition-colors"
           >
             {scanMutation.isPending ? (
               <LoadingSpinner size="sm" />
@@ -238,12 +238,12 @@ export default function Signals() {
             onKeyDown={(e) => {
               if (e.key === 'Enter' && signalTicker) setLookupTicker(signalTicker)
             }}
-            className="flex-1 bg-[#0b0f1a] border border-[#1e2d40] rounded px-3 py-2 text-sm font-mono text-[#e2e8f0] focus:outline-none focus:border-[#3b82f6] uppercase"
+            className="flex-1 bg-[#0b0f1a] border border-[#1e2d40] rounded px-3 py-2 text-sm font-mono text-[#e2e8f0] focus:outline-none focus:border-[#10b981] uppercase"
           />
           <button
             onClick={() => setLookupTicker(signalTicker)}
             disabled={!signalTicker}
-            className="flex items-center gap-2 px-4 py-2 bg-[#3b82f6] hover:bg-[#2563eb] disabled:opacity-50 text-white text-sm rounded transition-colors"
+            className="flex items-center gap-2 px-4 py-2 bg-[#10b981] hover:bg-[#059669] disabled:opacity-50 text-white text-sm rounded transition-colors"
           >
             <Search className="w-4 h-4" />
             Analyze
@@ -393,19 +393,19 @@ export default function Signals() {
             placeholder="Ticker A (e.g. GLD)"
             value={pairA}
             onChange={(e) => setPairA(e.target.value.toUpperCase())}
-            className="w-36 bg-[#0b0f1a] border border-[#1e2d40] rounded px-3 py-2 text-sm font-mono text-[#e2e8f0] focus:outline-none focus:border-[#3b82f6] uppercase"
+            className="w-36 bg-[#0b0f1a] border border-[#1e2d40] rounded px-3 py-2 text-sm font-mono text-[#e2e8f0] focus:outline-none focus:border-[#10b981] uppercase"
           />
           <input
             type="text"
             placeholder="Ticker B (e.g. SLV)"
             value={pairB}
             onChange={(e) => setPairB(e.target.value.toUpperCase())}
-            className="w-36 bg-[#0b0f1a] border border-[#1e2d40] rounded px-3 py-2 text-sm font-mono text-[#e2e8f0] focus:outline-none focus:border-[#3b82f6] uppercase"
+            className="w-36 bg-[#0b0f1a] border border-[#1e2d40] rounded px-3 py-2 text-sm font-mono text-[#e2e8f0] focus:outline-none focus:border-[#10b981] uppercase"
           />
           <select
             value={pairPeriod}
             onChange={(e) => setPairPeriod(e.target.value)}
-            className="bg-[#0b0f1a] border border-[#1e2d40] rounded px-3 py-2 text-sm text-[#e2e8f0] focus:outline-none focus:border-[#3b82f6]"
+            className="bg-[#0b0f1a] border border-[#1e2d40] rounded px-3 py-2 text-sm text-[#e2e8f0] focus:outline-none focus:border-[#10b981]"
           >
             <option value="6mo">6 months</option>
             <option value="1y">1 year</option>
@@ -416,7 +416,7 @@ export default function Signals() {
               setActivePairTickers({ a: pairA, b: pairB, period: pairPeriod })
             }
             disabled={!pairA || !pairB}
-            className="flex items-center gap-2 px-4 py-2 bg-[#3b82f6] hover:bg-[#2563eb] disabled:opacity-50 text-white text-sm rounded transition-colors"
+            className="flex items-center gap-2 px-4 py-2 bg-[#10b981] hover:bg-[#059669] disabled:opacity-50 text-white text-sm rounded transition-colors"
           >
             <Search className="w-4 h-4" />
             Analyze Pair

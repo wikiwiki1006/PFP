@@ -11,6 +11,7 @@ import Optimizer from './pages/Optimizer'
 import TimingEngine from './pages/TimingEngine'
 import LensReport from './pages/LensReport'
 import KakaoCallback from './pages/KakaoCallback'
+import NaverCallback from './pages/NaverCallback'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -39,6 +40,7 @@ export default function App() {
           <Routes>
             {/* 카카오 OAuth 착지점 — 팝업 안에서만 열리므로 레이아웃 밖에 둔다 */}
             <Route path="/auth/kakao/callback" element={<KakaoCallback />} />
+            <Route path="/auth/naver/callback" element={<NaverCallback />} />
 
             <Route path="/" element={<Layout />}>
               <Route index element={<Navigate to="/terminal" replace />} />

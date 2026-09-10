@@ -66,13 +66,13 @@ export default function LockedPreview({
           {children}
         </div>
         <div className="absolute inset-0 z-10 flex items-center gap-2 bg-[#0b0f1a]/40 px-3">
-          <Lock size={11} className="shrink-0 text-[#3b82f6]" />
+          <Lock size={11} className="shrink-0 text-[#10b981]" />
           <span className="whitespace-nowrap text-[10px] font-bold text-[#e2e8f0]">
             로그인 후 사용 가능
           </span>
           <button
             onClick={() => openAuth('login')}
-            className="rounded bg-[#3b82f6] px-2 py-0.5 text-[10px] font-semibold text-white transition hover:bg-[#2f6fe0]"
+            className="rounded bg-[#10b981] px-2 py-0.5 text-[10px] font-semibold text-white transition hover:bg-[#059669]"
           >
             로그인
           </button>
@@ -106,7 +106,7 @@ export default function LockedPreview({
           }`}
         >
           <div className="flex items-center gap-1.5">
-            <Lock size={size === 'sm' ? 12 : 14} className="text-[#3b82f6]" />
+            <Lock size={size === 'sm' ? 12 : 14} className="text-[#10b981]" />
             <span className={`font-bold text-[#e2e8f0] ${size === 'sm' ? 'text-[11px]' : 'text-xs'}`}>
               로그인 후 사용 가능
             </span>
@@ -115,7 +115,7 @@ export default function LockedPreview({
           <div className="mt-0.5 flex items-center gap-1.5">
             <button
               onClick={() => openAuth('login')}
-              className={`inline-flex items-center gap-1 rounded-md bg-[#3b82f6] font-semibold text-white transition hover:bg-[#2f6fe0] ${
+              className={`inline-flex items-center gap-1 rounded-md bg-[#10b981] font-semibold text-white transition hover:bg-[#059669] ${
                 size === 'sm' ? 'px-2.5 py-1 text-[10px]' : 'px-3 py-1.5 text-[11px]'
               }`}
             >
@@ -183,13 +183,13 @@ export function AuthOverlay() {
         <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center">
           <div className="pointer-events-auto flex flex-col items-center gap-3 rounded-xl border border-[#1e2d40] bg-[#060b14]/95 px-7 py-5 shadow-2xl backdrop-blur-sm">
             <div className="flex items-center gap-2">
-              <Lock size={15} className="text-[#3b82f6]" />
+              <Lock size={15} className="text-[#10b981]" />
               <span className="text-sm font-bold text-[#e2e8f0]">로그인 후 사용 가능</span>
             </div>
             <div className="flex items-center gap-2">
               <button
                 onClick={() => openAuth('login')}
-                className="inline-flex items-center gap-1.5 rounded-md bg-[#3b82f6] px-4 py-1.5 text-xs font-semibold text-white transition hover:bg-[#2f6fe0]"
+                className="inline-flex items-center gap-1.5 rounded-md bg-[#10b981] px-4 py-1.5 text-xs font-semibold text-white transition hover:bg-[#059669]"
               >
                 <LogIn size={13} /> 로그인
               </button>

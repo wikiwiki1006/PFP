@@ -17,7 +17,7 @@ export default function LoadingSpinner({ size = 'md', className, text }: Loading
     <div className={cn('flex flex-col items-center justify-center gap-3', className)}>
       <div
         className={cn(
-          'rounded-full border-[#1e2d40] border-t-[#3b82f6] animate-spin',
+          'rounded-full border-[#1e2d40] border-t-[#10b981] animate-spin',
           sizes[size]
         )}
       />
@@ -48,7 +48,7 @@ export function ErrorMessage({ message, retry }: { message: string; retry?: () =
       {retry && (
         <button
           onClick={retry}
-          className="text-xs text-[#3b82f6] hover:underline"
+          className="text-xs text-[#10b981] hover:underline"
         >
           Try again
         </button>

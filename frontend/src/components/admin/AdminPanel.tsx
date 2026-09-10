@@ -88,7 +88,7 @@ export default function AdminPanel({ open, onClose }: Props) {
            onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between border-b border-[#1e2d40] px-6 py-4">
           <h2 className="flex items-center gap-2 text-lg font-semibold text-[#e2e8f0]">
-            <ShieldCheck size={18} className="text-[#3b82f6]" />
+            <ShieldCheck size={18} className="text-[#10b981]" />
             관리자 설정
           </h2>
           <button onClick={onClose} aria-label="닫기"
@@ -122,7 +122,7 @@ export default function AdminPanel({ open, onClose }: Props) {
                   role="switch" aria-checked={settings[key]} aria-label={label}
                   className={cn(
                     'relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:opacity-50',
-                    settings[key] ? 'bg-[#3b82f6]' : 'bg-[#2d3f56]'
+                    settings[key] ? 'bg-[#10b981]' : 'bg-[#2d3f56]'
                   )}
                 >
                   <span className={cn(

@@ -72,8 +72,8 @@ export default function Home() {
       {/* Header */}
       <div className="flex items-start justify-between">
         <div>
-          <div className="text-[10px] text-[#3b82f6] font-bold tracking-[3px] mb-1">PERSONAL FINANCIAL PLATFORM</div>
-          <h1 className="text-2xl font-bold text-[#00e6ff] tracking-wide">PFP COMMAND CENTER</h1>
+          <div className="text-[10px] text-[#10b981] font-bold tracking-[3px] mb-1">투자의 기회를 줍다</div>
+          <h1 className="text-2xl font-bold text-[#00e6ff] tracking-wide">ZOOPZOOP COMMAND CENTER</h1>
           <p className="text-xs text-[#4a5568] mt-1">Investment Operating System · 8 Modules</p>
         </div>
         <Clock />

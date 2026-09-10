@@ -33,6 +33,12 @@ import {
   DEMO_METRICS, DEMO_EQUITY_CURVE, DEMO_HOLDINGS_DETAIL, DEMO_HOLDINGS_RAW,
   DEMO_SECTOR_WEIGHTS, DEMO_ANALYST_FEEDBACK, DEMO_NEWS, DEMO_EARNINGS,
 } from '@/lib/demoData'
+import { formatPrice, formatCompact, formatMoney, marketSymbol,
+         MARKETS, moneyInputProps } from '@/lib/market'
+import { useMarket } from '@/lib/useMarket'
+import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
+import TickerLabel from '@/components/TickerLabel'
+import { marketSession } from '@/lib/marketStorage'
 
 // null/NaN-safe 숫자 포맷터
 const fn = (v: number | null | undefined, d = 2) => ((v == null || isNaN(v as number)) ? 0 : v).toFixed(d)
@@ -74,6 +80,22 @@ const SECTOR_KO: Record<string, string> = {
 }
 const toKoSector = (s: string) => SECTOR_KO[s] ?? s
 
+// 섹터 대표 ETF 의 표시 이름. 미국은 티커(XLK)가 널리 통용되지만 한국은
+// '091160.KS' 를 알아보는 사람이 없다 — 어느 ETF 로 잰 수치인지 알려면
+// 상품명이 필요하다.
+const SECTOR_ETF_LABEL: Record<string, string> = {
+  '091160.KS': 'KODEX 반도체',
+  '091170.KS': 'KODEX 은행',
+  '266390.KS': 'KODEX 경기소비재',
+  '266420.KS': 'KODEX 헬스케어',
+  '102960.KS': 'KODEX 조선',
+  '266410.KS': 'KODEX 필수소비재',
+  '117460.KS': 'KODEX 에너지화학',
+  '117680.KS': 'KODEX 철강',
+  '266370.KS': 'KODEX IT하드웨어',
+}
+const sectorEtfLabel = (etf: string) => SECTOR_ETF_LABEL[etf] ?? etf
+
 // 섹터 테이블 API 레이블 (대문자) → 한글
 const SECTOR_LABEL_KO: Record<string, string> = {
   'TECHNOLOGY':       '기술',
@@ -87,6 +109,12 @@ const SECTOR_LABEL_KO: Record<string, string> = {
   'UTILITIES':        '유틸리티',
   'MATERIALS':        '소재',
   'REAL_ESTATE':      '부동산',
+  // 한국 전용 — KODEX 업종 ETF 가 미국 GICS 와 1:1 로 대응되지 않아
+  // 실제 ETF 가 담는 업종 이름을 그대로 쓴다.
+  'SHIPBUILDING':     '조선',
+  'ENERGY_CHEM':      '에너지화학',
+  'STEEL':            '철강',
+  'IT_HARDWARE':      'IT하드웨어',
 }
 
 const SECTOR_COLORS = [
@@ -234,6 +262,7 @@ function EmptyHoldings({ compact, label = '보유 종목 없음' }: { compact?: 
 }
 
 function EquityCurve({ curveQ }: { curveQ: any }) {
+  const names = useTickerNames()
   // 기본값은 ALL — 백엔드는 첫 거래일부터 전 구간을 내려주는데 여기서 1년으로
   // 잘라 버리면 "최초 입금일부터 보이지 않는" 문제가 그대로 남는다.
   const [range, setRange] = useState<'1M' | '3M' | '1Y' | 'ALL'>('ALL')
@@ -292,14 +321,41 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
       return null
     })()
 
+    // 포트폴리오·벤치마크도 **보고 있는 구간의 첫 날을 0%** 로 다시 잡는다.
+    //
+    // 서버가 주는 port/sp 는 포트폴리오 시작 시점부터의 누적 수익률이다. 1M 을
+    // 눌러도 그 값을 그대로 그리면 선이 +45% 같은 자리에서 시작해, 정작 보고
+    // 싶은 '최근 한 달 성과'를 읽을 수 없고 NASDAQ(0% 시작)과도 축이 맞지 않는다.
+    //
+    // 누적 수익률을 다시 기준 잡는 식은 (1+r_t)/(1+r_0) - 1 이다. 단순 뺄셈
+    // (r_t - r_0)은 복리를 무시해 구간이 길수록 오차가 커진다.
+    const firstOf = (key: 'port' | 'sp'): number | null => {
+      for (const d of sliced) {
+        const v = d[key]
+        if (v != null && isFinite(v)) return v as number
+      }
+      return null
+    }
+    const basePort = firstOf('port')
+    const baseSp   = firstOf('sp')
+
+    const rebase = (v: any, base: number | null): number | undefined => {
+      if (v == null || !isFinite(v)) return undefined
+      if (base == null) return +Number(v).toFixed(2)
+      const denom = 100 + base
+      // 기준일 수익률이 -100%(전액 손실)면 나눌 수 없다. 그대로 둔다.
+      if (Math.abs(denom) < 1e-9) return +Number(v).toFixed(2)
+      return +(((100 + Number(v)) / denom - 1) * 100).toFixed(2)
+    }
+
     return sliced.map((d: any) => {
       const nc = nasdaqMap.get(d.date) as number | undefined
       const nv = firstNqPrice != null && nc != null && isFinite(nc)
         ? +((nc / firstNqPrice - 1) * 100).toFixed(2) : undefined
       return {
         date:         d.date,
-        port:         d.port ?? 0,
-        sp:           d.sp ?? undefined,
+        port:         rebase(d.port, basePort) ?? 0,
+        sp:           rebase(d.sp, baseSp),
         nasdaq:       nv,
         total_equity: d.total_equity ?? undefined,
         cash_flow:    d.cash_flow ?? undefined,
@@ -461,7 +517,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
         <div className="flex items-center justify-between mb-2">
           <span className="text-[#cbd5e1] text-[11px]">{fmtCurveDate(label)}</span>
           {d.total_equity != null && d.total_equity > 0 && (
-            <span className="font-mono text-[11px] text-[#e2e8f0] font-bold">${fn(d.total_equity, 0).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}</span>
+            <span className="font-mono text-[11px] text-[#e2e8f0] font-bold">{formatMoney(d.total_equity)}</span>
           )}
         </div>
         <div className="flex items-center justify-between gap-3 mb-0.5">
@@ -506,7 +562,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
           <div className="mt-2 pt-2 border-t border-[#1e2d40]">
             {d.holdings.map((h, i) => (
               <div key={i} className="flex items-center justify-between gap-3 mt-0.5">
-                <span className="font-mono text-[11px] text-[#cbd5e1]">{h.ticker}</span>
+                <span className="text-[11px] text-[#cbd5e1] truncate">{displayTicker(h.ticker, names)}</span>
                 <span className="font-mono text-[11px]" style={{ color: h.return_pct >= 0 ? '#10b981' : '#ef4444' }}>
                   {fp(h.return_pct, 2)}
                 </span>
@@ -523,10 +579,10 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
                 <div key={i} className="flex items-center justify-between gap-3 mt-0.5">
                   <span className="flex items-center gap-1" style={{ color }}>
                     <span style={{ fontSize: 9 }}>{isBuy ? '▲' : '▼'}</span>
-                    <span className="font-bold text-[11px]">{t.ticker}</span>
+                    <span className="font-bold text-[11px]">{displayTicker(t.ticker, names)}</span>
                     <span className="text-[10px] opacity-70">{isBuy ? '매수' : '매도'}</span>
                   </span>
-                  <span className="text-[#cbd5e1] text-[10px] font-mono">{t.q}주 @${t.price}</span>
+                  <span className="text-[#cbd5e1] text-[10px] font-mono">{t.q}주 @{formatPrice(t.price)}</span>
                 </div>
               )
             })}
@@ -749,8 +805,8 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
               x1={selLeft} x2={selRight}
               y1={pixelYToData(dragBounds.startY)}
               y2={pixelYToData(dragBounds.endY)}
-              fill="#3b82f6" fillOpacity={0.12}
-              stroke="#3b82f6" strokeOpacity={0.5} strokeWidth={1}
+              fill="#10b981" fillOpacity={0.12}
+              stroke="#10b981" strokeOpacity={0.5} strokeWidth={1}
             />
           )}
         </AreaChart>
@@ -764,6 +820,18 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
 
 // ── Holdings + History Panel ──────────────────────────────────────────────────
 function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawHoldings: Record<string, any>; onTickerClick?: (ticker: string) => void }) {
+  const names = useTickerNames()
+  // 통화 표기는 시장을 따른다. 한국 화면에 (USD) 라고 적혀 있으면
+  // 사용자가 원화를 달러로 잘못 입력한다.
+  const tradeMarket = useMarket()
+
+  // 종목을 무엇으로 부를지는 시장마다 다르다.
+  // 미국은 티커(AAPL)가 이미 이름 노릇을 하므로 그대로 쓴다. 한국은 코드
+  // (034020.KS)만 봐서는 어느 회사인지 알 수 없어 이름을 앞세우고 코드는 밑에 둔다.
+  const showName = (h: { ticker: string; name?: string | null }) =>
+    tradeMarket === 'KR' && !!h.name && h.name !== h.ticker
+
+  const curLabel = tradeMarket === 'KR' ? 'KRW' : 'USD'
   const qc = useQueryClient()
   const { isAuthed } = useAuth()
   const [view, setView] = useState<'holdings' | 'history'>('holdings')
@@ -865,7 +933,7 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
       // 사용자는 요청한 금액이 빠진 줄 알고 장부가 어긋난다.
       if (cashType === 'withdraw' && cashAmt > cashBalance + 1e-6) {
         return Promise.reject(new Error(
-          `현금이 부족합니다.\n출금 요청 $${cashAmt.toLocaleString()} · 보유 $${cashBalance.toLocaleString()}`))
+          `현금이 부족합니다.\n출금 요청 ${formatPrice(cashAmt)} · 보유 ${formatPrice(cashBalance)}`))
       }
       const newQ = cashType === 'deposit' ? cashBalance + cashAmt : cashBalance - cashAmt
       return updateHolding('CASH', { q: newQ, avg: 1, date: cashDate })
@@ -1077,12 +1145,14 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
             onChange={e => handleTickerChange(e.target.value)}
             onBlur={handleTickerBlur}
             onKeyDown={handleTickerKeyDown}
-            placeholder="티커"
+            placeholder={MARKETS[tradeMarket].tickerExample}
             autoComplete="off"
-            className="w-32 bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#e2e8f0] rounded px-2 py-1.5 placeholder-[#334155] focus:outline-none focus:border-[#3b82f6]"
+            className="w-32 bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#e2e8f0] rounded px-2 py-1.5 placeholder-[#334155] focus:outline-none focus:border-[#10b981]"
           />
+          {/* 목록은 입력칸 **아래**로 편다. 위(bottom-full)에 두면 방금 친 글자를
+              가려서, 무엇을 입력했는지 보면서 고를 수가 없다. */}
           {showSug && suggestions.length > 0 && (
-            <div className="absolute bottom-full mb-1 left-0 z-50 bg-[#0b1220] border border-[#1e2d40] rounded shadow-xl min-w-[180px]">
+            <div className="absolute top-full mt-1 left-0 z-50 max-h-64 overflow-y-auto bg-[#0b1220] border border-[#1e2d40] rounded shadow-xl min-w-[180px]">
               {suggestions.map((s, idx) => (
                 <button key={s.ticker}
                   onMouseDown={e => { e.preventDefault(); selectSuggestion(s.ticker) }}
@@ -1090,8 +1160,18 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
                     'flex items-center gap-2 w-full text-left px-3 py-2 transition-colors',
                     idx === sugIdx ? 'bg-[#1e2d40] text-[#e2e8f0]' : 'text-[#cbd5e1] hover:bg-[#0f1e30] hover:text-[#e2e8f0]'
                   )}>
-                  <span className="font-mono font-bold text-[13px] flex-shrink-0">{s.ticker}</span>
-                  <span className="text-[11px] text-[#94a3b8] truncate">{s.name}</span>
+                  {/* 보유 목록과 같은 규칙 — 한국은 이름이 먼저, 미국은 티커가 먼저. */}
+                  {tradeMarket === 'KR' && s.name ? (
+                    <>
+                      <span className="font-bold text-[13px] flex-shrink-0">{s.name}</span>
+                      <span className="font-mono text-[11px] text-[#94a3b8] truncate">{s.ticker}</span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="font-mono font-bold text-[13px] flex-shrink-0">{s.ticker}</span>
+                      <span className="text-[11px] text-[#94a3b8] truncate">{s.name}</span>
+                    </>
+                  )}
                 </button>
               ))}
             </div>
@@ -1100,7 +1180,7 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
 
         {/* BUY / SELL */}
         <select value={form.type} onChange={e => setForm(f => ({ ...f, type: e.target.value }))}
-          className="bg-[#0b1220] border border-[#1e2d40] text-sm text-[#cbd5e1] rounded px-2 py-1.5 focus:outline-none focus:border-[#3b82f6]">
+          className="bg-[#0b1220] border border-[#1e2d40] text-sm text-[#cbd5e1] rounded px-2 py-1.5 focus:outline-none focus:border-[#10b981]">
           <option value="BUY">매수</option>
           <option value="SELL">매도</option>
         </select>
@@ -1110,7 +1190,7 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
           onChange={e => setForm(f => ({ ...f, q: +e.target.value }))}
           onWheel={handleQtyWheel}
           placeholder="수량" min={0} step={1}
-          className="w-14 bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#e2e8f0] rounded px-2 py-1.5 placeholder-[#334155] focus:outline-none focus:border-[#3b82f6]"
+          className="w-14 bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#e2e8f0] rounded px-2 py-1.5 placeholder-[#334155] focus:outline-none focus:border-[#10b981]"
         />
 
         {/* 현재가 — 참고용 표시 전용. 옆 입력칸들과 같은 디자인으로 맞춘다.
@@ -1121,22 +1201,21 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
             className="flex items-center gap-1.5 px-2 py-1.5 text-sm font-mono rounded border border-[#1e2d40] bg-[#0b1220] flex-shrink-0"
           >
             <span className="text-[10px] text-[#64748b]">현재가</span>
-            <span className="text-[#e2e8f0]">{priceLoading ? '…' : currentPrice != null ? `$${currentPrice.toFixed(2)}` : '—'}</span>
+            <span className="text-[#e2e8f0]">{priceLoading ? '…' : formatPrice(currentPrice)}</span>
           </div>
         )}
 
         {/* Price — 사용자가 직접 입력하는 매수/매도 단가. 자동으로 채우지 않는다. */}
-        <input type="number" value={form.price || ''}
-          onChange={e => setForm(f => ({ ...f, price: +e.target.value }))}
+        <input {...moneyInputProps(form.price || '', price => setForm(f => ({ ...f, price })), tradeMarket)}
           placeholder={form.type === 'SELL' ? '매도가' : '매수가'}
-          className="w-32 bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#e2e8f0] rounded px-2 py-1.5 placeholder-[#334155] focus:outline-none focus:border-[#3b82f6]"
+          className="w-32 bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#e2e8f0] rounded px-2 py-1.5 placeholder-[#334155] focus:outline-none focus:border-[#10b981]"
         />
 
         {/* Date — 매수/매도 날짜 */}
         <input type="date" value={form.date}
           onChange={e => setForm(f => ({ ...f, date: e.target.value }))}
           max={todayStr}
-          className="bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#cbd5e1] rounded px-2 py-1.5 focus:outline-none focus:border-[#3b82f6] [color-scheme:dark]"
+          className="bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#cbd5e1] rounded px-2 py-1.5 focus:outline-none focus:border-[#10b981] [color-scheme:dark]"
         />
 
         {/* Submit — onPointerDown으로 ticker blur보다 먼저 발화 */}
@@ -1147,7 +1226,7 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
             tradeMut.mutate(form)
           }}
           disabled={!form.ticker || !form.q || !form.price || tradeMut.isPending}
-          className="bg-[#1d4ed8] hover:bg-[#2563eb] disabled:opacity-40 text-white rounded px-3 py-1.5 transition-colors text-sm font-bold">
+          className="bg-[#10b981] hover:bg-[#059669] disabled:opacity-40 text-white rounded px-3 py-1.5 transition-colors text-sm font-bold">
           <Plus className="w-4 h-4" />
         </button>
       </div>
@@ -1160,12 +1239,12 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
       <div className="flex items-center border-b border-[#1e2d40] flex-shrink-0 bg-[#070d18]">
         <button onClick={() => setView('holdings')}
           className={cn('text-[11px] font-bold tracking-[3px] uppercase px-3 py-2.5 transition-colors',
-            view === 'holdings' ? 'text-[#e2e8f0] border-b-2 border-[#3b82f6]' : 'text-[#94a3b8] hover:text-[#94a3b8]')}>
+            view === 'holdings' ? 'text-[#e2e8f0] border-b-2 border-[#10b981]' : 'text-[#94a3b8] hover:text-[#94a3b8]')}>
           보유 종목
         </button>
         <button onClick={() => setView('history')}
           className={cn('flex items-center gap-1.5 text-[11px] font-bold tracking-[3px] uppercase px-3 py-2.5 transition-colors',
-            view === 'history' ? 'text-[#e2e8f0] border-b-2 border-[#3b82f6]' : 'text-[#94a3b8] hover:text-[#94a3b8]')}>
+            view === 'history' ? 'text-[#e2e8f0] border-b-2 border-[#10b981]' : 'text-[#94a3b8] hover:text-[#94a3b8]')}>
           <History className="w-3 h-3" />거래 내역
         </button>
 
@@ -1173,7 +1252,7 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
         {isAuthed && (
           <button
             onClick={() => setShowTradeModal(true)}
-            className="md:hidden ml-auto mr-2 flex items-center gap-1 rounded border border-[#3b82f6]/40 bg-[#3b82f6]/10 px-2 py-1 text-[10px] font-bold text-[#3b82f6]">
+            className="md:hidden ml-auto mr-2 flex items-center gap-1 rounded border border-[#10b981]/40 bg-[#10b981]/10 px-2 py-1 text-[10px] font-bold text-[#10b981]">
             <Plus className="w-2.5 h-2.5" />추가 매수/매도
           </button>
         )}
@@ -1183,7 +1262,7 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
           <button
             onClick={() => setWizard('new')}
             title="기존 포트폴리오를 지우고 새로 등록합니다"
-            className="ml-auto mr-2 flex items-center gap-1 rounded border border-[#1e2d40] px-2 py-1 text-[10px] text-[#4a5568] transition hover:border-[#3b82f6]/40 hover:text-[#94a3b8]">
+            className="ml-auto mr-2 flex items-center gap-1 rounded border border-[#1e2d40] px-2 py-1 text-[10px] text-[#4a5568] transition hover:border-[#10b981]/40 hover:text-[#94a3b8]">
             <Plus className="w-2.5 h-2.5" />포트폴리오 새로 등록
           </button>
         )}
@@ -1245,7 +1324,7 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
           </div>
           <button
             onClick={() => setWizard('first')}
-            className="mt-1 flex items-center gap-1.5 rounded-lg bg-[#3b82f6] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#2f6fe0]">
+            className="mt-1 flex items-center gap-1.5 rounded-lg bg-[#10b981] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#059669]">
             <Plus className="w-4 h-4" />포트폴리오 등록하기
           </button>
         </div>
@@ -1270,10 +1349,9 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
                   <tr className="border-b border-[#0f172a] hover:bg-[#0a1525] group transition-colors">
                     {editTicker === h.ticker ? (
                       <>
-                        <td className="py-2 px-2.5 font-mono font-bold text-sm text-[#e2e8f0]">{h.ticker}</td>
+                        <td className="py-2 px-2.5"><TickerLabel ticker={h.ticker} name={h.name} primaryClass="text-sm font-bold" /></td>
                         <td className="py-2 px-2.5">
-                          <input type="number" value={editVals.avg}
-                            onChange={e => setEditVals(v => ({ ...v, avg: +e.target.value }))}
+                          <input {...moneyInputProps(editVals.avg, avg => setEditVals(v => ({ ...v, avg })), tradeMarket)}
                             className="w-16 bg-[#1e2d40] border border-[#334155] text-sm text-[#e2e8f0] rounded px-2 py-1" />
                         </td>
                         <td className="py-2 px-2.5">
@@ -1318,15 +1396,25 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
                       </>
                     ) : (
                       <>
-                        <td className="py-2 px-2.5 font-mono font-bold text-[15px] text-[#e2e8f0]">
+                        <td className="py-2 px-2.5">
+                          {/* 한국 종목은 코드(034020.KS)만으로 회사를 알 수 없다.
+                              이름을 앞세우고 코드는 아래에 작게 둔다. 미국은
+                              티커가 곧 이름 역할을 하므로 이름을 따로 붙이지 않는다. */}
                           <span
                             onClick={() => onTickerClick?.(h.ticker)}
-                            className={onTickerClick ? 'cursor-pointer hover:text-[#3b82f6] transition-colors' : ''}
-                          >{h.ticker}</span>
+                            className={cn('block', onTickerClick ? 'cursor-pointer hover:text-[#10b981] transition-colors' : '')}
+                          >
+                            <span className="font-bold text-[14px] text-[#e2e8f0]">
+                              {showName(h) ? h.name : h.ticker}
+                            </span>
+                            {showName(h) && (
+                              <span className="block font-mono text-[10px] text-[#64748b] leading-tight">{h.ticker}</span>
+                            )}
+                          </span>
                         </td>
-                        <td className="py-2 px-2.5 font-mono text-[12px] text-[#cbd5e1]">${fn(h.avg_cost, 2)}</td>
+                        <td className="py-2 px-2.5 font-mono text-[12px] text-[#cbd5e1]">{formatPrice(h.avg_cost)}</td>
                         <td className="py-2 px-2.5 font-mono text-[12px] text-[#cbd5e1]">{fv(h.qty)}</td>
-                        <td className="py-2 px-2.5 font-mono text-[12px] text-[#cbd5e1]">${fn(h.current_price, 2)}</td>
+                        <td className="py-2 px-2.5 font-mono text-[12px] text-[#cbd5e1]">{formatPrice(h.current_price)}</td>
                         <td className="py-2 px-2.5 font-mono text-[13px] font-bold" style={{ color: chgColor(h.chg_pct) }}
                           title={h.as_of ? `${h.as_of} 기준${h.is_live ? ' (실시간)' : ' 종가'}` : '데이터 부족'}>
                           {fpNullable(h.chg_pct, 2)}
@@ -1358,13 +1446,13 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
                                 setEditVals(newVals)
                                 editValsRef.current = newVals
                               }}
-                              className="text-[#94a3b8] hover:text-[#3b82f6] transition-colors">
+                              className="text-[#94a3b8] hover:text-[#10b981] transition-colors">
                               <Edit3 className="w-3.5 h-3.5" />
                             </button>
                             <button type="button"
                               onClick={() => {
                                 setConfirmDlg({
-                                  title: `${h.ticker} 보유를 삭제할까요?`,
+                                  title: `${showName(h) ? h.name : h.ticker} 보유를 삭제할까요?`,
                                   message: '해당 종목의 거래 이력도 함께 삭제되며, 사용된 현금은 되돌아옵니다.',
                                   onOk: () => deleteMut.mutate(h.ticker),
                                 })
@@ -1382,18 +1470,17 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
                     <tr className="hidden md:table-row border-b border-[#f59e0b]/20 bg-[#0a0e18]">
                       <td colSpan={9} className="px-3 py-2">
                         <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-[#f59e0b] font-mono font-bold text-[12px] flex-shrink-0">매도 {h.ticker}</span>
+                          <span className="text-[#f59e0b] font-bold text-[12px] flex-shrink-0">매도 {showName(h) ? h.name : h.ticker}</span>
                           {/* 현재가 — 참고용 표시 전용. 매도가 입력에 자동으로 들어가지 않는다. */}
                           <span className="text-[11px] text-[#64748b] font-mono flex-shrink-0"
                             title="현재 시장가 — 참고용입니다. 자동으로 입력되지 않습니다.">
-                            현재가 {sellPriceLoading ? '…' : sellCurrentPrice != null ? `$${sellCurrentPrice.toFixed(2)}` : '—'}
+                            현재가 {sellPriceLoading ? '…' : formatPrice(sellCurrentPrice)}
                           </span>
                           <input type="number" value={sellVals.q || ''}
                             onChange={e => setSellVals(v => ({ ...v, q: +e.target.value }))}
                             placeholder="수량" min={0.001} step={0.001}
                             className="w-16 bg-[#1e2d40] border border-[#334155] text-sm text-[#e2e8f0] rounded px-2 py-1" />
-                          <input type="number" value={sellVals.price || ''}
-                            onChange={e => setSellVals(v => ({ ...v, price: +e.target.value }))}
+                          <input {...moneyInputProps(sellVals.price || '', price => setSellVals(v => ({ ...v, price })), tradeMarket)}
                             placeholder="매도가"
                             className="w-28 bg-[#1e2d40] border border-[#334155] text-sm text-[#e2e8f0] rounded px-2 py-1" />
                           <input type="date" value={sellVals.date}
@@ -1472,15 +1559,14 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
             {/* 현재가 — 참고용 표시 전용. 매도가 입력에 자동으로 들어가지 않는다. */}
             <div className="text-[11px] text-[#64748b] font-mono"
               title="현재 시장가 — 참고용입니다. 자동으로 입력되지 않습니다.">
-              현재가 {sellPriceLoading ? '…' : sellCurrentPrice != null ? `$${sellCurrentPrice.toFixed(2)}` : '—'}
+              현재가 {sellPriceLoading ? '…' : formatPrice(sellCurrentPrice)}
             </div>
             <div className="flex items-center gap-2 flex-wrap">
               <input type="number" value={sellVals.q || ''}
                 onChange={e => setSellVals(v => ({ ...v, q: +e.target.value }))}
                 placeholder="수량" min={0.001} step={0.001}
                 className="w-20 bg-[#1e2d40] border border-[#334155] text-sm text-[#e2e8f0] rounded px-2 py-1.5" />
-              <input type="number" value={sellVals.price || ''}
-                onChange={e => setSellVals(v => ({ ...v, price: +e.target.value }))}
+              <input {...moneyInputProps(sellVals.price || '', price => setSellVals(v => ({ ...v, price })), tradeMarket)}
                 placeholder="매도가"
                 className="w-28 bg-[#1e2d40] border border-[#334155] text-sm text-[#e2e8f0] rounded px-2 py-1.5" />
               <input type="date" value={sellVals.date}
@@ -1514,11 +1600,11 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
             <span className="text-[11px] text-[#94a3b8] font-bold tracking-wider uppercase">현금 잔고</span>
             <div className="flex items-center gap-2">
               <span className="font-mono text-[13px] text-[#cbd5e1]">
-                {hasCash ? `$${cashBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—'}
+                {hasCash ? formatPrice(cashBalance) : '—'}
               </span>
               <button
                 onClick={() => { setCashOpen(true); setCashType('deposit'); setCashAmt(0) }}
-                className="text-[11px] text-[#3b82f6] hover:text-[#60a5fa] border border-[#1e3a5f] rounded px-2 py-0.5 transition-colors">
+                className="text-[11px] text-[#10b981] hover:text-[#34d399] border border-[#1e3a5f] rounded px-2 py-0.5 transition-colors">
                 {hasCash ? '입금/출금' : '+ 초기 투자금 설정'}
               </button>
             </div>
@@ -1534,12 +1620,9 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
               <option value="withdraw">출금</option>
             </select>
             <input
-              type="number"
-              value={cashAmt || ''}
-              onChange={e => setCashAmt(+e.target.value)}
-              placeholder="금액 (USD)"
-              min={0}
-              className="w-32 bg-[#0b1220] border border-[#1e2d40] text-[12px] font-mono text-[#e2e8f0] rounded px-2 py-1 focus:outline-none focus:border-[#3b82f6]"
+              {...moneyInputProps(cashAmt || '', setCashAmt, tradeMarket)}
+              placeholder={`금액 (${curLabel})`}
+              className="w-32 bg-[#0b1220] border border-[#1e2d40] text-[12px] font-mono text-[#e2e8f0] rounded px-2 py-1 focus:outline-none focus:border-[#10b981]"
             />
             <input
               type="date"
@@ -1550,7 +1633,7 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
             <button
               onClick={() => { if (cashAmt > 0 && !cashMut.isPending) cashMut.mutate() }}
               disabled={!cashAmt || cashMut.isPending}
-              className="bg-[#1d4ed8]/80 hover:bg-[#2563eb] disabled:opacity-40 text-white rounded px-3 py-1 text-[12px] font-bold transition-colors">
+              className="bg-[#10b981]/80 hover:bg-[#059669] disabled:opacity-40 text-white rounded px-3 py-1 text-[12px] font-bold transition-colors">
               {cashMut.isPending ? '…' : '확인'}
             </button>
             <button onClick={() => setCashOpen(false)} className="text-[#94a3b8] hover:text-[#cbd5e1] text-[12px]">취소</button>
@@ -1583,7 +1666,7 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
                           onChange={e => setEditTradeVals(v => ({ ...v, date: e.target.value }))}
                           className="w-28 bg-[#1e2d40] border border-[#334155] text-[12px] text-[#e2e8f0] rounded px-1 py-1" />
                       </td>
-                      <td className="py-1.5 px-2 font-mono font-bold text-sm text-[#e2e8f0]">{t.ticker}</td>
+                      <td className="py-1.5 px-2"><TickerLabel ticker={t.ticker} name={names[t.ticker]} primaryClass="text-sm font-bold" /></td>
                       <td className="py-1.5 px-2 text-[12px]"
                         style={{ color: t.type === 'ADD' || t.type === 'BUY' ? '#10b981' : '#ef4444' }}>
                         {t.type}
@@ -1594,8 +1677,7 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
                           className="w-14 bg-[#1e2d40] border border-[#334155] text-[12px] text-[#e2e8f0] rounded px-1 py-1" />
                       </td>
                       <td className="py-1.5 px-2">
-                        <input type="number" value={editTradeVals.price}
-                          onChange={e => setEditTradeVals(v => ({ ...v, price: +e.target.value }))}
+                        <input {...moneyInputProps(editTradeVals.price, price => setEditTradeVals(v => ({ ...v, price })), tradeMarket)}
                           className="w-18 bg-[#1e2d40] border border-[#334155] text-[12px] text-[#e2e8f0] rounded px-1 py-1" />
                       </td>
                       <td className="py-1.5 px-2">
@@ -1623,20 +1705,20 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
                   ) : (
                     <>
                       <td className="py-2 px-2 font-mono text-[11px] text-[#94a3b8]">{t.date}</td>
-                      <td className="py-2 px-2 font-mono font-bold text-[13px] text-[#e2e8f0]">{t.ticker}</td>
+                      <td className="py-2 px-2"><TickerLabel ticker={t.ticker} name={names[t.ticker]} primaryClass="text-[13px] font-bold" stacked /></td>
                       <td className="py-2 px-2 text-[11px] font-bold"
                         style={{ color: t.type === 'ADD' || t.type === 'BUY' ? '#10b981' : '#ef4444' }}>
                         {t.type}
                       </td>
                       <td className="py-2 px-2 font-mono text-[12px] text-[#cbd5e1]">{t.q}</td>
-                      <td className="py-2 px-2 font-mono text-[12px] text-[#cbd5e1]">{t.price ? `$${t.price}` : '—'}</td>
+                      <td className="py-2 px-2 font-mono text-[12px] text-[#cbd5e1]">{formatPrice(t.price)}</td>
                       <td className="py-2 px-2 text-[11px] text-[#94a3b8] max-w-[80px] truncate">{t.memo || ''}</td>
                       <td className="py-2 px-2 opacity-0 group-hover:opacity-100 transition-opacity">
                         <div className="flex gap-1">
                           <button onClick={() => {
                             setEditTradeId(t.id)
                             setEditTradeVals({ date: t.date, q: t.q, price: t.price || 0, memo: t.memo || '' })
-                          }} className="text-[#94a3b8] hover:text-[#3b82f6]"><Edit3 className="w-3 h-3" /></button>
+                          }} className="text-[#94a3b8] hover:text-[#10b981]"><Edit3 className="w-3 h-3" /></button>
                           <button
                             onClick={() => setConfirmDlg({
                               title: '이 거래를 삭제할까요?',
@@ -1806,15 +1888,24 @@ function SectorPerfPanel({ sectorTableQ }: { sectorTableQ: any }) {
 
   const pDef = PERF_PERIODS.find(p => p.key === period)!
   const rows: any[] = (sectorTableQ.data || [])
+  // 값이 없는 기간은 0% 로 바꾸지 않는다. 0으로 채우면 '변동 없음'인 섹터와
+  // '아직 계산할 수 없는' 섹터가 화면에서 구분되지 않고, 정렬에도 섞여 든다.
   const sorted = [...rows]
-    .map(r => ({
-      name: SECTOR_LABEL_KO[r.sector] ?? r.sector,
-      etf:  r.etf as string,
-      val:  (r[pDef.field] ?? 0) as number,
-    }))
-    .sort((a, b) => b.val - a.val)
+    .map(r => {
+      const raw = r[pDef.field]
+      return {
+        name: SECTOR_LABEL_KO[r.sector] ?? r.sector,
+        etf:  r.etf as string,
+        val:  (raw == null || !Number.isFinite(raw) ? null : raw) as number | null,
+      }
+    })
+    .sort((a, b) => {
+      if (a.val == null) return 1        // 값 없는 항목은 항상 아래로
+      if (b.val == null) return -1
+      return b.val - a.val
+    })
 
-  const maxAbs = Math.max(...sorted.map(s => Math.abs(s.val)), 0.01)
+  const maxAbs = Math.max(...sorted.map(s => Math.abs(s.val ?? 0)), 0.01)
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -1845,8 +1936,9 @@ function SectorPerfPanel({ sectorTableQ }: { sectorTableQ: any }) {
         ) : (
           <div className="flex flex-col h-full justify-around">
             {sorted.map(s => {
-              const pos = s.val >= 0
-              const barW = (Math.abs(s.val) / maxAbs) * 100
+              const known = s.val != null
+              const pos = (s.val ?? 0) >= 0
+              const barW = known ? (Math.abs(s.val as number) / maxAbs) * 100 : 0
               return (
                 <div key={s.etf} className="flex items-center gap-2">
                   <span className="text-[10px] text-[#94a3b8] w-[60px] text-right flex-shrink-0 font-medium truncate">
@@ -1864,11 +1956,11 @@ function SectorPerfPanel({ sectorTableQ }: { sectorTableQ: any }) {
                   </div>
                   <span className={cn(
                     'text-[10px] font-mono font-bold w-[50px] text-right flex-shrink-0 tabular-nums whitespace-nowrap',
-                    pos ? 'text-[#10b981]' : 'text-[#ef4444]'
+                    !known ? 'text-[#64748b]' : pos ? 'text-[#10b981]' : 'text-[#ef4444]'
                   )}>
-                    {pos ? '+' : ''}{s.val.toFixed(1)}%
+                    {known ? `${pos ? '+' : ''}${(s.val as number).toFixed(1)}%` : '—'}
                   </span>
-                  <span className="text-[9px] text-[#1e3a5f] w-[34px] flex-shrink-0 font-mono whitespace-nowrap">{s.etf}</span>
+                  <span className="text-[9px] text-[#1e3a5f] w-[34px] flex-shrink-0 truncate" title={s.etf}>{sectorEtfLabel(s.etf)}</span>
                 </div>
               )
             })}
@@ -1886,15 +1978,23 @@ const SK_LOGS     = 'pfp_brief_logs'
 const SK_PENDING  = 'pfp_brief_pending'
 const SK_START    = 'pfp_brief_start'
 
+// 이 시각을 넘기면 '진행 중' 표시를 스스로 접는다.
+//
+// 생성은 단일 HTTP 요청이라 탭을 새로고침하거나 네트워크가 끊기면 응답이
+// 영영 오지 않는다. 그때 SK_PENDING 이 남아 있으면 화면이 95%(진행률 상한)에
+// 붙박이로 멈추고, 취소할 방법이 없어 세션 저장소를 비우기 전에는 복구되지
+// 않는다. 실측 평균 48초라 3분이면 실패로 봐도 안전하다.
+const BRIEF_TIMEOUT_MS = 180_000
+
 // ── Daily Brief (right panel) ─────────────────────────────────────────────────
 function DailyBriefPanel() {
   const { isAuthed } = useAuth()
-  const [file, setFile]         = useState<string | null>(() => sessionStorage.getItem(SK_FILE))
-  const [content, setContent]   = useState<string | null>(() => sessionStorage.getItem(SK_CONTENT))
+  const [file, setFile]         = useState<string | null>(() => marketSession.get(SK_FILE))
+  const [content, setContent]   = useState<string | null>(() => marketSession.get(SK_CONTENT))
   const [logs, setLogs]         = useState<string[]>(() => {
-    try { return JSON.parse(sessionStorage.getItem(SK_LOGS) || '[]') } catch { return [] }
+    try { return JSON.parse(marketSession.get(SK_LOGS) || '[]') } catch { return [] }
   })
-  const [wasPending,  setWasPending]  = useState(() => sessionStorage.getItem(SK_PENDING) === '1')
+  const [wasPending,  setWasPending]  = useState(() => marketSession.get(SK_PENDING) === '1')
   const [generating,  setGenerating]  = useState(false)
   const [showHist,    setShowHist]    = useState(false)
   const [pdfBusy,     setPdfBusy]     = useState(false)
@@ -1916,7 +2016,7 @@ function DailyBriefPanel() {
     mutationFn: getDailyBriefFile,
     onSuccess: d => {
       setContent(d.content)
-      sessionStorage.setItem(SK_CONTENT, d.content)
+      marketSession.set(SK_CONTENT, d.content)
     },
   })
   const genMut = useMutation({
@@ -1928,10 +2028,10 @@ function DailyBriefPanel() {
       setWasPending(false)
       setProgress(0)
       setElapsedMs(0)
-      sessionStorage.removeItem(SK_CONTENT)
-      sessionStorage.setItem(SK_PENDING, '1')
-      sessionStorage.setItem(SK_START, String(Date.now()))
-      sessionStorage.setItem(SK_LOGS, JSON.stringify([]))
+      marketSession.remove(SK_CONTENT)
+      marketSession.set(SK_PENDING, '1')
+      marketSession.set(SK_START, String(Date.now()))
+      marketSession.set(SK_LOGS, JSON.stringify([]))
     },
     onSuccess: d => {
       const newLogs = d.logs?.length ? d.logs : ['완료']
@@ -1940,10 +2040,10 @@ function DailyBriefPanel() {
       setContent(d.report)
       setLogs(newLogs)
       setProgress(100)
-      sessionStorage.setItem(SK_CONTENT, d.report)
-      sessionStorage.setItem(SK_LOGS, JSON.stringify(newLogs))
-      sessionStorage.removeItem(SK_PENDING)
-      sessionStorage.removeItem(SK_START)
+      marketSession.set(SK_CONTENT, d.report)
+      marketSession.set(SK_LOGS, JSON.stringify(newLogs))
+      marketSession.remove(SK_PENDING)
+      marketSession.remove(SK_START)
       histQ.refetch()
     },
     onError: (e: any) => {
@@ -1952,11 +2052,11 @@ function DailyBriefPanel() {
       setProgress(0)
       setLogs(prev => {
         const next = [...prev, `오류: ${e.message}`]
-        sessionStorage.setItem(SK_LOGS, JSON.stringify(next))
+        marketSession.set(SK_LOGS, JSON.stringify(next))
         return next
       })
-      sessionStorage.removeItem(SK_PENDING)
-      sessionStorage.removeItem(SK_START)
+      marketSession.remove(SK_PENDING)
+      marketSession.remove(SK_START)
     },
   })
 
@@ -1975,9 +2075,9 @@ function DailyBriefPanel() {
       wrap.style.cssText = 'position:fixed;top:0;left:0;width:800px;background:#fff;z-index:-9999;pointer-events:none'
       wrap.innerHTML = `
         <div style="background:#0f2044;padding:24px 40px 20px;">
-          <div style="font-size:9px;letter-spacing:4px;color:#93c5fd;font-weight:700;margin-bottom:6px">PERSONAL FINANCIAL PLATFORM</div>
+          <div style="font-size:9px;letter-spacing:4px;color:#93c5fd;font-weight:700;margin-bottom:6px">ZOOPZOOP</div>
           <div style="font-size:22px;font-weight:900;color:#ffffff;line-height:1.2">${titleStr}</div>
-          <div style="font-size:11px;color:#bfdbfe;margin-top:6px">${dateStr} · PFP Alpha Terminal</div>
+          <div style="font-size:11px;color:#bfdbfe;margin-top:6px">${dateStr} · ZOOPZOOP Alpha Terminal</div>
         </div>
         <div id="pfp-pdf-body" style="padding:32px 40px 48px;color:#111827;font-family:'Helvetica Neue',Arial,sans-serif;font-size:13.5px;line-height:1.75;"></div>
       `
@@ -2040,12 +2140,34 @@ function DailyBriefPanel() {
 
   const isActivelyGenerating = generating || (wasPending && !content)
 
+  /** 진행 표시를 접고 '생성 중' 상태를 완전히 푼다. */
+  const clearPending = (note?: string) => {
+    setGenerating(false)
+    setWasPending(false)
+    setProgress(0)
+    setElapsedMs(0)
+    marketSession.remove(SK_PENDING)
+    marketSession.remove(SK_START)
+    if (note) {
+      setLogs(prev => {
+        const next = [...prev, note]
+        marketSession.set(SK_LOGS, JSON.stringify(next))
+        return next
+      })
+    }
+  }
+
   useEffect(() => {
     if (!isActivelyGenerating) return
-    const startMs = parseInt(sessionStorage.getItem(SK_START) || String(Date.now()), 10)
+    const startMs = parseInt(marketSession.get(SK_START) || String(Date.now()), 10)
     const MAX_MS  = 55_000   // 실측 평균 생성 시간 ~48s
     const tick = () => {
       const ms = Date.now() - startMs
+      // 상한을 넘겼으면 응답이 오지 않은 것이다. 95% 에 붙박이로 두지 않는다.
+      if (ms > BRIEF_TIMEOUT_MS) {
+        clearPending('응답이 오지 않아 중단했습니다. 다시 시도해 주세요.')
+        return
+      }
       setElapsedMs(ms)
       setProgress(Math.min(95, (ms / MAX_MS) * 100))
     }
@@ -2082,14 +2204,23 @@ function DailyBriefPanel() {
           <Play className="w-3.5 h-3.5" />
           {isActivelyGenerating ? '생성 중…' : '브리핑 생성'}
         </button>
+        {/* 생성 중에는 언제든 접을 수 있어야 한다. 진행 표시가 응답을 기다리는
+            동안 화면이 잠기면, 요청이 유실됐을 때 사용자가 할 수 있는 일이 없다. */}
+        {isActivelyGenerating && (
+          <button onClick={() => clearPending('사용자가 중단했습니다.')}
+            title="진행 표시 중단"
+            className="px-3 py-2 rounded border border-[#ef4444]/40 bg-[#ef4444]/10 text-[#ef4444] text-[11px] font-bold hover:bg-[#ef4444]/20 transition-colors">
+            중단
+          </button>
+        )}
         <button onClick={downloadPDF} disabled={!shownContent || pdfBusy} title="PDF로 다운로드"
           className={cn('px-3 py-2 rounded border text-[11px] font-bold transition-colors flex items-center gap-1.5',
             shownContent && !pdfBusy
-              ? 'border-[#3b82f6]/50 bg-[#3b82f6]/10 text-[#3b82f6] hover:bg-[#3b82f6]/20'
+              ? 'border-[#10b981]/50 bg-[#10b981]/10 text-[#10b981] hover:bg-[#10b981]/20'
               : 'border-[#1e2d40] text-[#94a3b8] cursor-not-allowed opacity-40'
           )}>
           {pdfBusy
-            ? <span className="w-3.5 h-3.5 border-2 border-[#3b82f6] border-t-transparent rounded-full animate-spin" />
+            ? <span className="w-3.5 h-3.5 border-2 border-[#10b981] border-t-transparent rounded-full animate-spin" />
             : <Download className="w-3.5 h-3.5" />}
           <span>PDF</span>
         </button>
@@ -2106,9 +2237,9 @@ function DailyBriefPanel() {
           {(histQ.data || []).map(f => (
             <button key={f.name}
               onClick={() => {
-                setFile(f.name); sessionStorage.setItem(SK_FILE, f.name)
+                setFile(f.name); marketSession.set(SK_FILE, f.name)
                 fileMut.mutate(f.name); setShowHist(false)
-                setWasPending(false); sessionStorage.removeItem(SK_PENDING)
+                setWasPending(false); marketSession.remove(SK_PENDING)
               }}
               className={cn('w-full text-left px-3 py-2 text-[12px] border-b border-[#0f172a] font-mono truncate transition-colors',
                 file === f.name ? 'text-[#10b981] bg-[#0f172a]' : 'text-[#94a3b8] hover:text-[#cbd5e1] hover:bg-[#0a1020]'
@@ -2172,6 +2303,7 @@ const BOT_TABS   = ['실적/배당', '시장지표']
 const RIGHT_TABS = ['전날 브리핑', 'AI 피드백', '뉴스']
 
 export default function AlphaTerminal() {
+  const names = useTickerNames()
   const qc = useQueryClient()
   const [botTab,       setBotTab]       = useState(0)
   const [rightTab,     setRightTab]     = useState(0)
@@ -2351,7 +2483,10 @@ export default function AlphaTerminal() {
           {!metricsQ.isError && m && typeof m.total_equity === 'number' && (
             <LockedPreview silent>
             <div className="flex items-stretch">
-              <Pill label="총 자산" value={`$${fn(fv(m.total_equity) / 1000, 2)}K`} />
+              {/* 총 자산은 축약하지 않는다. formatCompact 는 ₩1,235만 / $1.23M 처럼
+                  끊어 원·센트 단위가 사라지는데, 내 자산 총액은 반올림된 값이
+                  아니라 실제 금액으로 보여야 한다. */}
+              <Pill label="총 자산" value={formatPrice(m.total_equity)} />
               <Pill
                 label={m.market_open ? '1Day · LIVE' : m.as_of ? `1Day (${m.as_of.slice(5).replace('-', '/')})` : '1Day'}
                 value={fpNullable(m.today_change_pct)}
@@ -2394,7 +2529,7 @@ export default function AlphaTerminal() {
             onFocus={() => setShowTopSugs(true)}
             onBlur={() => setTimeout(() => setShowTopSugs(false), 150)}
             placeholder="종목 검색 (티커·이름)…"
-            className="bg-[#0b1220] border border-[#1e2d40] text-[#e2e8f0] rounded-l text-[12px] focus:outline-none focus:border-[#3b82f6]"
+            className="bg-[#0b1220] border border-[#1e2d40] text-[#e2e8f0] rounded-l text-[12px] focus:outline-none focus:border-[#10b981]"
             style={{ padding: '5px 10px', width: 280 }}
           />
           <button
@@ -2402,7 +2537,7 @@ export default function AlphaTerminal() {
               const sym = searchQuery.trim().toUpperCase()
               if (sym) { setTickerModal(sym); setSearchQuery(''); setSearchSugs([]); setShowTopSugs(false) }
             }}
-            className="bg-[#1d4ed8] hover:bg-[#2563eb] border border-[#1d4ed8] rounded-r flex items-center gap-1.5 transition-colors"
+            className="bg-[#10b981] hover:bg-[#059669] border border-[#10b981] rounded-r flex items-center gap-1.5 transition-colors"
             style={{ padding: '5px 12px' }}>
             <Search size={13} color="#fff" />
             <span className="text-white text-[11px] font-bold">검색</span>
@@ -2418,7 +2553,7 @@ export default function AlphaTerminal() {
                 <div key={s.ticker}
                   onMouseDown={() => { setTickerModal(s.ticker); setSearchQuery(''); setSearchSugs([]); setShowTopSugs(false) }}
                   className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-[#1e2d40] text-[11px]">
-                  <span className="font-mono font-bold text-[#e2e8f0]">{s.ticker}</span>
+                  <TickerLabel ticker={s.ticker} name={names[s.ticker]} primaryClass="text-sm font-bold" />
                   <span className="text-[#94a3b8] truncate">{s.name}</span>
                 </div>
               ))}
@@ -2475,7 +2610,7 @@ export default function AlphaTerminal() {
               {BOT_TABS.map((t, i) => (
                 <button key={t} onClick={() => setBotTab(i)}
                   className={cn('px-5 py-2.5 text-[11px] font-bold tracking-widest transition-colors uppercase',
-                    botTab === i ? 'text-[#3b82f6] border-b-2 border-[#3b82f6]' : 'text-[#94a3b8] hover:text-[#cbd5e1]'
+                    botTab === i ? 'text-[#10b981] border-b-2 border-[#10b981]' : 'text-[#94a3b8] hover:text-[#cbd5e1]'
                   )}>
                   {t}
                 </button>
@@ -2498,7 +2633,7 @@ export default function AlphaTerminal() {
                   <tbody>
                     {earningsQ.data.map(e => (
                       <tr key={e.ticker} className="border-b border-[#0f172a] hover:bg-[#0a1020]">
-                        <td className="py-2.5 px-3 font-mono font-bold text-base text-[#e2e8f0]">{e.ticker}</td>
+                        <td className="py-2.5 px-3"><TickerLabel ticker={e.ticker} name={names[e.ticker]} primaryClass="text-base font-bold" /></td>
                         <td className="py-2.5 px-3 text-sm text-[#cbd5e1]">{e.earn_date}</td>
                         <td className="py-2.5 px-3 text-sm text-[#cbd5e1]">{e.div_date}</td>
                         <td className="py-2.5 px-3 text-sm text-[#10b981] font-mono font-bold">{e.div_yield}</td>
@@ -2536,7 +2671,7 @@ export default function AlphaTerminal() {
         <div
           onPointerDown={handlePanelResizeStart}
           title="드래그해서 패널 폭 조절"
-          className="hidden md:block w-1.5 flex-shrink-0 cursor-col-resize hover:bg-[#3b82f6]/30 active:bg-[#3b82f6]/50 transition-colors"
+          className="hidden md:block w-1.5 flex-shrink-0 cursor-col-resize hover:bg-[#10b981]/30 active:bg-[#10b981]/50 transition-colors"
         />
 
         {/* 모바일 전용 배너 — 우측 가장자리에 세로 탭처럼 붙여 두고, 누르면 패널이
@@ -2554,7 +2689,9 @@ export default function AlphaTerminal() {
           )}
         >
           <ChevronLeft className="w-3.5 h-3.5 flex-shrink-0" />
-          <span style={{ writingMode: 'vertical-rl' }}>브리핑</span>
+          {/* 세로쓰기에서도 줄바꿈은 일어난다 — 높이가 모자라면 두 번째 '열'로
+              접혀 글자가 두 줄처럼 보인다. nowrap 으로 한 줄을 보장한다. */}
+          <span style={{ writingMode: 'vertical-rl', whiteSpace: 'nowrap' }}>브리핑</span>
         </button>
 
         {/* ═══ RIGHT PANEL — 데스크탑엔 항상 보임, 모바일에선 배너를 눌러야 오른쪽에서
@@ -2573,17 +2710,24 @@ export default function AlphaTerminal() {
           )}>
           <div className="flex flex-col min-h-0 flex-1 overflow-hidden">
             {/* 모바일 전용 닫기 헤더 — 데스크탑엔 없음 */}
-            <div className="md:hidden flex-shrink-0 flex items-center justify-between px-4 py-3 border-b border-[#1e2d40] bg-[#060b14]">
-              <span className="text-sm font-bold text-[#e2e8f0]">브리핑 · 피드백 · 뉴스</span>
-              <button onClick={() => setRightPanelOpen(false)} className="text-[#94a3b8] hover:text-[#e2e8f0]">
-                <X className="w-5 h-5" />
+            {/* 닫기는 왼쪽에 둔 '오른쪽 화살표'다. 배너를 왼쪽으로 당겨 열었으니
+                오른쪽으로 밀어 닫는 것이 손의 방향과 맞는다. X 는 어느 쪽으로
+                사라지는지 알려주지 않는다. */}
+            <div className="md:hidden flex-shrink-0 flex items-center gap-2 px-3 py-3 border-b border-[#1e2d40] bg-[#060b14]">
+              <button
+                onClick={() => setRightPanelOpen(false)}
+                aria-label="브리핑 패널 닫기"
+                className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[#94a3b8] transition hover:bg-[#0d1526] hover:text-[#e2e8f0]"
+              >
+                <ChevronRight className="w-5 h-5" />
               </button>
+              <span className="text-sm font-bold text-[#e2e8f0]">브리핑 · 피드백 · 뉴스</span>
             </div>
             <div className="tab-row flex-shrink-0 bg-[#060b14] border-b border-[#1e2d40] flex">
               {RIGHT_TABS.map((t, i) => (
                 <button key={t} onClick={() => setRightTab(i)}
                   className={cn('flex-1 py-2.5 text-[10px] font-bold tracking-widest uppercase transition-colors',
-                    rightTab === i ? 'text-[#3b82f6] border-b-2 border-[#3b82f6] bg-[#3b82f6]/5' : 'text-[#94a3b8] hover:text-[#cbd5e1]'
+                    rightTab === i ? 'text-[#10b981] border-b-2 border-[#10b981] bg-[#10b981]/5' : 'text-[#94a3b8] hover:text-[#cbd5e1]'
                   )}>
                   {t}
                 </button>
@@ -2602,7 +2746,7 @@ export default function AlphaTerminal() {
               <div className="h-full flex flex-col overflow-hidden">
                 <div className="flex-shrink-0 flex items-center justify-between px-4 py-2.5 border-b border-[#1e2d40] bg-[#060b14]">
                   <div className="flex items-center gap-2">
-                    <MessageSquare className="w-4 h-4 text-[#3b82f6]" />
+                    <MessageSquare className="w-4 h-4 text-[#10b981]" />
                     <span className="text-[11px] text-[#94a3b8] font-bold tracking-widest">AI 분석</span>
                   </div>
                   <button
@@ -2611,7 +2755,7 @@ export default function AlphaTerminal() {
                       feedbackQ.refetch()
                     }}
                     disabled={feedbackQ.isFetching}
-                    className="flex items-center gap-1.5 text-[11px] text-[#3b82f6] hover:text-[#60a5fa] disabled:opacity-40 transition-colors">
+                    className="flex items-center gap-1.5 text-[11px] text-[#10b981] hover:text-[#34d399] disabled:opacity-40 transition-colors">
                     <RefreshCw className={cn('w-3 h-3', feedbackQ.isFetching && 'animate-spin')} />
                     재분석
                   </button>
@@ -2619,7 +2763,7 @@ export default function AlphaTerminal() {
                 <div className="flex-1 overflow-y-auto p-4">
                   {feedbackQ.isFetching && (
                     <div className="flex items-center gap-2 py-4 justify-center">
-                      <span className="w-2 h-2 rounded-full bg-[#3b82f6] animate-pulse" />
+                      <span className="w-2 h-2 rounded-full bg-[#10b981] animate-pulse" />
                       <span className="text-sm text-[#94a3b8]">AI 분석 중…</span>
                     </div>
                   )}
@@ -2641,7 +2785,7 @@ export default function AlphaTerminal() {
                     <div className="flex items-center gap-2 mb-2">
                       <span className={cn('text-[10px] font-bold px-2 py-0.5 rounded',
                         n.ticker === 'MACRO' ? 'bg-[#9b59b6]/20 text-[#9b59b6]' : 'bg-[#3b82f6]/20 text-[#3b82f6]')}>
-                        {n.ticker}
+                        {n.ticker === 'MACRO' ? n.ticker : displayTicker(n.ticker, names)}
                       </span>
                       <span className="text-[11px] text-[#94a3b8]">
                         {new Date(n.datetime * 1000).toLocaleDateString('ko-KR', { month: 'numeric', day: 'numeric' })}

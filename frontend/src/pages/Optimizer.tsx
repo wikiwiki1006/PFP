@@ -10,12 +10,16 @@ import LoadingSpinner from '@/components/LoadingSpinner'
 import { startAIOptimizeJob, getAIOptimizeJob, cancelAIOptimizeJob, getHoldings, checkTickerExists } from '@/api'
 import type { AIOptimizationResult, OptimizationMode } from '@/types'
 import { cn } from '@/lib/utils'
+import { formatPrice } from '@/lib/market'
+import { marketSession } from '@/lib/marketStorage'
+import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
+import TickerLabel from '@/components/TickerLabel'
 
 // ─── Module-level cache (SPA 내 페이지 이동 시에도 유지) ─────────────────────
 
 let _cachedResult: AIOptimizationResult | null = null
 try {
-  const s = sessionStorage.getItem('opt_result')
+  const s = marketSession.get('opt_result')
   if (s) _cachedResult = JSON.parse(s)
 } catch {}
 
@@ -126,6 +130,7 @@ function SentimentBadge({ s }: { s: string }) {
 }
 
 function WeightsBar({ weights, color }: { weights: { [t: string]: number }; color?: string }) {
+  const names = useTickerNames()
   const data = Object.entries(weights)
     .sort(([, a], [, b]) => b - a)
     .map(([ticker, w]) => ({ ticker, w: +(w * 100).toFixed(1) }))
@@ -134,7 +139,8 @@ function WeightsBar({ weights, color }: { weights: { [t: string]: number }; colo
     <ResponsiveContainer width="100%" height={150}>
       <BarChart data={data} margin={{ top: 4, right: 8, left: -16, bottom: 0 }}>
         <CartesianGrid strokeDasharray="3 3" stroke="#1e2d40" vertical={false} />
-        <XAxis dataKey="ticker" tick={{ fill: '#94a3b8', fontSize: 10 }} tickLine={false} axisLine={false} />
+        <XAxis dataKey="ticker" tick={{ fill: '#94a3b8', fontSize: 10 }} tickLine={false} axisLine={false}
+               tickFormatter={(t: string) => displayTicker(t, names)} />
         <YAxis tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false}
           tickFormatter={(v) => `${v}%`} />
         <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v: number) => [`${v.toFixed(1)}%`, '비중']}
@@ -157,6 +163,7 @@ function OptCard({
   targetReturn: number
   effectiveTarget?: number
 }) {
+  const names = useTickerNames()
   const [expanded, setExpanded] = useState(false)
   const showAdjusted = card.key === 'target_return' && effectiveTarget != null
     && Math.abs(effectiveTarget - targetReturn) > 0.002
@@ -214,7 +221,7 @@ function OptCard({
             <div className="space-y-1.5">
               {Object.entries(mode.weights).sort(([, a], [, b]) => b - a).map(([ticker, w]) => (
                 <div key={ticker} className="flex items-center gap-2">
-                  <span className="text-xs font-mono text-[#e2e8f0] w-14">{ticker}</span>
+                  <span className="text-xs text-[#e2e8f0] w-20 truncate" title={ticker}>{displayTicker(ticker, names)}</span>
                   <div className="flex-1 h-1.5 bg-[#1e2d40] rounded-full overflow-hidden">
                     <div className="h-full rounded-full" style={{ width: `${(w * 100).toFixed(1)}%`, backgroundColor: card.color }} />
                   </div>
@@ -486,6 +493,7 @@ function FrontierChart({
 // ─── Correlation Heatmap ──────────────────────────────────────────────────────
 
 function CorrelationHeatmap({ corr }: { corr: AIOptimizationResult['correlation'] }) {
+  const names = useTickerNames()
   const { tickers, matrix } = corr
   if (!tickers.length) return null
 
@@ -523,7 +531,7 @@ function CorrelationHeatmap({ corr }: { corr: AIOptimizationResult['correlation'
             <tr>
               <th className="w-16" />
               {tickers.map(t => (
-                <th key={t} className="pb-1 px-1 text-[10px] text-[#64748b] font-mono font-semibold">{t}</th>
+                <th key={t} className="pb-1 px-1 text-[10px] text-[#64748b] font-semibold">{displayTicker(t, names)}</th>
               ))}
             </tr>
           </thead>
@@ -576,6 +584,7 @@ function RetCell({ v }: { v: number | null | undefined }) {
 }
 
 function AIViewsTable({ result }: { result: AIOptimizationResult }) {
+  const names = useTickerNames()
   const { tickers, ai_views, price_stats, posterior_returns } = result
   return (
     <div className="space-y-3">
@@ -606,9 +615,9 @@ function AIViewsTable({ result }: { result: AIOptimizationResult }) {
               const confPct = view ? Math.round(view.confidence * 100) : 0
               const rows = [
                 <tr key={t} className="border-b border-[#1e2d40]/20 hover:bg-[#1a2540] transition-colors">
-                  <td className="py-2 px-3 font-mono font-bold text-[#e2e8f0]">{t}</td>
+                  <td className="py-2 px-3"><TickerLabel ticker={t} name={names[t]} primaryClass="text-sm font-bold" /></td>
                   <td className="py-2 px-3 font-mono text-[#94a3b8]">
-                    {stats?.current_price != null ? `$${stats.current_price.toFixed(2)}` : '—'}
+                    {formatPrice(stats?.current_price)}
                   </td>
                   <td className="py-2 px-3">
                     {stats ? (
@@ -635,7 +644,7 @@ function AIViewsTable({ result }: { result: AIOptimizationResult }) {
                     {view ? (
                       <div className="flex items-center gap-1.5">
                         <div className="w-14 h-1.5 bg-[#1e2d40] rounded-full overflow-hidden">
-                          <div className="h-full bg-[#3b82f6] rounded-full" style={{ width: `${confPct}%` }} />
+                          <div className="h-full bg-[#10b981] rounded-full" style={{ width: `${confPct}%` }} />
                         </div>
                         <span className="font-mono text-[#64748b]">{confPct}%</span>
                       </div>
@@ -681,7 +690,7 @@ function ProgressBar({ stage, stageText, elapsed }: { stage: number; stageText: 
           className="h-full rounded-full transition-all duration-700"
           style={{
             width: `${pct}%`,
-            background: 'linear-gradient(90deg, #8b5cf6, #3b82f6)',
+            background: 'linear-gradient(90deg, #10b981, #059669)',
           }}
         />
       </div>
@@ -697,6 +706,7 @@ function ProgressBar({ stage, stageText, elapsed }: { stage: number; stageText: 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function Optimizer() {
+  const names = useTickerNames()
   const { isAuthed, requireLogin, modalEl } = useLoginPrompt()
   const [tickers, setTickers]             = useState<string[]>([])
   const [tickerInput, setTickerInput]     = useState('')
@@ -704,7 +714,7 @@ export default function Optimizer() {
   const [holdingYears, setHoldingYears]   = useState(1.0)
   const [loadingPortfolio, setLoadingPortfolio] = useState(false)
   const [result, setResult]               = useState<AIOptimizationResult | null>(_cachedResult)
-  const [jobId, setJobId]                 = useState<string | null>(() => sessionStorage.getItem('opt_job_id'))
+  const [jobId, setJobId]                 = useState<string | null>(() => marketSession.get('opt_job_id'))
   const [jobError, setJobError]           = useState<string | null>(null)
   const [elapsed, setElapsed]             = useState(0)
   const startTimeRef                      = useRef<number>(0)
@@ -724,7 +734,7 @@ export default function Optimizer() {
     if (jobData.status === 'done' && jobData.result) {
       const r = jobData.result as AIOptimizationResult
       _cachedResult = r
-      try { sessionStorage.setItem('opt_result', JSON.stringify(r)) } catch {}
+      try { marketSession.set('opt_result', JSON.stringify(r)) } catch {}
       setResult(r)
       _clearJob()
     } else if (jobData.status === 'error') {
@@ -738,7 +748,7 @@ export default function Optimizer() {
   // ── Elapsed timer ────────────────────────────────────────────────────────────
   useEffect(() => {
     if (jobId) {
-      const saved = sessionStorage.getItem('opt_job_start')
+      const saved = marketSession.get('opt_job_start')
       startTimeRef.current = saved ? parseInt(saved) : Date.now()
       setElapsed(Math.floor((Date.now() - startTimeRef.current) / 1000))
       timerRef.current = setInterval(() => {
@@ -751,8 +761,8 @@ export default function Optimizer() {
   }, [jobId])
 
   const _clearJob = () => {
-    sessionStorage.removeItem('opt_job_id')
-    sessionStorage.removeItem('opt_job_start')
+    marketSession.remove('opt_job_id')
+    marketSession.remove('opt_job_start')
     setJobId(null)
   }
 
@@ -768,8 +778,8 @@ export default function Optimizer() {
         holding_period_years: holdingYears,
         weight_bounds: [0.0, 1.0],
       })
-      sessionStorage.setItem('opt_job_id', job_id)
-      sessionStorage.setItem('opt_job_start', Date.now().toString())
+      marketSession.set('opt_job_id', job_id)
+      marketSession.set('opt_job_start', Date.now().toString())
       setJobId(job_id)
     } catch (err: unknown) {
       const e = err as { response?: { data?: { detail?: string } } }
@@ -847,7 +857,7 @@ export default function Optimizer() {
 
       {/* Header */}
       <div className="flex items-center gap-3">
-        <Brain className="w-5 h-5 text-[#8b5cf6]" />
+        <Brain className="w-5 h-5 text-[#10b981]" />
         <div>
           <h1 className="text-xl font-bold text-[#e2e8f0]">포트폴리오 최적화</h1>
           <p className="text-xs text-[#64748b] mt-0.5">
@@ -865,7 +875,7 @@ export default function Optimizer() {
             <label className="text-xs text-[#64748b] uppercase tracking-wider">종목 입력</label>
             <button onClick={loadFromPortfolio} disabled={loadingPortfolio || isRunning}
               title={isAuthed ? '내 보유 종목을 불러옵니다' : '로그인 후 사용 가능합니다'}
-              className="text-xs text-[#3b82f6] hover:text-[#60a5fa] flex items-center gap-1 disabled:opacity-50">
+              className="text-xs text-[#10b981] hover:text-[#34d399] flex items-center gap-1 disabled:opacity-50">
               {loadingPortfolio
                 ? <LoadingSpinner size="sm" />
                 : isAuthed ? <Download className="w-3 h-3" /> : <Lock className="w-3 h-3" />}
@@ -874,12 +884,12 @@ export default function Optimizer() {
             </button>
           </div>
           <div
-            className="min-h-[44px] bg-[#0b0f1a] border border-[#1e2d40] rounded-lg px-3 py-2 flex flex-wrap gap-1.5 items-center cursor-text focus-within:border-[#8b5cf6] transition-colors"
+            className="min-h-[44px] bg-[#0b0f1a] border border-[#1e2d40] rounded-lg px-3 py-2 flex flex-wrap gap-1.5 items-center cursor-text focus-within:border-[#10b981] transition-colors"
             onClick={() => inputRef.current?.focus()}
           >
             {tickers.map(t => (
-              <span key={t} className="flex items-center gap-1 bg-[#1e2d40] text-[#e2e8f0] text-xs font-mono px-2 py-0.5 rounded">
-                {t}
+              <span key={t} className="flex items-center gap-1 bg-[#1e2d40] text-[#e2e8f0] text-xs px-2 py-0.5 rounded">
+                {displayTicker(t, names)}
                 <button onClick={(e) => { e.stopPropagation(); removeTicker(t) }}
                   disabled={isRunning}
                   className="text-[#64748b] hover:text-[#ef4444] transition-colors disabled:opacity-40">
@@ -900,7 +910,7 @@ export default function Optimizer() {
             {checkingTicker
               ? <LoadingSpinner size="sm" />
               : tickerInput && (
-                <button onClick={() => void addTicker(tickerInput)} className="text-[#8b5cf6] hover:text-[#a78bfa]">
+                <button onClick={() => void addTicker(tickerInput)} className="text-[#10b981] hover:text-[#34d399]">
                   <Plus className="w-3.5 h-3.5" />
                 </button>
               )}
@@ -917,19 +927,19 @@ export default function Optimizer() {
           {/* Target return */}
           <div>
             <label className="text-xs text-[#64748b] uppercase tracking-wider block mb-2">
-              목표 수익률: <span className="text-[#8b5cf6] font-mono font-bold">{targetReturn}%</span>
+              목표 수익률: <span className="text-[#10b981] font-mono font-bold">{targetReturn}%</span>
             </label>
             <input type="range" min={1} max={50} step={1} value={targetReturn}
               disabled={isRunning}
               onChange={e => setTargetReturn(+e.target.value)}
-              className="w-full accent-[#8b5cf6] disabled:opacity-50" />
+              className="w-full accent-[#10b981] disabled:opacity-50" />
           </div>
 
           {/* Holding period — 이 값이 참조 데이터 기간까지 결정한다 */}
           <div>
             <label className="text-xs text-[#64748b] uppercase tracking-wider block mb-2">
               투자 기간:{' '}
-              <span className="text-[#8b5cf6] font-mono">
+              <span className="text-[#10b981] font-mono">
                 {holdingYears === 0.25 ? '3개월' : holdingYears === 0.5 ? '6개월' : holdingYears === 1 ? '1년' : '2년'}
               </span>
             </label>
@@ -939,7 +949,7 @@ export default function Optimizer() {
                 <button key={o.v} onClick={() => setHoldingYears(o.v)} disabled={isRunning}
                   className={cn('flex-1 py-1.5 text-xs rounded transition-colors disabled:opacity-50',
                     holdingYears === o.v
-                      ? 'bg-[#8b5cf6] text-white'
+                      ? 'bg-[#10b981] text-white'
                       : 'bg-[#0b0f1a] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0]')}>
                   {o.l}
                 </button>
@@ -959,7 +969,7 @@ export default function Optimizer() {
           <div className="flex items-center gap-4">
             {!isRunning ? (
               <button onClick={startOptimize}
-                className="flex items-center gap-2 px-6 py-2.5 bg-[#8b5cf6] hover:bg-[#7c3aed] text-white text-sm font-semibold rounded-lg transition-colors">
+                className="flex items-center gap-2 px-6 py-2.5 bg-[#10b981] hover:bg-[#059669] text-white text-sm font-semibold rounded-lg transition-colors">
                 <Brain className="w-4 h-4" /> AI 최적화 실행
               </button>
             ) : (
@@ -1060,7 +1070,7 @@ export default function Optimizer() {
                 <tbody>
                   {result.tickers.map(t => (
                     <tr key={t} className="border-b border-[#1e2d40]/30 hover:bg-[#1a2540]">
-                      <td className="py-2 px-3 font-mono font-bold text-[#e2e8f0]">{t}</td>
+                      <td className="py-2 px-3"><TickerLabel ticker={t} name={names[t]} primaryClass="text-sm font-bold" /></td>
                       {OPT_CARDS.map(c => {
                         const w = result.optimizations[c.key]?.weights[t]
                         return (

@@ -125,7 +125,7 @@ export default function DailyBrief() {
         .markdown-body li { margin-bottom: 0.25rem; }
         .markdown-body hr { border-color: #1e2d40; }
         .markdown-body code { background: #111827; color: #10b981; padding: 2px 4px; border-radius: 3px; font-size: 0.75rem; }
-        .markdown-body blockquote { border-left: 3px solid #3b82f6; padding-left: 1rem; color: #64748b; }
+        .markdown-body blockquote { border-left: 3px solid #10b981; padding-left: 1rem; color: #64748b; }
         .markdown-body table { font-size: 0.75rem; width: 100%; }
         .markdown-body th { color: #4a5568; border-bottom: 1px solid #1e2d40; padding: 0.5rem; text-align: left; }
         .markdown-body td { color: #94a3b8; padding: 0.5rem; border-bottom: 1px solid #0f172a; }

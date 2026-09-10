@@ -11,6 +11,20 @@ import { useTouchDismissTooltip } from '@/lib/useTouchDismissTooltip'
 import { useIsMobile } from '@/lib/useIsMobile'
 import { cn } from '@/lib/utils'
 import type { HoldingsMap } from '@/types'
+import { formatAxisPrice, formatPrice, getMarket } from '@/lib/market'
+
+// yfinance 가 주는 영문 섹터를 한글로. 한국 화면에 'Healthcare' 가 그대로 뜨면
+// 다른 화면(섹터 변동율)의 '헬스케어' 와 같은 것인지 알 수 없다.
+const SECTOR_KO: Record<string, string> = {
+  'Technology': '기술', 'Healthcare': '헬스케어', 'Financial Services': '금융',
+  'Financial': '금융', 'Consumer Cyclical': '경기소비재', 'Consumer Defensive': '필수소비재',
+  'Consumer': '소비재', 'Energy': '에너지', 'Industrials': '산업재',
+  'Basic Materials': '소재', 'Real Estate': '부동산', 'Utilities': '유틸리티',
+  'Communication Services': '커뮤니케이션',
+}
+const toKoSector = (s?: string | null) =>
+  !s ? '' : (getMarket() === 'KR' ? (SECTOR_KO[s] ?? s) : s)
+import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
 
 // 주가 비교 차트와 스프레드 차트가 syncId 로 커서를 공유한다(아래 참조) — 어느
 // 쪽을 가리켜도 같은 날짜의 두 값을 한 번에 보여줘야 "동일 시점 비교"가 된다.
@@ -22,8 +36,8 @@ function PairsTooltip({ active, payload, label, tickerA, tickerB }: any) {
   return (
     <div className="bg-[#1a2035] border border-[#1e2d40] rounded-lg p-3 text-[11px] shadow-xl space-y-1 min-w-[160px]">
       <p className="text-[#64748b] mb-1">{label}</p>
-      {p.a != null && <p className="font-mono" style={{ color: '#3b82f6' }}>{tickerA}: ${Number(p.a).toFixed(2)}</p>}
-      {p.b != null && <p className="font-mono" style={{ color: '#f59e0b' }}>{tickerB}: ${Number(p.b).toFixed(2)}</p>}
+      {p.a != null && <p style={{ color: '#3b82f6' }}>{tickerA}: {formatPrice(Number(p.a))}</p>}
+      {p.b != null && <p style={{ color: '#f59e0b' }}>{tickerB}: {formatPrice(Number(p.b))}</p>}
       {p.spread != null && (
         <p className="font-mono font-bold" style={{ color: '#8b5cf6' }}>스프레드: {Number(p.spread).toFixed(2)}%p</p>
       )}
@@ -36,6 +50,7 @@ interface PairsTradingPanelProps {
 }
 
 export default function PairsTradingPanel({ holdings = {} }: PairsTradingPanelProps) {
+  const names = useTickerNames()
   const [tickerInput, setTickerInput]       = useState('')
   const [thresholdInput, setThresholdInput] = useState('5')
   const [ticker, setTicker]                 = useState<string | null>(null)
@@ -107,8 +122,8 @@ export default function PairsTradingPanel({ holdings = {} }: PairsTradingPanelPr
             value={tickerInput}
             onChange={(e) => setTickerInput(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && submit()}
-            placeholder="예: KO"
-            className="w-full bg-[#060b14] border border-[#1e2d40] rounded px-3 py-2 text-sm text-[#e2e8f0] placeholder:text-[#374151] focus:outline-none focus:border-[#3b82f6]"
+            placeholder={getMarket() === 'KR' ? "예: 005930.KS" : "예: KO"}
+            className="w-full bg-[#060b14] border border-[#1e2d40] rounded px-3 py-2 text-sm text-[#e2e8f0] placeholder:text-[#374151] focus:outline-none focus:border-[#10b981]"
           />
         </div>
         <div className="w-[120px]">
@@ -118,10 +133,10 @@ export default function PairsTradingPanel({ holdings = {} }: PairsTradingPanelPr
             value={thresholdInput}
             onChange={(e) => setThresholdInput(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && submit()}
-            className="w-full bg-[#060b14] border border-[#1e2d40] rounded px-3 py-2 text-sm text-[#e2e8f0] focus:outline-none focus:border-[#3b82f6]"
+            className="w-full bg-[#060b14] border border-[#1e2d40] rounded px-3 py-2 text-sm text-[#e2e8f0] focus:outline-none focus:border-[#10b981]"
           />
         </div>
-        <button onClick={submit} className="px-4 py-2 bg-[#3b82f6]/10 border border-[#3b82f6]/25 text-[#3b82f6] text-sm rounded hover:bg-[#3b82f6]/18 font-bold">
+        <button onClick={submit} className="px-4 py-2 bg-[#10b981]/10 border border-[#10b981]/25 text-[#10b981] text-sm rounded hover:bg-[#10b981]/18 font-bold">
           탐색
         </button>
       </div>
@@ -136,34 +151,34 @@ export default function PairsTradingPanel({ holdings = {} }: PairsTradingPanelPr
           <div className="flex flex-wrap gap-1.5">
             {holdingTickers.map(t => (
               <button key={t} onClick={() => pickHolding(t)}
-                className={`px-2.5 py-1 text-[11px] font-mono rounded border transition-colors ${
+                className={`px-2.5 py-1 text-[11px] rounded border transition-colors ${
                   ticker === t
                     ? 'border-[#f59e0b] text-[#f59e0b] bg-[#f59e0b]/10'
                     : 'border-[#1e2d40] text-[#64748b] hover:text-[#94a3b8]'
-                }`}>
-                {t}
+                }`} title={t}>
+                {displayTicker(t, names)}
               </button>
             ))}
           </div>
         </div>
       )}
 
-      {q.isLoading && <div className="text-sm text-[#64748b]">{ticker} 유사 종목 탐색 중… (최초 1회, 다소 소요)</div>}
-      {q.isError   && <div className="text-sm text-[#ef4444]">{ticker}에 대한 데이터를 찾을 수 없습니다.</div>}
+      {q.isLoading && <div className="text-sm text-[#64748b]">{displayTicker(ticker as string, names)} 유사 종목 탐색 중… (최초 1회, 다소 소요)</div>}
+      {q.isError   && <div className="text-sm text-[#ef4444]">{displayTicker(ticker as string, names)}에 대한 데이터를 찾을 수 없습니다.</div>}
 
       {q.data && q.data.best && (
         <>
           {/* 활성 페어 헤더 */}
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm text-[#94a3b8]">기준:</span>
-            <span className="font-mono font-bold text-[#e2e8f0]">{q.data.ticker}</span>
+            <span className="font-bold text-[#e2e8f0]">{displayTicker(q.data.ticker, names)}</span>
             {q.data.base_sector && q.data.base_sector !== 'Unknown' && (
               <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#f59e0b]/10 text-[#f59e0b] border border-[#f59e0b]/20">
-                {q.data.base_sector}
+                {toKoSector(q.data.base_sector)}
               </span>
             )}
             <span className="text-[#64748b]">↔</span>
-            <span className="font-mono font-bold text-[#3b82f6]">{activePair}</span>
+            <span className="font-bold text-[#3b82f6]">{displayTicker(activePair, names)}</span>
             {(() => {
               const m = q.data.matches.find(x => x.ticker === activePair)
               return m ? (
@@ -195,17 +210,17 @@ export default function PairsTradingPanel({ holdings = {} }: PairsTradingPanelPr
                   onClick={() => setSelectedPair(m.ticker)}
                   className={`text-left text-[11px] font-mono px-2.5 py-1 rounded border transition-colors ${
                     activePair === m.ticker
-                      ? 'border-[#3b82f6] bg-[#3b82f6]/10 text-[#3b82f6]'
-                      : 'border-[#1e2d40] text-[#94a3b8] hover:border-[#3b82f6]/50 hover:text-[#e2e8f0]'
+                      ? 'border-[#10b981] bg-[#10b981]/10 text-[#10b981]'
+                      : 'border-[#1e2d40] text-[#94a3b8] hover:border-[#10b981]/50 hover:text-[#e2e8f0]'
                   }`}
                 >
-                  <span>{m.ticker}</span>
+                  <span>{displayTicker(m.ticker, names)}</span>
                   <span className="ml-1 text-[10px] opacity-60">{m.correlation.toFixed(2)}</span>
                   {m.sector && m.sector !== 'Unknown' && (
                     <span className={`ml-1 text-[9px] opacity-70 ${
                       m.sector === q.data.base_sector ? 'text-[#10b981]' : ''
                     }`}>
-                      {m.sector.split(' ')[0]}
+                      {toKoSector(m.sector)}
                     </span>
                   )}
                 </button>
@@ -230,7 +245,7 @@ export default function PairsTradingPanel({ holdings = {} }: PairsTradingPanelPr
           >
             <div className="flex items-center justify-between px-1 md:px-3 pt-3 pb-1">
               <span className="text-[11px] text-[#64748b] font-bold tracking-widest">
-                주가 비교 (좌축 {q.data.ticker} · 우축 {activePair}) & 스프레드
+                주가 비교 (좌축 {displayTicker(q.data.ticker, names)} · 우축 {displayTicker(activePair, names)}) & 스프레드
               </span>
               <span className="text-[10px] text-[#374151]">임계값 초과 시점 {activeBreaches.length}건</span>
             </div>
@@ -244,7 +259,7 @@ export default function PairsTradingPanel({ holdings = {} }: PairsTradingPanelPr
                   tick={{ fill: '#3b82f6', fontSize: 10 }}
                   tickLine={false} axisLine={false}
                   width={isMobile ? 34 : 55}
-                  tickFormatter={(v: number) => `$${v.toFixed(0)}`}
+                  tickFormatter={(v: number) => formatAxisPrice(v)}
                 />
                 <YAxis
                   yAxisId="right"
@@ -252,12 +267,12 @@ export default function PairsTradingPanel({ holdings = {} }: PairsTradingPanelPr
                   tick={{ fill: '#f59e0b', fontSize: 10 }}
                   tickLine={false} axisLine={false}
                   width={isMobile ? 34 : 55}
-                  tickFormatter={(v: number) => `$${v.toFixed(0)}`}
+                  tickFormatter={(v: number) => formatAxisPrice(v)}
                 />
-                <Tooltip active={tooltipActive} content={<PairsTooltip tickerA={q.data.ticker} tickerB={activePair} />} />
+                <Tooltip active={tooltipActive} content={<PairsTooltip tickerA={displayTicker(q.data.ticker, names)} tickerB={displayTicker(activePair, names)} />} />
                 <Legend wrapperStyle={{ fontSize: '11px', color: '#64748b' }} />
-                <Line yAxisId="left"  type="monotone" dataKey="a" stroke="#3b82f6" strokeWidth={2} dot={false} name={q.data.ticker}  isAnimationActive={false} />
-                <Line yAxisId="right" type="monotone" dataKey="b" stroke="#f59e0b" strokeWidth={2} dot={false} name={activePair ?? q.data.best.ticker} isAnimationActive={false} />
+                <Line yAxisId="left"  type="monotone" dataKey="a" stroke="#3b82f6" strokeWidth={2} dot={false} name={displayTicker(q.data.ticker, names)}  isAnimationActive={false} />
+                <Line yAxisId="right" type="monotone" dataKey="b" stroke="#f59e0b" strokeWidth={2} dot={false} name={displayTicker(activePair ?? q.data.best.ticker, names)} isAnimationActive={false} />
               </ComposedChart>
             </ResponsiveContainer>
 

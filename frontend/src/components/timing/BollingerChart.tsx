@@ -9,6 +9,9 @@ import type { TechnicalChartPoint } from '@/types'
 import { COLOR_UP, COLOR_DOWN } from './colors'
 import { useTheme } from '@/lib/ThemeContext'
 import { useTouchDismissTooltip } from '@/lib/useTouchDismissTooltip'
+import { useIsMobile } from '@/lib/useIsMobile'
+import { formatAxisPrice, formatPrice } from '@/lib/market'
+import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
 
 // ── debounce hook ─────────────────────────────────────────────────────────────
 function useDebounced<T>(value: T, ms = 700): T {
@@ -141,7 +144,7 @@ function NumInput({ label, value, min, max, step, onChange }: {
           const v = Number(e.target.value)
           if (!isNaN(v) && v >= min && v <= max) onChange(v)
         }}
-        className="w-14 bg-[#060b14] border border-[#1e2d40] rounded px-1.5 py-0.5 text-[11px] font-mono text-[#e2e8f0] focus:outline-none focus:border-[#3b82f6]"
+        className="w-14 bg-[#060b14] border border-[#1e2d40] rounded px-1.5 py-0.5 text-[11px] font-mono text-[#e2e8f0] focus:outline-none focus:border-[#10b981]"
       />
     </label>
   )
@@ -153,7 +156,7 @@ function CB({ label, checked, onChange, color }: {
 }) {
   return (
     <label className="flex items-center gap-1 text-[11px] cursor-pointer select-none">
-      <input type="checkbox" checked={checked} onChange={onChange} className="w-3 h-3 accent-[#3b82f6]" />
+      <input type="checkbox" checked={checked} onChange={onChange} className="w-3 h-3 accent-[#10b981]" />
       <span style={{ color: color ?? (checked ? '#94a3b8' : '#374151') }}>{label}</span>
     </label>
   )
@@ -230,7 +233,24 @@ export default function BollingerChart({ ticker, height = 420 }: BollingerChartP
 
   const series    = q.data?.series     ?? []
   const keyPoints = q.data?.key_points ?? []
-  const visible   = series
+
+  // 휴대폰에서는 최근 6개월만 그린다.
+  //
+  // 3년치를 폰 폭에 밀어 넣으면 하루가 1px 도 안 돼 캔들이 뭉개지고, 읽으려면
+  // 좌우로 밀어야 한다. 6개월이면 한 화면에 들어오고 일봉으로 떨어져(아래
+  // auto 판정 기준이 180일) 캔들 하나하나가 보인다. 데스크탑은 폭이 넉넉하니
+  // 3년 전체를 그대로 둔다.
+  const isMobile = useIsMobile()
+  const names = useTickerNames()
+  const visible  = useMemo(() => {
+    if (!isMobile || series.length === 0) return series
+    const cutoff = new Date(series[series.length - 1].date)
+    cutoff.setMonth(cutoff.getMonth() - 6)
+    const from = cutoff.toISOString().slice(0, 10)
+    const sliced = series.filter(p => p.date >= from)
+    // 잘라 낸 결과가 너무 짧으면(데이터가 6개월치도 없을 때) 원본을 쓴다.
+    return sliced.length >= 2 ? sliced : series
+  }, [series, isMobile])
 
   // ── weekly / daily mode ───────────────────────────────────────────────────
   const isWeekly = useMemo(() => {
@@ -374,7 +394,7 @@ export default function BollingerChart({ ticker, height = 420 }: BollingerChartP
               <button key={m} onClick={() => setWeeklyMode(m)}
                 className={`px-1.5 py-0.5 text-[10px] border transition-colors first:rounded-l last:rounded-r ${
                   weeklyMode === m
-                    ? 'border-[#3b82f6] text-[#3b82f6] bg-[#3b82f6]/10'
+                    ? 'border-[#10b981] text-[#10b981] bg-[#10b981]/10'
                     : 'border-[#1e2d40] text-[#374151] hover:text-[#64748b] hover:border-[#374151]'
                 }`}>
                 {m === 'daily' ? '일봉' : m === 'weekly' ? '주봉' : '자동'}
@@ -384,7 +404,7 @@ export default function BollingerChart({ ticker, height = 420 }: BollingerChartP
           {weeklyMode === 'auto' && (
             <span className="text-[10px] text-[#374151]">({isWeekly ? '주봉' : '일봉'})</span>
           )}
-          {q.isFetching && <span className="text-[10px] text-[#3b82f6]">계산 중…</span>}
+          {q.isFetching && <span className="text-[10px] text-[#10b981]">계산 중…</span>}
           <span className="ml-auto font-mono font-bold" style={{ color: zColor }}>
             {q.data && `Z ${q.data.current_z.toFixed(2)}`}
           </span>
@@ -417,12 +437,12 @@ export default function BollingerChart({ ticker, height = 420 }: BollingerChartP
       {/* ── loading / error ─────────────────────────────────────────────── */}
       {q.isLoading && (
         <div className="flex items-center justify-center" style={{ height }}>
-          <span className="text-sm text-[#64748b]">{ticker} 데이터 로딩 중…</span>
+          <span className="text-sm text-[#64748b]">{displayTicker(ticker, names)} 데이터 로딩 중…</span>
         </div>
       )}
       {q.isError && (
         <div className="flex items-center justify-center" style={{ height }}>
-          <span className="text-sm text-[#ef4444]">{ticker} 데이터를 찾을 수 없습니다.</span>
+          <span className="text-sm text-[#ef4444]">{displayTicker(ticker, names)} 데이터를 찾을 수 없습니다.</span>
         </div>
       )}
 
@@ -444,7 +464,7 @@ export default function BollingerChart({ ticker, height = 420 }: BollingerChartP
               minTickGap={50} />
             <YAxis domain={yDomain}
               tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false}
-              width={60} tickFormatter={v => `$${Number(v).toFixed(0)}`} />
+              width={60} tickFormatter={v => formatAxisPrice(Number(v))} />
             <Tooltip active={tooltipActive} content={<ChartTooltip />} />
 
             {/* BB filled channel: upper area fills down, lower area erases with background */}
@@ -495,12 +515,12 @@ export default function BollingerChart({ ticker, height = 420 }: BollingerChartP
             {/* TP line */}
             {tpEnabled && tpPrice > 0 && (
               <ReferenceLine y={tpPrice} stroke={COLOR_UP} strokeDasharray="6 3" strokeWidth={1.5}
-                label={{ value: `TP  $${tpPrice.toFixed(2)}`, fill: COLOR_UP, fontSize: 10, position: 'insideTopRight' }} />
+                label={{ value: `TP  ${formatPrice(tpPrice)}`, fill: COLOR_UP, fontSize: 10, position: 'insideTopRight' }} />
             )}
             {/* SL line */}
             {slEnabled && slPrice > 0 && (
               <ReferenceLine y={slPrice} stroke={COLOR_DOWN} strokeDasharray="6 3" strokeWidth={1.5}
-                label={{ value: `SL  $${slPrice.toFixed(2)}`, fill: COLOR_DOWN, fontSize: 10, position: 'insideBottomRight' }} />
+                label={{ value: `SL  ${formatPrice(slPrice)}`, fill: COLOR_DOWN, fontSize: 10, position: 'insideBottomRight' }} />
             )}
           </ComposedChart>
         </ResponsiveContainer>

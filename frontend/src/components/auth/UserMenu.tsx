@@ -59,18 +59,20 @@ export default function UserMenu() {
   if (!isAuthed) {
     return (
       <>
-        <div className="flex items-center gap-2">
+        {/* 좁은 화면에서는 아이콘을 감추고 글자만 남긴다.
+            아이콘까지 넣으면 두 버튼이 상단 바 폭을 넘겨 글자가 세로로 쪼개진다. */}
+        <div className="flex items-center gap-1.5 sm:gap-2">
           <button
             onClick={() => openAuth('login')}
-            className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium text-[#94a3b8] transition hover:bg-[#0d1526] hover:text-[#e2e8f0]"
+            className="inline-flex flex-shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg px-2 py-1.5 text-[12px] font-medium text-[#94a3b8] transition hover:bg-[#0d1526] hover:text-[#e2e8f0] sm:px-3 sm:text-sm"
           >
-            <LogIn size={15} /> 로그인
+            <LogIn size={15} className="hidden sm:block" /> 로그인
           </button>
           <button
             onClick={() => openAuth('signup')}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-[#3b82f6] px-3 py-1.5 text-sm font-semibold text-white transition hover:bg-[#2f6fe0]"
+            className="inline-flex flex-shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg bg-[#10b981] px-2 py-1.5 text-[12px] font-semibold text-white transition hover:bg-[#059669] sm:px-3 sm:text-sm"
           >
-            <UserPlus size={15} /> 회원가입
+            <UserPlus size={15} className="hidden sm:block" /> 회원가입
           </button>
         </div>
       </>
@@ -86,7 +88,7 @@ export default function UserMenu() {
         {photo ? (
           <img src={photo} alt="" className="h-7 w-7 rounded-full object-cover" />
         ) : (
-          <span className="flex h-7 w-7 items-center justify-center rounded-full bg-[#3b82f6] text-xs font-semibold text-white">
+          <span className="flex h-7 w-7 items-center justify-center rounded-full bg-[#10b981] text-xs font-semibold text-white">
             {initial}
           </span>
         )}
@@ -112,7 +114,7 @@ export default function UserMenu() {
           {features.is_admin && (
             <button
               onClick={() => { setOpen(false); setAdminOpen(true) }}
-              className="flex w-full items-center gap-2 px-4 py-2.5 text-sm text-[#3b82f6] transition hover:bg-[#0d1526]"
+              className="flex w-full items-center gap-2 px-4 py-2.5 text-sm text-[#10b981] transition hover:bg-[#0d1526]"
             >
               <ShieldCheck size={15} /> 관리자 설정
             </button>

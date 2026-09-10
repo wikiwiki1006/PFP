@@ -5,6 +5,8 @@ import { getSignalScan, getSignalScore } from '@/api'
 import BollingerChart from './BollingerChart'
 import { COLOR_UP, COLOR_DOWN } from './colors'
 import type { SignalScanPick, HoldingsMap } from '@/types'
+import TickerLabel from '@/components/TickerLabel'
+import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
 
 interface TradeSignalsPanelProps {
   holdings?: HoldingsMap
@@ -30,10 +32,11 @@ function PickRow({
   return (
     <button
       onClick={onClick}
-      className={`w-full text-left px-3 py-2 rounded border transition-colors ${selected ? 'border-[#3b82f6] bg-[#3b82f6]/10' : 'border-[#1e2d40] hover:bg-[#0a1525]'}`}
+      className={`w-full text-left px-3 py-2 rounded border transition-colors ${selected ? 'border-[#10b981] bg-[#10b981]/10' : 'border-[#1e2d40] hover:bg-[#0a1525]'}`}
     >
       <div className="flex justify-between items-center">
-        <span className="font-mono font-bold text-sm text-[#e2e8f0]">{p.ticker}</span>
+        {/* 한국은 종목명이 주, 코드가 보조. 미국은 반대 (TickerLabel 참고) */}
+        <TickerLabel ticker={p.ticker} name={p.name} />
         <span className="font-mono font-bold tabular-nums" style={{ color }}>
           <span className="text-[15px]">{p.score}</span><span className="text-[10px] text-[#64748b]">/100</span>
         </span>
@@ -117,14 +120,15 @@ function TickerScoreCard({ ticker }: { ticker: string }) {
 function HoldingRow({
   ticker, selected, onClick,
 }: { ticker: string; selected: boolean; onClick: () => void }) {
+  const names = useTickerNames()
   return (
     <button
       onClick={onClick}
-      className={`w-full text-left px-3 py-2 rounded border transition-colors font-mono font-bold text-sm ${
+      className={`w-full text-left px-3 py-2 rounded border transition-colors font-bold text-sm ${
         selected ? 'border-[#f59e0b] bg-[#f59e0b]/10 text-[#f59e0b]' : 'border-[#1e2d40] text-[#e2e8f0] hover:bg-[#0a1525]'
       }`}
     >
-      {ticker}
+      {displayTicker(ticker, names)}
     </button>
   )
 }
@@ -173,7 +177,7 @@ export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelPr
               onChange={e => setSearch(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && submitSearch()}
               placeholder="티커 검색…"
-              className="w-full bg-[#060b14] border border-[#1e2d40] rounded pl-8 pr-3 py-2 text-sm text-[#e2e8f0] placeholder:text-[#374151] focus:outline-none focus:border-[#3b82f6]"
+              className="w-full bg-[#060b14] border border-[#1e2d40] rounded pl-8 pr-3 py-2 text-sm text-[#e2e8f0] placeholder:text-[#374151] focus:outline-none focus:border-[#10b981]"
             />
           </div>
 

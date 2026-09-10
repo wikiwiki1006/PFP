@@ -96,7 +96,7 @@ export default function Market() {
                 className={cn(
                   'px-3 py-1 text-xs rounded transition-colors',
                   sectorView === v
-                    ? 'bg-[#3b82f6] text-white'
+                    ? 'bg-[#10b981] text-white'
                     : 'bg-[#0b0f1a] text-[#64748b] hover:text-[#e2e8f0] border border-[#1e2d40]'
                 )}
               >
@@ -183,7 +183,7 @@ export default function Market() {
                           'text-xs px-1.5 py-0.5 rounded font-mono font-semibold',
                           bgColorForValue(0)
                         )}
-                        style={{ backgroundColor: '#3b82f6/10', color: '#3b82f6' }}
+                        style={{ backgroundColor: '#10b981/10', color: '#10b981' }}
                       >
                         {item.ticker}
                       </span>
@@ -200,7 +200,7 @@ export default function Market() {
                       href={item.url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-sm text-[#e2e8f0] hover:text-[#3b82f6] line-clamp-2 transition-colors"
+                      className="text-sm text-[#e2e8f0] hover:text-[#10b981] line-clamp-2 transition-colors"
                     >
                       {item.headline}
                     </a>
@@ -209,7 +209,7 @@ export default function Market() {
                     href={item.url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-[#64748b] hover:text-[#3b82f6] flex-shrink-0 mt-1"
+                    className="text-[#64748b] hover:text-[#10b981] flex-shrink-0 mt-1"
                   >
                     <ExternalLink className="w-3.5 h-3.5" />
                   </a>

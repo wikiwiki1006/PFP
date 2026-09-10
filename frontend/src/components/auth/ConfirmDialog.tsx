@@ -31,13 +31,13 @@ const ICONS: Record<Tone, typeof AlertTriangle> = {
 }
 
 const ACCENT: Record<Tone, string> = {
-  default: 'text-[#3b82f6]',
+  default: 'text-[#10b981]',
   danger:  'text-[#ef4444]',
   success: 'text-[#10b981]',
 }
 
 const CONFIRM_BG: Record<Tone, string> = {
-  default: 'bg-[#3b82f6] hover:bg-[#2f6fe0]',
+  default: 'bg-[#10b981] hover:bg-[#059669]',
   danger:  'bg-[#dc2626] hover:bg-[#b91c1c]',
   success: 'bg-[#10b981] hover:bg-[#059669]',
 }

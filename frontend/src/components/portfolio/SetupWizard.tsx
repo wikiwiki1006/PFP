@@ -15,7 +15,11 @@
 import { useState } from 'react'
 import { X, Plus, Trash2, Loader2, AlertTriangle, ArrowRight, Check } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { marketSymbol, MARKETS, getMarket, setMarket, moneyInputProps } from '@/lib/market'
+import { useMarket } from '@/lib/useMarket'
 import { setupPortfolio, getTickerPrice, searchTickers, type SetupHolding } from '@/api'
+import { formatPrice } from '@/lib/market'
+import TickerLabel from '@/components/TickerLabel'
 
 interface Props {
   open: boolean
@@ -39,12 +43,21 @@ const today = () => new Date().toISOString().slice(0, 10)
 
 const emptyRow = (): Row => ({ ticker: '', q: 0, price: 0, date: today() })
 
+// 시장 선택 단계. 등록 절차의 일부가 아니라 그 앞에 오는 선택이라 음수로 둔다 —
+// 이렇게 하면 진행 표시(1·2단계)와 하단 버튼의 `step > 0` 조건을 손대지 않아도 된다.
+const MARKET_STEP = -1
+
 /** 금액 표기 — 입력란 라벨에 통화를 명시해 원화로 오해하지 않게 한다. */
-const usd = (n: number) => `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+const money = (n: number) => formatPrice(n)
 
 export default function SetupWizard({ open, replace = false, onClose, onDone }: Props) {
-  // replace 면 경고 단계(0)부터, 아니면 종목 입력(1)부터 시작한다.
-  const [step, setStep]   = useState(replace ? 0 : 1)
+  // 통화 표기는 시장을 따른다. 한국 화면에 (USD) 라고 적혀 있으면
+  // 사용자가 원화를 달러로 잘못 입력한다.
+  const curLabel = useMarket() === 'KR' ? 'KRW' : 'USD' 
+  // replace(새로 등록)면 경고 단계(0)부터.
+  // 최초 등록이면 시장 선택(-1)부터 — 어느 시장에 담는지부터 정해야 한다.
+  // 종목을 다 넣은 뒤에 시장을 바꾸면 그 입력이 전부 다른 시장 것이 된다.
+  const [step, setStep]   = useState(replace ? 0 : MARKET_STEP)
   const [rows, setRows]   = useState<Row[]>([emptyRow()])
   const [cash, setCash]   = useState('')
   const [busy, setBusy]   = useState(false)
@@ -111,7 +124,8 @@ export default function SetupWizard({ open, replace = false, onClose, onDone }: 
               {replace ? '포트폴리오 새로 등록' : '포트폴리오 등록'}
             </h2>
             <p className="mt-0.5 text-xs text-[#4a5568]">
-              {step === 0 ? '기존 정보 삭제 확인'
+              {step === MARKET_STEP ? '시장 선택'
+                : step === 0 ? '기존 정보 삭제 확인'
                 : step === 1 ? '1단계 · 보유 종목'
                 : '2단계 · 현금 잔고'}
             </p>
@@ -134,7 +148,7 @@ export default function SetupWizard({ open, replace = false, onClose, onDone }: 
                   <div className={cn(
                     'flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full text-[11px] font-bold transition-colors',
                     done ? 'bg-[#10b981] text-white'
-                      : now ? 'bg-[#3b82f6] text-white'
+                      : now ? 'bg-[#10b981] text-white'
                       : 'border border-[#2d3f56] text-[#4a5568]',
                   )}>
                     {done ? <Check size={13} /> : n}
@@ -155,6 +169,40 @@ export default function SetupWizard({ open, replace = false, onClose, onDone }: 
 
         <div className="flex-1 overflow-y-auto px-6 py-5">
           {/* ── 0단계: 덮어쓰기 경고 ── */}
+          {/* ── 시장 선택 (최초 등록) ── */}
+          {step === MARKET_STEP && (
+            <div className="flex flex-col items-center py-4 text-center">
+              <h3 className="text-base font-semibold text-[#e2e8f0]">
+                어느 시장의 포트폴리오인가요?
+              </h3>
+              <p className="mt-2 max-w-md text-sm leading-relaxed text-[#7d8ca3]">
+                미국과 한국은 <span className="text-[#e2e8f0]">완전히 분리된 포트폴리오</span>로
+                관리됩니다. 나중에 상단 전환 버튼으로 다른 시장을 따로 등록할 수 있습니다.
+              </p>
+              <div className="mt-6 grid w-full max-w-md grid-cols-2 gap-3">
+                {(['US', 'KR'] as const).map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => { setMarket(m); setStep(1) }}
+                    className={cn(
+                      'rounded-xl border-2 px-4 py-5 text-left transition',
+                      'border-[#2d3f56] hover:border-[#10b981] hover:bg-[#10b981]/5',
+                    )}
+                  >
+                    <div className="text-sm font-bold text-[#e2e8f0]">{MARKETS[m].label}</div>
+                    <div className="mt-1 text-[11px] text-[#7d8ca3]">
+                      {m === 'US' ? 'NYSE · NASDAQ · USD' : 'KOSPI · KOSDAQ · KRW'}
+                    </div>
+                  </button>
+                ))}
+              </div>
+              <button onClick={onClose}
+                      className="mt-5 rounded-lg border border-[#2d3f56] px-5 py-2 text-sm font-medium text-[#94a3b8] transition hover:bg-[#0d1526]">
+                취소
+              </button>
+            </div>
+          )}
+
           {step === 0 && (
             <div className="flex flex-col items-center py-6 text-center">
               <AlertTriangle size={30} className="mb-3 text-[#ef4444]" />
@@ -184,65 +232,74 @@ export default function SetupWizard({ open, replace = false, onClose, onDone }: 
             <div className="space-y-3">
               <p className="text-xs leading-relaxed text-[#7d8ca3]">
                 현재 보유 중인 종목을 <span className="text-[#e2e8f0]">매수일</span>과
-                <span className="text-[#e2e8f0]"> 매수 단가(USD)</span>와 함께 입력해 주세요.
+                <span className="text-[#e2e8f0]"> 매수 단가({curLabel})</span>와 함께 입력해 주세요.
                 <br />없으면 비워 두고 다음으로 넘어가도 됩니다.
               </p>
 
               {/* 좁은 화면에서는 각 입력칸에 자리표시자가 라벨 노릇을 하므로 이 줄은 숨긴다 */}
               <div className="hidden sm:grid grid-cols-[1.4fr_0.8fr_1fr_1.1fr_auto] gap-2 px-1 text-[10px] font-bold uppercase tracking-wider text-[#4a5568]">
-                <span>종목</span><span>수량</span><span>매수 단가 (USD)</span><span>매수일</span><span />
+                <span>종목</span><span>수량</span><span>매수 단가 ({curLabel})</span><span>매수일</span><span />
               </div>
 
               {rows.map((r, i) => (
-                <div key={i} className="relative">
-                  {/* 모바일: 5칸을 한 줄에 넣으면 칸마다 60px 남짓이라 숫자가 안 보인다.
-                      두 줄로 접어 각 칸이 읽히는 폭을 갖게 한다 — 좌우로 밀 필요가 없다. */}
-                  <div className="grid grid-cols-[1.3fr_0.7fr_auto] sm:grid-cols-[1.4fr_0.8fr_1fr_1.1fr_auto] gap-2">
-                    <input
-                      value={r.ticker}
-                      onChange={e => onTickerInput(i, e.target.value)}
-                      onBlur={() => { setTimeout(() => setSug({ i: -1, list: [] }), 150); fillPrice(i, r.ticker) }}
-                      placeholder="AAPL"
-                      className="rounded-lg border border-[#1e2d40] bg-[#0d1526] px-3 py-2 font-mono text-sm text-[#e2e8f0] outline-none focus:border-[#3b82f6]"
-                    />
+                <div key={i} className="relative rounded-xl border border-[#1e2d40] bg-[#0b1220]/40 p-2.5 sm:border-0 sm:bg-transparent sm:p-0">
+                  {/* 종목 한 건 = 카드 하나.
+                      모바일은 2×2(종목·수량 / 단가·매수일)로 놓아 좌우로 밀 일이 없고,
+                      종목을 추가하면 카드가 아래로 쌓여 세로 스크롤만으로 등록된다.
+                      넓은 화면에서는 예전처럼 한 줄 5칸을 유지한다. */}
+                  <div className="grid grid-cols-2 sm:grid-cols-[1.4fr_0.8fr_1fr_1.1fr_auto] gap-2">
+
+                    {/* 종목 — 조회한 현재가를 칸 안 오른쪽에 함께 보여준다.
+                        아래 별도 줄에 두면 카드가 한 줄 더 길어지고, 어느 종목의
+                        가격인지도 눈으로 이어 붙여야 한다. */}
+                    <div className="relative col-span-2 sm:col-span-1">
+                      <input
+                        value={r.ticker}
+                        onChange={e => onTickerInput(i, e.target.value)}
+                        onBlur={() => { setTimeout(() => setSug({ i: -1, list: [] }), 150); fillPrice(i, r.ticker) }}
+                        placeholder={MARKETS[getMarket()].tickerExample}
+                        className="w-full rounded-lg border border-[#1e2d40] bg-[#0d1526] py-2 pl-3 pr-20 font-mono text-sm text-[#e2e8f0] outline-none focus:border-[#10b981]"
+                      />
+                      <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 flex items-center gap-1">
+                        {r.loading && <Loader2 size={12} className="animate-spin text-[#10b981]" />}
+                        {!r.loading && !r.error && r.currentPrice != null && (
+                          <span className="font-mono text-[11px] text-[#64748b]">{money(r.currentPrice)}</span>
+                        )}
+                      </span>
+                    </div>
+
                     <input
                       type="number" min="0" step="any" value={r.q || ''}
                       onChange={e => setRow(i, { q: parseFloat(e.target.value) || 0 })}
-                      placeholder="0"
-                      className="rounded-lg border border-[#1e2d40] bg-[#0d1526] px-3 py-2 text-sm text-[#e2e8f0] outline-none focus:border-[#3b82f6]"
+                      placeholder="수량"
+                      className="rounded-lg border border-[#1e2d40] bg-[#0d1526] px-3 py-2 text-sm text-[#e2e8f0] outline-none focus:border-[#10b981]"
                     />
-                    {/* 모바일에서는 이 두 칸이 둘째 줄을 통째로 쓴다 (col-span-3) */}
-                    <div className="relative col-span-2 sm:col-span-1">
-                      <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-[#4a5568]">$</span>
+
+                    <div className="relative">
+                      <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-[#4a5568]">{marketSymbol()}</span>
                       <input
-                        type="number" min="0" step="any" value={r.price || ''}
-                        onChange={e => setRow(i, { price: parseFloat(e.target.value) || 0 })}
-                        placeholder="0.00"
-                        className="w-full rounded-lg border border-[#1e2d40] bg-[#0d1526] py-2 pl-6 pr-2 text-sm text-[#e2e8f0] outline-none focus:border-[#3b82f6]"
+                        {...moneyInputProps(r.price || '', price => setRow(i, { price }))}
+                        placeholder="매수 단가"
+                        className="w-full rounded-lg border border-[#1e2d40] bg-[#0d1526] py-2 pl-6 pr-2 text-sm text-[#e2e8f0] outline-none focus:border-[#10b981]"
                       />
-                      {r.loading && (
-                        <Loader2 size={13} className="absolute right-2 top-1/2 -translate-y-1/2 animate-spin text-[#3b82f6]" />
-                      )}
                     </div>
+
                     <input
                       type="date" value={r.date} max={today()}
                       onChange={e => setRow(i, { date: e.target.value })}
-                      className="col-span-1 rounded-lg border border-[#1e2d40] bg-[#0d1526] px-2 py-2 text-sm text-[#e2e8f0] outline-none focus:border-[#3b82f6]"
+                      className="rounded-lg border border-[#1e2d40] bg-[#0d1526] px-2 py-2 text-sm text-[#e2e8f0] outline-none focus:border-[#10b981]"
                     />
+
                     <button
                       onClick={() => setRows(rs => (rs.length > 1 ? rs.filter((_, k) => k !== i) : [emptyRow()]))}
                       aria-label="행 삭제"
-                      className="rounded-lg px-2 text-[#4a5568] transition hover:bg-[#0d1526] hover:text-[#ef4444]">
-                      <Trash2 size={15} />
+                      className="col-span-2 sm:col-span-1 flex items-center justify-center gap-1 rounded-lg border border-[#1e2d40] py-1.5 text-[11px] text-[#4a5568] transition hover:bg-[#0d1526] hover:text-[#ef4444] sm:border-0 sm:py-0 sm:text-0">
+                      <Trash2 size={14} />
+                      <span className="sm:hidden">이 종목 삭제</span>
                     </button>
                   </div>
 
                   {r.error && <p className="mt-1 pl-1 text-[11px] text-[#ef4444]">{r.error}</p>}
-                  {!r.error && r.currentPrice != null && (
-                    <p className="mt-1 pl-1 text-[11px] text-[#4a5568]">
-                      현재가 {usd(r.currentPrice)} — 매수 단가는 직접 입력하세요
-                    </p>
-                  )}
 
                   {sug.i === i && sug.list.length > 0 && (
                     <div className="absolute left-0 top-full z-20 mt-1 max-h-44 w-72 overflow-y-auto rounded-lg border border-[#1e2d40] bg-[#0b1220] shadow-xl">
@@ -250,8 +307,10 @@ export default function SetupWizard({ open, replace = false, onClose, onDone }: 
                         <button key={s.ticker}
                           onMouseDown={() => { setSug({ i: -1, list: [] }); fillPrice(i, s.ticker) }}
                           className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] transition hover:bg-[#1e2d40]">
-                          <span className="font-mono font-bold text-[#e2e8f0]">{s.ticker}</span>
-                          <span className="truncate text-[#94a3b8]">{s.name}</span>
+                          {/* 한국은 이름이 먼저 — 코드만 굵게 두면 무슨 회사인지 모른다. */}
+                          <TickerLabel ticker={s.ticker} name={s.name}
+                                       primaryClass="text-[11px] font-bold"
+                                       secondaryClass="text-[10px]" />
                         </button>
                       ))}
                     </div>
@@ -260,13 +319,13 @@ export default function SetupWizard({ open, replace = false, onClose, onDone }: 
               ))}
 
               <button onClick={() => setRows(rs => [...rs, emptyRow()])}
-                      className="flex items-center gap-1.5 rounded-lg border border-dashed border-[#1e2d40] px-3 py-2 text-xs text-[#7d8ca3] transition hover:border-[#3b82f6]/50 hover:text-[#cbd5e1]">
+                      className="flex items-center gap-1.5 rounded-lg border border-dashed border-[#1e2d40] px-3 py-2 text-xs text-[#7d8ca3] transition hover:border-[#10b981]/50 hover:text-[#cbd5e1]">
                 <Plus size={13} /> 종목 추가
               </button>
 
               <div className="flex items-center justify-between rounded-lg border border-[#1e2d40] bg-[#0d1526] px-4 py-2.5 text-sm">
-                <span className="text-[#7d8ca3]">매수금 합계 (USD)</span>
-                <span className="font-mono font-bold text-[#e2e8f0]">{usd(invested)}</span>
+                <span className="text-[#7d8ca3]">매수금 합계 ({curLabel})</span>
+                <span className="font-mono font-bold text-[#e2e8f0]">{money(invested)}</span>
               </div>
             </div>
           )}
@@ -275,20 +334,19 @@ export default function SetupWizard({ open, replace = false, onClose, onDone }: 
           {step === 2 && (
             <div className="space-y-4">
               <p className="text-xs leading-relaxed text-[#7d8ca3]">
-                현재 계좌에 남아 있는 <span className="text-[#e2e8f0]">현금 잔고(USD)</span>를 입력해 주세요.
+                현재 계좌에 남아 있는 <span className="text-[#e2e8f0]">현금 잔고({curLabel})</span>를 입력해 주세요.
               </p>
 
               <div>
                 <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-[#4a5568]">
-                  현금 잔고 (USD)
+                  현금 잔고 ({curLabel})
                 </label>
                 <div className="relative">
-                  <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-[#4a5568]">$</span>
+                  <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-[#4a5568]">{marketSymbol()}</span>
                   <input
-                    type="number" min="0" step="any" value={cash} autoFocus
-                    onChange={e => setCash(e.target.value)}
+                    {...moneyInputProps(cash, n => setCash(String(n)))} autoFocus
                     placeholder="0.00"
-                    className="w-full rounded-lg border border-[#1e2d40] bg-[#0d1526] py-3 pl-7 pr-3 font-mono text-lg text-[#e2e8f0] outline-none focus:border-[#3b82f6]"
+                    className="w-full rounded-lg border border-[#1e2d40] bg-[#0d1526] py-3 pl-7 pr-3 font-mono text-lg text-[#e2e8f0] outline-none focus:border-[#10b981]"
                   />
                 </div>
               </div>
@@ -298,15 +356,15 @@ export default function SetupWizard({ open, replace = false, onClose, onDone }: 
               <div className="space-y-1.5 rounded-lg border border-[#1e2d40] bg-[#0d1526] px-4 py-3 text-sm">
                 <div className="flex justify-between">
                   <span className="text-[#7d8ca3]">보유 종목 매수금</span>
-                  <span className="font-mono text-[#cbd5e1]">{usd(invested)}</span>
+                  <span className="font-mono text-[#cbd5e1]">{money(invested)}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-[#7d8ca3]">현금 잔고</span>
-                  <span className="font-mono text-[#cbd5e1]">{usd(cashNum)}</span>
+                  <span className="font-mono text-[#cbd5e1]">{money(cashNum)}</span>
                 </div>
                 <div className="mt-1 flex justify-between border-t border-[#1e2d40] pt-2">
                   <span className="font-medium text-[#e2e8f0]">최초 입금액으로 기록</span>
-                  <span className="font-mono font-bold text-[#3b82f6]">{usd(invested + cashNum)}</span>
+                  <span className="font-mono font-bold text-[#10b981]">{money(invested + cashNum)}</span>
                 </div>
                 <p className="pt-1 text-[11px] leading-relaxed text-[#4a5568]">
                   가장 이른 매수일에 이 금액을 입금한 것으로 기록해, 그래프와 수익률이
@@ -335,7 +393,7 @@ export default function SetupWizard({ open, replace = false, onClose, onDone }: 
             {step === 1 ? (
               <button
                 onClick={() => { setError(''); setStep(2) }}
-                className="flex items-center gap-1.5 rounded-lg bg-[#3b82f6] px-5 py-2 text-sm font-semibold text-white transition hover:bg-[#2f6fe0]">
+                className="flex items-center gap-1.5 rounded-lg bg-[#10b981] px-5 py-2 text-sm font-semibold text-white transition hover:bg-[#059669]">
                 다음 <ArrowRight size={15} />
               </button>
             ) : (

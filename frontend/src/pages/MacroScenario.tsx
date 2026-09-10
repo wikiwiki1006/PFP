@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { Globe, Play, ChevronDown, ChevronRight, Download, History, X, Square, Lock } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
+import { MARKDOWN_PLUGINS } from '@/lib/markdown'
 import { ErrorMessage } from '@/components/LoadingSpinner'
 import { FinancialTips } from '@/components/FinancialTips'
 import { getMacroModes, startMacroAnalysis, getMacroJob, cancelMacroJob, getHoldings, getMacroReportHistory, getMacroReportFile } from '@/api'
@@ -12,6 +12,7 @@ import { cn } from '@/lib/utils'
 import { useLoginPrompt } from '@/components/auth/LockedPreview'
 import { useDemoQuery } from '@/lib/useDemoQuery'
 import { DEMO_HOLDINGS_RAW } from '@/lib/demoData'
+import { marketSession } from '@/lib/marketStorage'
 
 // ── sessionStorage 키 ──────────────────────────────────────────────────────────
 const SK_PENDING   = 'macro_pending'
@@ -52,7 +53,7 @@ const MODE_DESCRIPTIONS: Record<string, string> = {
 
 const PRESETS = [
   { label: 'Fed 긴축 충격',   event: '인플레이션이 잡히지 않아 중앙은행이 기준금리를 큰 폭으로 올리고 추가 인상까지 시사했습니다. 시장 금리가 전반적으로 뛰면서 차입 비용이 오르고, 대출과 주택 시장이 함께 식고 있습니다.' },
-  { label: '대만 해협 봉쇄',   event: '대만 해협의 해상 통행이 막혀 아시아發 물류가 광범위하게 지연되고 있습니다. 첨단 반도체 조달이 어려워지면서 이를 쓰는 산업 전반으로 생산 차질이 번지고 있습니다.' },
+  { label: '대만 해협 봉쇄',   event: '대만 해협의 해상 통행이 막혀 아시아 물류가 광범위하게 지연되고 있습니다. 첨단 반도체 조달이 어려워지면서 이를 쓰는 산업 전반으로 생산 차질이 번지고 있습니다.' },
   { label: '은행 위기',       event: '부동산 대출 손실이 불거지며 일부 은행이 잇달아 무너지고 예금 이탈이 번지고 있습니다. 금융권이 대출을 조이면서 기업과 가계가 돈을 구하기 어려워졌습니다.' },
   { label: 'OPEC+ 감산',     event: '주요 산유국이 원유 생산을 크게 줄이면서 유가가 지속적으로 오르고 있습니다. 에너지 비용 상승이 물가 전반으로 번져, 성장은 둔한데 물가만 오르는 국면이 우려됩니다.' },
   { label: '무역 전쟁',       event: '주요국이 서로 높은 관세와 수출 제한을 주고받으며 갈등이 확산되고 있습니다. 국가 간 교역이 위축되고 기업들이 공급망을 급하게 재편하면서 비용이 늘고 있습니다.' },
@@ -127,7 +128,7 @@ function ProgressBar({ progress, elapsedMs, mode }: { progress: number; elapsedM
           className="h-full rounded-full transition-all duration-500"
           style={{
             width: `${progress}%`,
-            background: 'linear-gradient(90deg, #7c3aed, #3b82f6)',
+            background: 'linear-gradient(90deg, #10b981, #059669)',
           }}
         />
       </div>
@@ -157,7 +158,7 @@ function AgentCard({
         className="w-full flex items-center justify-between px-4 py-3 hover:bg-[#0a1628] transition-colors"
       >
         <div className="flex items-center gap-2.5">
-          <div className="w-5 h-5 rounded-full bg-[#9b59b6]/20 border border-[#9b59b6]/30 flex items-center justify-center text-[10px] font-mono text-[#9b59b6]">
+          <div className="w-5 h-5 rounded-full bg-[#10b981]/20 border border-[#10b981]/30 flex items-center justify-center text-[10px] font-mono text-[#10b981]">
             {index + 1}
           </div>
           <span className="text-sm font-semibold text-[#f1f5f9]">{agent.name}</span>
@@ -181,7 +182,7 @@ function AgentCard({
             <ActionTable actions={portfolioActions} />
           ) : (
             <div className="macro-md">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{agent.text}</ReactMarkdown>
+              <ReactMarkdown remarkPlugins={MARKDOWN_PLUGINS}>{agent.text}</ReactMarkdown>
             </div>
           )}
         </div>
@@ -375,7 +376,7 @@ function buildPdfHtml(result: MacroAnalysisResult, dateStr: string): string {
     .footer{margin-top:20px;padding-top:10px;border-top:1px solid #e5e7eb;font-size:10px;color:#9ca3af;text-align:center}
   </style></head><body>
   <div class="hdr">
-    <div class="brand">PERSONAL FINANCIAL PLATFORM</div>
+    <div class="brand">ZOOPZOOP</div>
     <div class="title">매크로 시나리오 분석 · ${dateStr}</div>
     <div class="ev">${(result.event ?? '').replace(/</g, '&lt;').replace(/>/g, '&gt;').slice(0, 200)}</div>
   </div>
@@ -402,22 +403,22 @@ export default function MacroScenario() {
   // 시나리오 분석·과거 이력은 로그인이 필요하다. 예시 분석 결과는 만들지 않는다.
   const { isAuthed, requireLogin, modalEl } = useLoginPrompt()
   // sessionStorage 에서 이전 상태 복원
-  const [event,    setEvent]    = useState(() => sessionStorage.getItem(SK_EVENT)    || '')
+  const [event,    setEvent]    = useState(() => marketSession.get(SK_EVENT)    || '')
   // 기본은 '기본 분석'(haiku). 심층 분석은 토큰을 훨씬 많이 쓰므로 사용자가
   // 필요할 때 직접 고르게 한다.
-  const [model,    setModel]    = useState(() => sessionStorage.getItem(SK_MODEL)    || 'haiku')
-  const [mode,     setMode]     = useState(() => sessionStorage.getItem(SK_MODE)     || 'standard')
+  const [model,    setModel]    = useState(() => marketSession.get(SK_MODEL)    || 'haiku')
+  const [mode,     setMode]     = useState(() => marketSession.get(SK_MODE)     || 'standard')
 
   const [result, setResult] = useState<MacroAnalysisResult | null>(() => {
     try {
-      const s = sessionStorage.getItem(SK_RESULT)
+      const s = marketSession.get(SK_RESULT)
       return s ? JSON.parse(s) : null
     } catch { return null }
   })
 
   // 새로고침 후 재개할 잡 ID (sessionStorage에서 복원)
   const [jobId, setJobId] = useState<string | null>(
-    () => sessionStorage.getItem(SK_JOB_ID)
+    () => marketSession.get(SK_JOB_ID)
   )
 
   // 진행 바 상태
@@ -440,7 +441,7 @@ export default function MacroScenario() {
   const loadHistMut = useMutation({
     mutationFn: getMacroReportFile,
     onSuccess: (data) => {
-      sessionStorage.setItem(SK_RESULT, JSON.stringify(data))
+      marketSession.set(SK_RESULT, JSON.stringify(data))
       setResult(data)
       setShowHist(false)
     },
@@ -461,17 +462,17 @@ export default function MacroScenario() {
       if (wantCancelRef.current) {
         wantCancelRef.current = false
         cancelMacroJob(job_id).catch(() => {})
-        sessionStorage.removeItem(SK_PENDING)
-        sessionStorage.removeItem(SK_JOB_ID)
+        marketSession.remove(SK_PENDING)
+        marketSession.remove(SK_JOB_ID)
         return
       }
-      sessionStorage.setItem(SK_JOB_ID,  job_id)
-      sessionStorage.setItem(SK_PENDING, '1')
+      marketSession.set(SK_JOB_ID,  job_id)
+      marketSession.set(SK_PENDING, '1')
       setJobId(job_id)
     },
     onError: () => {
       wantCancelRef.current = false
-      sessionStorage.removeItem(SK_PENDING)
+      marketSession.remove(SK_PENDING)
       setProgress(0)
     },
   })
@@ -491,8 +492,8 @@ export default function MacroScenario() {
   const cancelMut = useMutation({
     mutationFn: (id: string) => cancelMacroJob(id),
     onSettled: () => {
-      sessionStorage.removeItem(SK_PENDING)
-      sessionStorage.removeItem(SK_JOB_ID)
+      marketSession.remove(SK_PENDING)
+      marketSession.remove(SK_JOB_ID)
       setJobId(null)
       setProgress(0)
     },
@@ -505,8 +506,8 @@ export default function MacroScenario() {
     } else if (startMut.isPending) {
       // POST 응답 오기 전: onSuccess에서 처리하도록 플래그 세팅
       wantCancelRef.current = true
-      sessionStorage.removeItem(SK_PENDING)
-      sessionStorage.removeItem(SK_JOB_ID)
+      marketSession.remove(SK_PENDING)
+      marketSession.remove(SK_JOB_ID)
       setProgress(0)
     }
   }
@@ -516,16 +517,16 @@ export default function MacroScenario() {
     if (!pollQ.data) return
     if (pollQ.data.status === 'done' && pollQ.data.result) {
       const r = pollQ.data.result as MacroAnalysisResult
-      sessionStorage.setItem(SK_RESULT, JSON.stringify(r))
-      sessionStorage.removeItem(SK_PENDING)
-      sessionStorage.removeItem(SK_JOB_ID)
+      marketSession.set(SK_RESULT, JSON.stringify(r))
+      marketSession.remove(SK_PENDING)
+      marketSession.remove(SK_JOB_ID)
       setResult(r)
       setProgress(100)
       setJobId(null)
       histQ.refetch()
     } else if (pollQ.data.status === 'error' || pollQ.data.status === 'cancelled') {
-      sessionStorage.removeItem(SK_PENDING)
-      sessionStorage.removeItem(SK_JOB_ID)
+      marketSession.remove(SK_PENDING)
+      marketSession.remove(SK_JOB_ID)
       setProgress(0)
       setJobId(null)
     }
@@ -534,8 +535,8 @@ export default function MacroScenario() {
   // 폴링 중 서버 재시작 등으로 404 → 잡 소실 처리
   useEffect(() => {
     if (!pollQ.isError) return
-    sessionStorage.removeItem(SK_PENDING)
-    sessionStorage.removeItem(SK_JOB_ID)
+    marketSession.remove(SK_PENDING)
+    marketSession.remove(SK_JOB_ID)
     setJobId(null)
     setProgress(0)
   }, [pollQ.isError])
@@ -548,8 +549,8 @@ export default function MacroScenario() {
   const autoStartedRef = useRef(false)
   useEffect(() => {
     if (autoStartedRef.current) return
-    const hasPending = sessionStorage.getItem(SK_PENDING) === '1'
-    const hasJobId   = !!sessionStorage.getItem(SK_JOB_ID)
+    const hasPending = marketSession.get(SK_PENDING) === '1'
+    const hasJobId   = !!marketSession.get(SK_JOB_ID)
     if (hasPending && !hasJobId && event.trim()) {
       autoStartedRef.current = true
       startMut.mutate()
@@ -559,7 +560,7 @@ export default function MacroScenario() {
   // 진행 바 타이머
   useEffect(() => {
     if (!isRunning) return
-    const startMs = parseInt(sessionStorage.getItem(SK_START) || String(Date.now()), 10)
+    const startMs = parseInt(marketSession.get(SK_START) || String(Date.now()), 10)
     const maxMs   = MODE_MAX_MS[mode] ?? 65_000
     const tick = () => {
       const ms = Date.now() - startMs
@@ -573,13 +574,13 @@ export default function MacroScenario() {
 
   // 분석 시작 핸들러
   const startAnalysis = () => {
-    sessionStorage.setItem(SK_EVENT,    event)
-    sessionStorage.setItem(SK_MODEL,    model)
-    sessionStorage.setItem(SK_MODE,     mode)
-    sessionStorage.setItem(SK_START,   String(Date.now()))
-    sessionStorage.setItem(SK_PENDING, '1')   // POST 응답 전 새로고침 대비 — 즉시 세팅
-    sessionStorage.removeItem(SK_RESULT)
-    sessionStorage.removeItem(SK_JOB_ID)
+    marketSession.set(SK_EVENT,    event)
+    marketSession.set(SK_MODEL,    model)
+    marketSession.set(SK_MODE,     mode)
+    marketSession.set(SK_START,   String(Date.now()))
+    marketSession.set(SK_PENDING, '1')   // POST 응답 전 새로고침 대비 — 즉시 세팅
+    marketSession.remove(SK_RESULT)
+    marketSession.remove(SK_JOB_ID)
     wantCancelRef.current = false
     setResult(null)
     setJobId(null)
@@ -678,7 +679,7 @@ export default function MacroScenario() {
       {/* 헤더 */}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <Globe className="w-4 h-4 text-[#9b59b6]" />
+          <Globe className="w-4 h-4 text-[#10b981]" />
           <div>
             <h1 className="text-base font-bold text-[#e2e8f0]">매크로 시나리오 분석</h1>
             <p className="text-[11px] text-[#4a5568]">발생하지 않았거나 발생할 시나리오를 입력하면 시뮬레이션 결과를 제공합니다.</p>
@@ -689,7 +690,7 @@ export default function MacroScenario() {
             onClick={() => requireLogin(() => setShowHist(true))}
             disabled={isRunning}
             title={isAuthed ? '저장된 분석 보기' : '로그인 후 사용 가능합니다'}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0] hover:border-[#9b59b6]/40 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0] hover:border-[#10b981]/40 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {isAuthed ? <History className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5" />}
             과거 레포트
@@ -702,11 +703,11 @@ export default function MacroScenario() {
                 'flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] rounded font-bold transition-colors',
                 pdfBusy
                   ? 'border border-[#1e2d40] text-[#64748b] opacity-50 cursor-not-allowed'
-                  : 'border border-[#7c3aed]/50 bg-[#7c3aed]/10 text-[#c084fc] hover:bg-[#7c3aed]/20'
+                  : 'border border-[#059669]/50 bg-[#059669]/10 text-[#34d399] hover:bg-[#059669]/20'
               )}
             >
               {pdfBusy
-                ? <span className="w-3.5 h-3.5 border-2 border-[#7c3aed] border-t-transparent rounded-full animate-spin" />
+                ? <span className="w-3.5 h-3.5 border-2 border-[#059669] border-t-transparent rounded-full animate-spin" />
                 : <Download className="w-3.5 h-3.5" />
               }
               PDF
@@ -724,8 +725,8 @@ export default function MacroScenario() {
               className={cn(
                 'text-left p-2 rounded border transition-all text-xs disabled:opacity-40 disabled:cursor-not-allowed',
                 event === p.event
-                  ? 'border-[#9b59b6]/50 bg-[#9b59b6]/10 text-[#c084fc]'
-                  : 'border-[#1e2d40] text-[#64748b] hover:border-[#9b59b6]/30 hover:text-[#94a3b8] hover:bg-[#0a1628]'
+                  ? 'border-[#10b981]/50 bg-[#10b981]/10 text-[#34d399]'
+                  : 'border-[#1e2d40] text-[#64748b] hover:border-[#10b981]/30 hover:text-[#94a3b8] hover:bg-[#0a1628]'
               )}>
               <span className="font-medium">{p.label}</span>
             </button>
@@ -740,7 +741,7 @@ export default function MacroScenario() {
           readOnly={isRunning}
           placeholder="매크로 이벤트를 직접 입력하거나 위 프리셋을 선택하세요..."
           className={cn(
-            'w-full bg-[#0b0f1a] border border-[#1e2d40] rounded px-3 py-2 text-sm text-[#e2e8f0] focus:outline-none focus:border-[#9b59b6] resize-none placeholder-[#374151]',
+            'w-full bg-[#0b0f1a] border border-[#1e2d40] rounded px-3 py-2 text-sm text-[#e2e8f0] focus:outline-none focus:border-[#10b981] resize-none placeholder-[#374151]',
             isRunning && 'opacity-50 cursor-not-allowed',
           )}
         />
@@ -752,10 +753,10 @@ export default function MacroScenario() {
                 <button key={m} onClick={() => setMode(m)} disabled={isRunning}
                   className={cn(
                     'px-3 py-1.5 text-left rounded font-medium transition-colors min-w-[90px] disabled:opacity-40 disabled:cursor-not-allowed',
-                    mode === m ? 'bg-[#3b82f6] text-white' : 'bg-[#0b0f1a] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0]'
+                    mode === m ? 'bg-[#10b981] text-white' : 'bg-[#0b0f1a] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0]'
                   )}>
                   <div className="text-[11px] font-bold">{MODE_LABELS[m] ?? m}</div>
-                  <div className={cn('text-[9px] mt-0.5 leading-tight', mode === m ? 'text-blue-200' : 'text-[#475569]')}>
+                  <div className={cn('text-[9px] mt-0.5 leading-tight', mode === m ? 'text-emerald-200' : 'text-[#475569]')}>
                     {MODE_DESCRIPTIONS[m]}
                   </div>
                 </button>
@@ -775,10 +776,10 @@ export default function MacroScenario() {
                   title={locked ? '심층 분석은 현재 사용할 수 없습니다' : undefined}
                   className={cn(
                     'px-3 py-1.5 text-left rounded font-medium transition-colors min-w-[90px] disabled:opacity-40 disabled:cursor-not-allowed',
-                    model === m ? 'bg-[#9b59b6] text-white' : 'bg-[#0b0f1a] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0]'
+                    model === m ? 'bg-[#10b981] text-white' : 'bg-[#0b0f1a] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0]'
                   )}>
                   <div className="text-[11px] font-bold">{label}</div>
-                  <div className={cn('text-[9px] mt-0.5 leading-tight', model === m ? 'text-purple-200' : 'text-[#475569]')}>
+                  <div className={cn('text-[9px] mt-0.5 leading-tight', model === m ? 'text-emerald-200' : 'text-[#475569]')}>
                     {locked ? '사용 불가' : limited ? '하루 1회 · ' + desc : desc}
                   </div>
                 </button>
@@ -799,7 +800,7 @@ export default function MacroScenario() {
             <button
               onClick={() => requireLogin(startAnalysis)}
               disabled={isRunning || !event.trim()}
-              className="flex items-center gap-1.5 px-4 py-2 bg-[#9b59b6] hover:bg-[#7c3aed] disabled:opacity-50 text-white text-sm font-bold rounded transition-colors"
+              className="flex items-center gap-1.5 px-4 py-2 bg-[#10b981] hover:bg-[#059669] disabled:opacity-50 text-white text-sm font-bold rounded transition-colors"
             >
               {isAuthed ? <Play className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5" />}
               {isRunning ? '분석 중...' : '분석 실행'}
@@ -872,7 +873,7 @@ export default function MacroScenario() {
         .macro-md td { color: #e2e8f0; padding: 7px 10px; border-bottom: 1px solid #0f172a; font-size: 13px; }
         .macro-md tr:hover td { background: #0a1628; }
         .macro-md code { background: #0f172a; color: #10b981; padding: 2px 5px; border-radius: 3px; font-size: 12px; }
-        .macro-md blockquote { border-left: 3px solid #9b59b6; padding-left: 10px; color: #94a3b8; margin: 6px 0; }
+        .macro-md blockquote { border-left: 3px solid #10b981; padding-left: 10px; color: #94a3b8; margin: 6px 0; }
         .macro-md hr { border-color: #1e2d40; margin: 12px 0; }
       `}</style>
     </div>

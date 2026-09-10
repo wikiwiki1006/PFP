@@ -7,9 +7,19 @@ import { Search, Star } from 'lucide-react'
 import { getMarketRegime } from '@/api'
 import { COLOR_UP, COLOR_DOWN, COLOR_NEUTRAL, regimeColor, regimeLabel } from './colors'
 import { useTouchDismissTooltip } from '@/lib/useTouchDismissTooltip'
+import { formatPrice, getMarket } from '@/lib/market'
+import { useMarket } from '@/lib/useMarket'
 import type { HoldingsMap } from '@/types'
+import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
 
 const YEAR_OPTIONS = [1, 2, 3, 5] as const
+
+// 국면 판단의 기준 지수와 입력 예시는 시장을 따라간다.
+// 한국 화면에서 ^GSPC(S&P500) 를 기본으로 보여 주면 시장 구분이 무너진다.
+const MARKET_DEFAULTS = {
+  US: { index: '^GSPC', hint: '티커 입력 (예: AAPL)' },
+  KR: { index: '^KS11', hint: '종목 입력 (예: 삼성전자)' },
+} as const
 
 interface RegimePanelProps {
   holdings?: HoldingsMap
@@ -24,20 +34,29 @@ function ChartTooltip({ active, payload, label }: any) {
   return (
     <div className="bg-[#1a2035] border border-[#1e2d40] rounded-lg p-3 text-[11px] shadow-xl">
       <p className="text-[#64748b] mb-1">{label}</p>
-      <p className="text-[#e2e8f0] font-mono">${Number(p.payload.price).toFixed(2)}</p>
+      <p className="text-[#e2e8f0] font-mono">{formatPrice(Number(p.payload.price))}</p>
       <p className="font-bold" style={{ color }}>{regimeLabel(regime)}</p>
     </div>
   )
 }
 
 export default function RegimePanel({ holdings = {} }: RegimePanelProps) {
-  const [ticker, setTicker]             = useState('^GSPC')
+  const market = useMarket()
+  const names = useTickerNames()
+  const [ticker, setTicker]             = useState<string>(() => MARKET_DEFAULTS[getMarket()].index)
   const [tickerInitialized, setTickerInitialized] = useState(false)
   const [input, setInput]   = useState('')
   const [years, setYears]   = useState<1 | 2 | 3 | 5>(1)
   const { tooltipActive, onPointerDown, onPointerUp } = useTouchDismissTooltip()
 
   const holdingTickers = Object.keys(holdings).filter(t => t !== 'CASH')
+
+  // 시장을 바꾸면 이전 시장의 종목을 그대로 두지 않는다.
+  // 보유 종목 기준 자동 선택도 다시 하도록 초기화 플래그를 푼다.
+  useEffect(() => {
+    setTicker(MARKET_DEFAULTS[market].index)
+    setTickerInitialized(false)
+  }, [market])
 
   // Set default ticker to the largest holding by cost basis (once, when holdings load)
   useEffect(() => {
@@ -97,11 +116,11 @@ export default function RegimePanel({ holdings = {} }: RegimePanelProps) {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && submit()}
-            placeholder="티커 입력 (예: AAPL)"
-            className="w-full bg-[#060b14] border border-[#1e2d40] rounded pl-8 pr-3 py-2 text-sm text-[#e2e8f0] placeholder:text-[#374151] focus:outline-none focus:border-[#3b82f6]"
+            placeholder={MARKET_DEFAULTS[market].hint}
+            className="w-full bg-[#060b14] border border-[#1e2d40] rounded pl-8 pr-3 py-2 text-sm text-[#e2e8f0] placeholder:text-[#374151] focus:outline-none focus:border-[#10b981]"
           />
         </div>
-        <button onClick={submit} className="px-3 py-2 bg-[#3b82f6]/10 border border-[#3b82f6]/25 text-[#3b82f6] text-sm rounded hover:bg-[#3b82f6]/18 font-bold">
+        <button onClick={submit} className="px-3 py-2 bg-[#10b981]/10 border border-[#10b981]/25 text-[#10b981] text-sm rounded hover:bg-[#10b981]/18 font-bold">
           조회
         </button>
       </div>
@@ -117,7 +136,7 @@ export default function RegimePanel({ holdings = {} }: RegimePanelProps) {
             {holdingTickers.map(t => (
               <button key={t} onClick={() => setTicker(t)}
                 className={`px-2.5 py-1 text-[11px] font-mono rounded border ${ticker === t ? 'border-[#f59e0b] text-[#f59e0b] bg-[#f59e0b]/10' : 'border-[#1e2d40] text-[#64748b] hover:text-[#94a3b8]'}`}>
-                {t}
+                {displayTicker(t, names)}
               </button>
             ))}
           </div>
@@ -129,19 +148,19 @@ export default function RegimePanel({ holdings = {} }: RegimePanelProps) {
         <span className="text-[10px] text-[#64748b] font-bold tracking-widest">기간</span>
         {YEAR_OPTIONS.map(y => (
           <button key={y} onClick={() => setYears(y as 1 | 2 | 3 | 5)}
-            className={`px-2.5 py-1 text-[11px] font-mono rounded border transition-colors ${years === y ? 'border-[#3b82f6] text-[#3b82f6] bg-[#3b82f6]/10' : 'border-[#1e2d40] text-[#64748b] hover:text-[#94a3b8]'}`}>
+            className={`px-2.5 py-1 text-[11px] font-mono rounded border transition-colors ${years === y ? 'border-[#10b981] text-[#10b981] bg-[#10b981]/10' : 'border-[#1e2d40] text-[#64748b] hover:text-[#94a3b8]'}`}>
             {y}Y
           </button>
         ))}
       </div>
 
       {q.isLoading && <div className="text-sm text-[#64748b]">로드 중…</div>}
-      {q.isError && <div className="text-sm text-[#ef4444]">{ticker} 데이터를 불러올 수 없습니다.</div>}
+      {q.isError && <div className="text-sm text-[#ef4444]">{displayTicker(ticker, names)} 데이터를 불러올 수 없습니다.</div>}
 
       {q.data && (
         <>
           <div className="flex items-center gap-3">
-            <span className="font-mono font-bold text-lg text-[#e2e8f0]">{q.data.ticker}</span>
+            <span className="font-bold text-lg text-[#e2e8f0]">{displayTicker(q.data.ticker, names)}</span>
             <span className="text-[11px] font-bold px-2 py-1 rounded uppercase tracking-wider" style={{ color: currentColor, backgroundColor: `${currentColor}1a` }}>
               현재 국면: {regimeLabel(current ?? '')}
             </span>

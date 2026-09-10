@@ -30,7 +30,7 @@ export default function AuthGate({ children, feature = '이 기능', description
   if (loading) {
     return (
       <div className="flex items-center justify-center py-16">
-        <div className="h-5 w-5 animate-spin rounded-full border-2 border-[#2d3f56] border-t-[#3b82f6]" />
+        <div className="h-5 w-5 animate-spin rounded-full border-2 border-[#2d3f56] border-t-[#10b981]" />
       </div>
     )
   }
@@ -41,7 +41,7 @@ export default function AuthGate({ children, feature = '이 기능', description
     <div className="flex flex-wrap items-center gap-2">
       <button
         onClick={() => openAuth('login')}
-        className="inline-flex items-center gap-1.5 rounded-lg bg-[#3b82f6] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[#2f6fe0]"
+        className="inline-flex items-center gap-1.5 rounded-lg bg-[#10b981] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[#059669]"
       >
         <LogIn size={15} /> 로그인
       </button>

@@ -91,7 +91,7 @@ export default function Dashboard() {
       {feedbackQ.data && (
         <div className="bg-[#111827] border border-[#1e2d40] rounded-lg p-4">
           <div className="flex items-center gap-2 mb-3">
-            <MessageSquare className="w-4 h-4 text-[#3b82f6]" />
+            <MessageSquare className="w-4 h-4 text-[#10b981]" />
             <h2 className="text-sm font-semibold text-[#e2e8f0]">AI Analyst Feedback</h2>
           </div>
           <p className="text-sm text-[#e2e8f0] leading-relaxed whitespace-pre-wrap">
@@ -102,7 +102,7 @@ export default function Dashboard() {
       {feedbackQ.isLoading && (
         <div className="bg-[#111827] border border-[#1e2d40] rounded-lg p-4">
           <div className="flex items-center gap-2 mb-3">
-            <MessageSquare className="w-4 h-4 text-[#3b82f6]" />
+            <MessageSquare className="w-4 h-4 text-[#10b981]" />
             <h2 className="text-sm font-semibold text-[#e2e8f0]">AI Analyst Feedback</h2>
           </div>
           <LoadingSpinner size="sm" text="Loading analyst feedback..." />

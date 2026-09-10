@@ -6,6 +6,7 @@ import LoadingSpinner, { ErrorMessage } from '@/components/LoadingSpinner'
 import { getHoldingsDetail, getSectorWeights, getTrades, postTrade } from '@/api'
 import { formatCurrency, formatPct, colorForValue, bgColorForValue } from '@/lib/utils'
 import { cn } from '@/lib/utils'
+import { MARKETS, getMarket, moneyInputProps } from '@/lib/market'
 import type { TradeForm } from '@/types'
 
 const SECTORS = [
@@ -194,7 +195,7 @@ export default function Portfolio() {
                       <div className="flex items-center gap-2">
                         <div className="w-16 h-1.5 bg-[#1e2d40] rounded-full overflow-hidden">
                           <div
-                            className="h-full bg-[#3b82f6] rounded-full"
+                            className="h-full bg-[#10b981] rounded-full"
                             style={{ width: `${(weight * 100).toFixed(0)}%` }}
                           />
                         </div>
@@ -213,7 +214,7 @@ export default function Portfolio() {
       {/* Add Trade Form */}
       <div className="bg-[#111827] border border-[#1e2d40] rounded-lg p-4">
         <div className="flex items-center gap-2 mb-4">
-          <Plus className="w-4 h-4 text-[#3b82f6]" />
+          <Plus className="w-4 h-4 text-[#10b981]" />
           <h2 className="text-sm font-semibold text-[#e2e8f0]">Add Trade</h2>
         </div>
 
@@ -224,7 +225,7 @@ export default function Portfolio() {
               type="date"
               value={form.date}
               onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))}
-              className="bg-[#0b0f1a] border border-[#1e2d40] rounded px-3 py-2 text-sm text-[#e2e8f0] focus:outline-none focus:border-[#3b82f6]"
+              className="bg-[#0b0f1a] border border-[#1e2d40] rounded px-3 py-2 text-sm text-[#e2e8f0] focus:outline-none focus:border-[#10b981]"
             />
           </div>
 
@@ -232,10 +233,10 @@ export default function Portfolio() {
             <label className="text-xs text-[#64748b] uppercase tracking-wider">Ticker</label>
             <input
               type="text"
-              placeholder="AAPL"
+              placeholder={MARKETS[getMarket()].tickerExample}
               value={form.ticker}
               onChange={(e) => setForm((f) => ({ ...f, ticker: e.target.value.toUpperCase() }))}
-              className="bg-[#0b0f1a] border border-[#1e2d40] rounded px-3 py-2 text-sm font-mono text-[#e2e8f0] focus:outline-none focus:border-[#3b82f6] uppercase"
+              className="bg-[#0b0f1a] border border-[#1e2d40] rounded px-3 py-2 text-sm font-mono text-[#e2e8f0] focus:outline-none focus:border-[#10b981] uppercase"
             />
           </div>
 
@@ -244,7 +245,7 @@ export default function Portfolio() {
             <select
               value={form.type}
               onChange={(e) => setForm((f) => ({ ...f, type: e.target.value as 'BUY' | 'SELL' }))}
-              className="bg-[#0b0f1a] border border-[#1e2d40] rounded px-3 py-2 text-sm text-[#e2e8f0] focus:outline-none focus:border-[#3b82f6]"
+              className="bg-[#0b0f1a] border border-[#1e2d40] rounded px-3 py-2 text-sm text-[#e2e8f0] focus:outline-none focus:border-[#10b981]"
             >
               <option value="BUY">BUY</option>
               <option value="SELL">SELL</option>
@@ -258,19 +259,16 @@ export default function Portfolio() {
               placeholder="100"
               value={form.q || ''}
               onChange={(e) => setForm((f) => ({ ...f, q: Number(e.target.value) }))}
-              className="bg-[#0b0f1a] border border-[#1e2d40] rounded px-3 py-2 text-sm font-mono text-[#e2e8f0] focus:outline-none focus:border-[#3b82f6]"
+              className="bg-[#0b0f1a] border border-[#1e2d40] rounded px-3 py-2 text-sm font-mono text-[#e2e8f0] focus:outline-none focus:border-[#10b981]"
             />
           </div>
 
           <div className="flex flex-col gap-1">
             <label className="text-xs text-[#64748b] uppercase tracking-wider">Price</label>
             <input
-              type="number"
-              step="0.01"
+              {...moneyInputProps(form.price || '', (price) => setForm((f) => ({ ...f, price })))}
               placeholder="150.00"
-              value={form.price || ''}
-              onChange={(e) => setForm((f) => ({ ...f, price: Number(e.target.value) }))}
-              className="bg-[#0b0f1a] border border-[#1e2d40] rounded px-3 py-2 text-sm font-mono text-[#e2e8f0] focus:outline-none focus:border-[#3b82f6]"
+              className="bg-[#0b0f1a] border border-[#1e2d40] rounded px-3 py-2 text-sm font-mono text-[#e2e8f0] focus:outline-none focus:border-[#10b981]"
             />
           </div>
 
@@ -281,7 +279,7 @@ export default function Portfolio() {
               placeholder="optional"
               value={form.memo}
               onChange={(e) => setForm((f) => ({ ...f, memo: e.target.value }))}
-              className="bg-[#0b0f1a] border border-[#1e2d40] rounded px-3 py-2 text-sm text-[#e2e8f0] focus:outline-none focus:border-[#3b82f6]"
+              className="bg-[#0b0f1a] border border-[#1e2d40] rounded px-3 py-2 text-sm text-[#e2e8f0] focus:outline-none focus:border-[#10b981]"
             />
           </div>
 
@@ -289,7 +287,7 @@ export default function Portfolio() {
             <button
               type="submit"
               disabled={tradeMutation.isPending}
-              className="flex items-center gap-2 px-4 py-2 bg-[#3b82f6] hover:bg-[#2563eb] disabled:opacity-50 text-white text-sm rounded transition-colors"
+              className="flex items-center gap-2 px-4 py-2 bg-[#10b981] hover:bg-[#059669] disabled:opacity-50 text-white text-sm rounded transition-colors"
             >
               {tradeMutation.isPending ? (
                 <LoadingSpinner size="sm" />

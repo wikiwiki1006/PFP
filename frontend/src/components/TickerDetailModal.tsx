@@ -18,6 +18,7 @@ import { getTickerDetail, searchTickers } from '@/api'
 import type { TickerDetail, OHLCVPoint } from '@/types'
 import { useTheme } from '@/lib/ThemeContext'
 import { useIsMobile } from '@/lib/useIsMobile'
+import { formatAxisPrice, formatPrice, getMarket } from '@/lib/market'
 
 // ── 색상 팔레트 ──────────────────────────────────────────────────────────────
 /**
@@ -33,7 +34,7 @@ const DARK = {
   down:   '#ef4444',
   flat:   '#94a3b8',
   warn:   '#f59e0b',
-  accent: '#3b82f6',
+  accent: '#10b981',
   ma20:   '#f59e0b',
   ma50:   '#3b82f6',
   ma200:  '#a855f7',
@@ -57,9 +58,9 @@ const DARK = {
   inputBg:'#0b1220',
   track:  '#1e2d40',
   hover:  '#1e2d40',
-  chipBg: '#1e3a5f',
-  chipText:'#93c5fd',
-  btn:    '#1d4ed8',
+  chipBg: '#0f3d2e',
+  chipText:'#6ee7b7',
+  btn:    '#10b981',
   backdrop:'rgba(0,0,0,0.85)',
 }
 
@@ -70,7 +71,7 @@ const LIGHT: typeof DARK = {
   down:   '#dc2626',
   flat:   '#4b5563',
   warn:   '#d97706',
-  accent: '#2563eb',
+  accent: '#059669',
   ma20:   '#d97706',
   ma50:   '#2563eb',
   ma200:  '#9333ea',
@@ -94,9 +95,9 @@ const LIGHT: typeof DARK = {
   inputBg:'#f1f4f9',
   track:  '#dfe5ee',
   hover:  '#e6ebf3',
-  chipBg: '#dbeafe',
-  chipText:'#1d4ed8',
-  btn:    '#1d4ed8',
+  chipBg: '#d1fae5',
+  chipText:'#047857',
+  btn:    '#059669',
   backdrop:'rgba(15,23,42,0.45)',
 }
 
@@ -294,7 +295,7 @@ const CandleTooltip = ({ active, payload, label }: any) => {
           <div key={k as string} style={{ display: 'flex', justifyContent: 'space-between' }}>
             <span style={{ color: C.muted }}>{k}</span>
             <span style={{ color: isUp ? C.up : C.down, fontFamily: 'monospace' }}>
-              ${(v as number).toFixed(2)}
+              {formatPrice(v as number)}
             </span>
           </div>
         ))}
@@ -303,8 +304,8 @@ const CandleTooltip = ({ active, payload, label }: any) => {
         <span style={{ color: C.muted }}>Vol</span>
         <span style={{ fontFamily: 'monospace' }}>{fvol(d.volume)}</span>
       </div>
-      {d.ma20 && <div style={{ color: C.ma20, fontSize: 10 }}>MA20: ${d.ma20.toFixed(2)}</div>}
-      {d.ma50 && <div style={{ color: C.ma50, fontSize: 10 }}>MA50: ${d.ma50.toFixed(2)}</div>}
+      {d.ma20 && <div style={{ color: C.ma20, fontSize: 10 }}>MA20: {formatPrice(d.ma20)}</div>}
+      {d.ma50 && <div style={{ color: C.ma50, fontSize: 10 }}>MA50: {formatPrice(d.ma50)}</div>}
     </div>
   )
 }
@@ -678,8 +679,18 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                     onMouseEnter={e => (e.currentTarget.style.background = C.hover)}
                     onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                   >
-                    <span style={{ color: C.text, fontFamily: 'monospace', fontWeight: 700 }}>{s.ticker}</span>
-                    <span style={{ color: C.muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.name}</span>
+                    {/* 한국은 이름이 먼저 — 코드만 굵게 보여 주면 무슨 회사인지 알 수 없다. */}
+                    {getMarket() === 'KR' && s.name ? (
+                      <>
+                        <span style={{ color: C.text, fontWeight: 700 }}>{s.name}</span>
+                        <span style={{ color: C.muted, fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.ticker}</span>
+                      </>
+                    ) : (
+                      <>
+                        <span style={{ color: C.text, fontFamily: 'monospace', fontWeight: 700 }}>{s.ticker}</span>
+                        <span style={{ color: C.muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.name}</span>
+                      </>
+                    )}
                   </div>
                 ))}
               </div>
@@ -723,12 +734,26 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
           {/* 타이틀 */}
           {data && (
             <div style={{ flex: 1, display: 'flex', alignItems: 'baseline', gap: 10 }}>
-              <span style={{ color: C.text, fontSize: 15, fontWeight: 700, fontFamily: 'monospace' }}>
-                {data.ticker}
-              </span>
-              <span style={{ color: C.muted, fontSize: 12 }}>{data.info.name}</span>
+              {/* 한국은 종목명이 주, 코드가 보조. 미국은 티커가 곧 이름이라 반대. */}
+              {getMarket() === 'KR' && data.info.name && data.info.name !== data.ticker ? (
+                <>
+                  <span style={{ color: C.text, fontSize: 15, fontWeight: 700 }}>
+                    {data.info.name}
+                  </span>
+                  <span style={{ color: C.muted, fontSize: 12, fontFamily: 'monospace' }}>
+                    {data.ticker}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span style={{ color: C.text, fontSize: 15, fontWeight: 700, fontFamily: 'monospace' }}>
+                    {data.ticker}
+                  </span>
+                  <span style={{ color: C.muted, fontSize: 12 }}>{data.info.name}</span>
+                </>
+              )}
               <span style={{ color: perfColor(data.risk.change_pct, C), fontSize: 13, fontWeight: 700, fontFamily: 'monospace' }}>
-                ${fn(data.risk.current_price)}
+                {formatPrice(data.risk.current_price)}
               </span>
               <span style={{ color: perfColor(data.risk.change_pct, C), fontSize: 12 }}>
                 {fp(data.risk.change_pct)}
@@ -805,7 +830,7 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                       <XAxis dataKey="date" tick={axisStyle} interval={xInterval} height={20}
                         tickFormatter={v => v?.slice(5)} />
                       <YAxis domain={priceDomain} tick={axisStyle} width={60}
-                        tickFormatter={v => `$${v.toFixed(0)}`} />
+                        tickFormatter={v => formatAxisPrice(v)} />
                       <Tooltip active={touchTooltipHidden ? false : undefined} content={<CandleTooltip />} />
 
                       {/* 볼린저밴드 — recharts <Area> 는 기본적으로 선 아래를 축 바닥까지
@@ -1130,8 +1155,8 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                 ))}
                 <div style={{ borderTop: `1px solid ${C.border}`, marginTop: 4, paddingTop: 4 }}>
                   {[
-                    ['52W 고가', `$${fn(data.performance.s52w_high)}`],
-                    ['52W 저가', `$${fn(data.performance.s52w_low)}`],
+                    ['52W 고가', formatPrice(data.performance.s52w_high)],
+                    ['52W 저가', formatPrice(data.performance.s52w_low)],
                   ].map(([k, v]) => (
                     <div key={k} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2, fontSize: 11 }}>
                       <span style={{ color: C.muted }}>{k}</span>
@@ -1151,7 +1176,7 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                   ['변동성',        data.risk.volatility != null ? `${fn(data.risk.volatility, 1)}%` : 'N/A'],
                   ['평균 거래량',   fvol(data.risk.avg_volume)],
                   ['RSI(14)',       data.risk.rsi14 != null ? fn(data.risk.rsi14, 1) : 'N/A'],
-                  ['현재가',        `$${fn(data.risk.current_price)}`],
+                  ['현재가',        formatPrice(data.risk.current_price)],
                   ['등락률',        null],
                 ].map(([k, v]) => (
                   <div key={k as string} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3, fontSize: 11 }}>

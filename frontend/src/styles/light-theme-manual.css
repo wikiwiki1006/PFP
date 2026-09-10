@@ -130,11 +130,11 @@
 }
 [data-theme="light"] .lens-md blockquote, [data-theme="light"] .macro-md blockquote,
 [data-theme="light"] .brief-md blockquote {
-  border-left-color: #1d4ed8; color: #55637a;
+  border-left-color: #059669; color: #55637a;
 }
 [data-theme="light"] .lens-md hr, [data-theme="light"] .macro-md hr,
 [data-theme="light"] .brief-md hr { border-color: #dfe5ee; }
-[data-theme="light"] .lens-md a { color: #1d4ed8; }
+[data-theme="light"] .lens-md a { color: #059669; }
 
 /* ── 모달 뒷배경 ────────────────────────────────────────────────────────── */
 /* 흰 화면 위의 검은 70% 오버레이는 지나치게 무겁다 */

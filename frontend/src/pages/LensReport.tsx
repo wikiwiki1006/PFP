@@ -4,7 +4,7 @@ import {
   BookOpen, Play, ChevronDown, ChevronRight, Download, History, X, Square, Search, Lock,
 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
+import { MARKDOWN_PLUGINS } from '@/lib/markdown'
 import { FinancialTips } from '@/components/FinancialTips'
 import {
   startEquityReport, startIndustryReport,
@@ -17,6 +17,10 @@ import { useLoginPrompt } from '@/components/auth/LockedPreview'
 import AuthGate from '@/components/auth/AuthGate'
 import { useAuth } from '@/lib/AuthContext'
 import { useFeatures } from '@/lib/useFeatures'
+import { useMarket } from '@/lib/useMarket'
+import { marketSession } from '@/lib/marketStorage'
+import TickerLabel from '@/components/TickerLabel'
+import { getMarket } from '@/lib/market'
 
 // ── sessionStorage 키 ──────────────────────────────────────────────────────────
 const EQ_JOB_ID  = 'lens_eq_job_id'
@@ -342,7 +346,7 @@ function ProgressBar({ progress, elapsedMs, type }: {
           className="h-full rounded-full transition-all duration-500"
           style={{
             width: `${progress}%`,
-            background: 'linear-gradient(90deg, #2e75b6, #9b59b6)',
+            background: 'linear-gradient(90deg, #10b981, #059669)',
           }}
         />
       </div>
@@ -367,7 +371,7 @@ function ReportSection({ title, content, defaultExpanded = false, sectionIndex }
         className="w-full flex items-center justify-between px-4 py-3 hover:bg-[#0a1628] transition-colors"
       >
         <div className="flex items-center gap-2.5">
-          <div className="w-5 h-5 rounded-full bg-[#2e75b6]/20 border border-[#2e75b6]/30 flex items-center justify-center text-[10px] font-mono text-[#2e75b6]">
+          <div className="w-5 h-5 rounded-full bg-[#10b981]/20 border border-[#10b981]/30 flex items-center justify-center text-[10px] font-mono text-[#10b981]">
             {sectionIndex + 1}
           </div>
           <span className="text-sm font-semibold text-[#f1f5f9]">{sectionTitle(title)}</span>
@@ -380,7 +384,7 @@ function ReportSection({ title, content, defaultExpanded = false, sectionIndex }
       {expanded && (
         <div className="px-4 pb-5 border-t border-[#1e2d40] pt-3">
           <div className="lens-md">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={MARKDOWN_PLUGINS}>{content}</ReactMarkdown>
           </div>
         </div>
       )}
@@ -482,6 +486,7 @@ async function downloadPdfFromHtml(htmlContent: string, filename: string) {
 
 // ── 주식 리포트 탭 ─────────────────────────────────────────────────────────────
 function EquityTab() {
+  const market = useMarket()
   const features = useFeatures()
   // 이전에 고른 'deep' 이 sessionStorage 에 남아 있을 수 있다.
   useEffect(() => {
@@ -490,11 +495,11 @@ function EquityTab() {
   // 리포트 생성·과거 이력은 로그인이 필요하다. 예시 리포트는 만들지 않는다 —
   // 로그인 전에는 결과도 이력도 비어 있고, 버튼을 누르면 로그인을 요구한다.
   const { isAuthed, requireLogin, modalEl } = useLoginPrompt()
-  const [ticker,    setTicker]    = useState(() => sessionStorage.getItem(EQ_TICKER) || '')
-  const [modelTier, setModelTier] = useState(() => sessionStorage.getItem(EQ_TIER)   || 'basic')
-  const [jobId,  setJobId]    = useState<string | null>(() => sessionStorage.getItem(EQ_JOB_ID))
+  const [ticker,    setTicker]    = useState(() => marketSession.get(EQ_TICKER) || '')
+  const [modelTier, setModelTier] = useState(() => marketSession.get(EQ_TIER)   || 'basic')
+  const [jobId,  setJobId]    = useState<string | null>(() => marketSession.get(EQ_JOB_ID))
   const [result, setResult]   = useState<EquityResult | null>(() => {
-    try { const s = sessionStorage.getItem(EQ_RESULT); return s ? JSON.parse(s) : null }
+    try { const s = marketSession.get(EQ_RESULT); return s ? JSON.parse(s) : null }
     catch { return null }
   })
 
@@ -533,7 +538,7 @@ function EquityTab() {
         sections,
         report_type: 'equity',
       }
-      sessionStorage.setItem(EQ_RESULT, JSON.stringify(r))
+      marketSession.set(EQ_RESULT, JSON.stringify(r))
       setResult(r)
       setShowHist(false)
     },
@@ -546,17 +551,17 @@ function EquityTab() {
       if (wantCancelRef.current) {
         wantCancelRef.current = false
         cancelReportJob(job_id).catch(() => {})
-        sessionStorage.removeItem(EQ_PENDING)
-        sessionStorage.removeItem(EQ_JOB_ID)
+        marketSession.remove(EQ_PENDING)
+        marketSession.remove(EQ_JOB_ID)
         return
       }
-      sessionStorage.setItem(EQ_JOB_ID,  job_id)
-      sessionStorage.setItem(EQ_PENDING, '1')
+      marketSession.set(EQ_JOB_ID,  job_id)
+      marketSession.set(EQ_PENDING, '1')
       setJobId(job_id)
     },
     onError: () => {
       wantCancelRef.current = false
-      sessionStorage.removeItem(EQ_PENDING)
+      marketSession.remove(EQ_PENDING)
       setProgress(0)
     },
   })
@@ -576,8 +581,8 @@ function EquityTab() {
   const cancelMut = useMutation({
     mutationFn: (id: string) => cancelReportJob(id),
     onSettled: () => {
-      sessionStorage.removeItem(EQ_PENDING)
-      sessionStorage.removeItem(EQ_JOB_ID)
+      marketSession.remove(EQ_PENDING)
+      marketSession.remove(EQ_JOB_ID)
       setJobId(null)
       setProgress(0)
     },
@@ -588,16 +593,16 @@ function EquityTab() {
     if (!pollQ.data) return
     if (pollQ.data.status === 'done' && pollQ.data.result) {
       const r = pollQ.data.result as unknown as EquityResult
-      sessionStorage.setItem(EQ_RESULT, JSON.stringify(r))
-      sessionStorage.removeItem(EQ_PENDING)
-      sessionStorage.removeItem(EQ_JOB_ID)
+      marketSession.set(EQ_RESULT, JSON.stringify(r))
+      marketSession.remove(EQ_PENDING)
+      marketSession.remove(EQ_JOB_ID)
       setResult(r)
       setProgress(100)
       setJobId(null)
       histQ.refetch()
     } else if (pollQ.data.status === 'error' || pollQ.data.status === 'cancelled') {
-      sessionStorage.removeItem(EQ_PENDING)
-      sessionStorage.removeItem(EQ_JOB_ID)
+      marketSession.remove(EQ_PENDING)
+      marketSession.remove(EQ_JOB_ID)
       setProgress(0)
       setJobId(null)
     }
@@ -605,8 +610,8 @@ function EquityTab() {
 
   useEffect(() => {
     if (!pollQ.isError) return
-    sessionStorage.removeItem(EQ_PENDING)
-    sessionStorage.removeItem(EQ_JOB_ID)
+    marketSession.remove(EQ_PENDING)
+    marketSession.remove(EQ_JOB_ID)
     setJobId(null)
     setProgress(0)
   }, [pollQ.isError])
@@ -616,8 +621,8 @@ function EquityTab() {
   // 새로고침 후 재개
   useEffect(() => {
     if (autoStartedRef.current) return
-    const hasPending = sessionStorage.getItem(EQ_PENDING) === '1'
-    const hasJobId   = !!sessionStorage.getItem(EQ_JOB_ID)
+    const hasPending = marketSession.get(EQ_PENDING) === '1'
+    const hasJobId   = !!marketSession.get(EQ_JOB_ID)
     if (hasPending && !hasJobId && ticker.trim()) {
       autoStartedRef.current = true
       startMut.mutate()
@@ -627,7 +632,7 @@ function EquityTab() {
   // 진행 바 타이머
   useEffect(() => {
     if (!isRunning) return
-    const startMs = parseInt(sessionStorage.getItem(EQ_START) || String(Date.now()), 10)
+    const startMs = parseInt(marketSession.get(EQ_START) || String(Date.now()), 10)
     const maxMs   = MODE_MAX_MS.equity
     const tick = () => {
       const ms = Date.now() - startMs
@@ -645,20 +650,20 @@ function EquityTab() {
       cancelMut.mutate(jobId)
     } else if (startMut.isPending) {
       wantCancelRef.current = true
-      sessionStorage.removeItem(EQ_PENDING)
-      sessionStorage.removeItem(EQ_JOB_ID)
+      marketSession.remove(EQ_PENDING)
+      marketSession.remove(EQ_JOB_ID)
       setProgress(0)
     }
   }
 
   // 시작 핸들러
   const startAnalysis = () => {
-    sessionStorage.setItem(EQ_TICKER,  ticker)
-    sessionStorage.setItem(EQ_TIER,    modelTier)
-    sessionStorage.setItem(EQ_START,   String(Date.now()))
-    sessionStorage.setItem(EQ_PENDING, '1')
-    sessionStorage.removeItem(EQ_RESULT)
-    sessionStorage.removeItem(EQ_JOB_ID)
+    marketSession.set(EQ_TICKER,  ticker)
+    marketSession.set(EQ_TIER,    modelTier)
+    marketSession.set(EQ_START,   String(Date.now()))
+    marketSession.set(EQ_PENDING, '1')
+    marketSession.remove(EQ_RESULT)
+    marketSession.remove(EQ_JOB_ID)
     wantCancelRef.current = false
     setResult(null)
     setJobId(null)
@@ -732,7 +737,7 @@ function EquityTab() {
       {/* 헤더 컨트롤 */}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <BookOpen className="w-4 h-4 text-[#2e75b6]" />
+          <BookOpen className="w-4 h-4 text-[#10b981]" />
           <div>
             <h1 className="text-base font-bold text-[#e2e8f0]">종목 리서치</h1>
           
@@ -743,7 +748,7 @@ function EquityTab() {
             onClick={() => requireLogin(() => setShowHist(true))}
             disabled={isRunning}
             title={isAuthed ? '저장된 리포트 보기' : '로그인 후 사용 가능합니다'}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0] hover:border-[#2e75b6]/40 rounded transition-colors disabled:opacity-40"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0] hover:border-[#10b981]/40 rounded transition-colors disabled:opacity-40"
           >
             {isAuthed ? <History className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5" />}
             과거 레포트
@@ -756,11 +761,11 @@ function EquityTab() {
                 'flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] rounded font-bold transition-colors',
                 pdfBusy
                   ? 'border border-[#1e2d40] text-[#64748b] opacity-50 cursor-not-allowed'
-                  : 'border border-[#2e75b6]/50 bg-[#2e75b6]/10 text-[#60a5fa] hover:bg-[#2e75b6]/20'
+                  : 'border border-[#10b981]/50 bg-[#10b981]/10 text-[#34d399] hover:bg-[#10b981]/20'
               )}
             >
               {pdfBusy
-                ? <span className="w-3.5 h-3.5 border-2 border-[#2e75b6] border-t-transparent rounded-full animate-spin" />
+                ? <span className="w-3.5 h-3.5 border-2 border-[#10b981] border-t-transparent rounded-full animate-spin" />
                 : <Download className="w-3.5 h-3.5" />
               }
               PDF
@@ -775,7 +780,7 @@ function EquityTab() {
         <div className="relative">
           <div className={cn(
             'flex items-center gap-1.5 bg-[#0b0f1a] border rounded px-2 py-1.5 transition-colors',
-            isRunning ? 'border-[#1e2d40] opacity-50' : 'border-[#1e2d40] focus-within:border-[#2e75b6]',
+            isRunning ? 'border-[#1e2d40] opacity-50' : 'border-[#1e2d40] focus-within:border-[#10b981]',
           )}>
             <Search className="w-3.5 h-3.5 text-[#475569] flex-shrink-0" />
             <input
@@ -787,7 +792,9 @@ function EquityTab() {
               onFocus={() => setShowDropdown(true)}
               onBlur={() => setTimeout(() => setShowDropdown(false), 200)}
               onKeyDown={e => { if (e.key === 'Enter' && ticker.trim() && !isRunning) startAnalysis() }}
-              placeholder="티커 검색 (예: AAPL, NVDA, TSLA)"
+              placeholder={market === 'KR'
+                ? "종목 검색 (예: 삼성전자, SK하이닉스)"
+                : "티커 검색 (예: AAPL, NVDA, TSLA)"}
               readOnly={isRunning}
               className="flex-1 bg-transparent text-sm font-mono text-[#e2e8f0] focus:outline-none placeholder-[#374151]"
             />
@@ -799,13 +806,15 @@ function EquityTab() {
                   key={item.ticker}
                   onMouseDown={() => {
                     setTicker(item.ticker)
-                    sessionStorage.setItem(EQ_TICKER, item.ticker)
+                    marketSession.set(EQ_TICKER, item.ticker)
                     setShowDropdown(false)
                   }}
                   className="w-full text-left px-3 py-2 hover:bg-[#0f172a] transition-colors flex items-center gap-3 border-b border-[#0f172a] last:border-0"
                 >
-                  <span className="text-xs font-mono font-bold text-[#e2e8f0] w-16 flex-shrink-0">{item.ticker}</span>
-                  <span className="text-[10px] text-[#64748b] truncate">{item.name}</span>
+                  {/* 한국은 이름이 주, 코드가 보조 */}
+                  <TickerLabel ticker={item.ticker} name={item.name}
+                               primaryClass="text-xs font-bold" secondaryClass="text-[10px]"
+                               className="min-w-0 flex-1" />
                 </button>
               ))}
             </div>
@@ -827,7 +836,7 @@ function EquityTab() {
                   title={locked ? '심층 분석은 현재 사용할 수 없습니다' : undefined}
                   className={cn(
                     'px-3 py-1.5 text-left rounded font-medium transition-colors min-w-[80px] disabled:opacity-40 disabled:cursor-not-allowed',
-                    modelTier === t ? 'bg-[#9b59b6] text-white' : 'bg-[#0b0f1a] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0]'
+                    modelTier === t ? 'bg-[#10b981] text-white' : 'bg-[#0b0f1a] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0]'
                   )}>
                   <div className="text-[11px] font-bold">{label}</div>
                   {locked && <div className="text-[9px] opacity-70">사용 불가</div>}
@@ -851,7 +860,7 @@ function EquityTab() {
             <button
               onClick={() => requireLogin(startAnalysis)}
               disabled={isRunning || !ticker.trim()}
-              className="flex items-center gap-1.5 px-4 py-2 bg-[#2e75b6] hover:bg-[#1d5fa0] disabled:opacity-50 text-white text-sm font-bold rounded transition-colors"
+              className="flex items-center gap-1.5 px-4 py-2 bg-[#10b981] hover:bg-[#059669] disabled:opacity-50 text-white text-sm font-bold rounded transition-colors"
             >
               {isAuthed ? <Play className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5" />}
               {isRunning ? '생성 중...' : '리포트 생성'}
@@ -882,9 +891,18 @@ function EquityTab() {
         <div className="space-y-3">
           <div className="bg-[#060b14] border border-[#1e2d40] rounded-lg p-3">
             <span className="text-[10px] text-[#4a5568] font-bold tracking-wider">종목: </span>
-            <span className="text-sm font-mono font-bold text-[#2e75b6]">{result.ticker}</span>
-            {result.company_name && result.company_name !== result.ticker && (
-              <span className="text-sm text-[#94a3b8] ml-2">— {result.company_name}</span>
+            {getMarket() === 'KR' && result.company_name && result.company_name !== result.ticker ? (
+              <>
+                <span className="text-sm font-bold text-[#10b981]">{result.company_name}</span>
+                <span className="text-sm font-mono text-[#94a3b8] ml-2">{result.ticker}</span>
+              </>
+            ) : (
+              <>
+                <span className="text-sm font-mono font-bold text-[#10b981]">{result.ticker}</span>
+                {result.company_name && result.company_name !== result.ticker && (
+                  <span className="text-sm text-[#94a3b8] ml-2">— {result.company_name}</span>
+                )}
+              </>
             )}
           </div>
           {headerContent && <ReportHeaderCard headerContent={headerContent} type="equity" />}
@@ -913,11 +931,11 @@ function IndustryTab() {
     if (!features.deep_analysis_enabled) setModelTier(t => (t === 'deep' ? 'basic' : t))
   }, [features.deep_analysis_enabled])
   const { isAuthed, requireLogin, modalEl } = useLoginPrompt()
-  const [selectedId, setSelectedId] = useState<string>(() => sessionStorage.getItem(IND_INDUSTRY) || '')
-  const [modelTier,  setModelTier]  = useState(() => sessionStorage.getItem(IND_TIER) || 'basic')
-  const [jobId,      setJobId]      = useState<string | null>(() => sessionStorage.getItem(IND_JOB_ID))
+  const [selectedId, setSelectedId] = useState<string>(() => marketSession.get(IND_INDUSTRY) || '')
+  const [modelTier,  setModelTier]  = useState(() => marketSession.get(IND_TIER) || 'basic')
+  const [jobId,      setJobId]      = useState<string | null>(() => marketSession.get(IND_JOB_ID))
   const [result,     setResult]     = useState<IndustryResult | null>(() => {
-    try { const s = sessionStorage.getItem(IND_RESULT); return s ? JSON.parse(s) : null }
+    try { const s = marketSession.get(IND_RESULT); return s ? JSON.parse(s) : null }
     catch { return null }
   })
 
@@ -954,7 +972,7 @@ function IndustryTab() {
         sections,
         report_type: 'industry',
       }
-      sessionStorage.setItem(IND_RESULT, JSON.stringify(r))
+      marketSession.set(IND_RESULT, JSON.stringify(r))
       setResult(r)
       setShowHist(false)
     },
@@ -967,17 +985,17 @@ function IndustryTab() {
       if (wantCancelRef.current) {
         wantCancelRef.current = false
         cancelReportJob(job_id).catch(() => {})
-        sessionStorage.removeItem(IND_PENDING)
-        sessionStorage.removeItem(IND_JOB_ID)
+        marketSession.remove(IND_PENDING)
+        marketSession.remove(IND_JOB_ID)
         return
       }
-      sessionStorage.setItem(IND_JOB_ID,  job_id)
-      sessionStorage.setItem(IND_PENDING, '1')
+      marketSession.set(IND_JOB_ID,  job_id)
+      marketSession.set(IND_PENDING, '1')
       setJobId(job_id)
     },
     onError: () => {
       wantCancelRef.current = false
-      sessionStorage.removeItem(IND_PENDING)
+      marketSession.remove(IND_PENDING)
       setProgress(0)
     },
   })
@@ -997,8 +1015,8 @@ function IndustryTab() {
   const cancelMut = useMutation({
     mutationFn: (id: string) => cancelReportJob(id),
     onSettled: () => {
-      sessionStorage.removeItem(IND_PENDING)
-      sessionStorage.removeItem(IND_JOB_ID)
+      marketSession.remove(IND_PENDING)
+      marketSession.remove(IND_JOB_ID)
       setJobId(null)
       setProgress(0)
     },
@@ -1009,16 +1027,16 @@ function IndustryTab() {
     if (!pollQ.data) return
     if (pollQ.data.status === 'done' && pollQ.data.result) {
       const r = pollQ.data.result as unknown as IndustryResult
-      sessionStorage.setItem(IND_RESULT, JSON.stringify(r))
-      sessionStorage.removeItem(IND_PENDING)
-      sessionStorage.removeItem(IND_JOB_ID)
+      marketSession.set(IND_RESULT, JSON.stringify(r))
+      marketSession.remove(IND_PENDING)
+      marketSession.remove(IND_JOB_ID)
       setResult(r)
       setProgress(100)
       setJobId(null)
       histQ.refetch()
     } else if (pollQ.data.status === 'error' || pollQ.data.status === 'cancelled') {
-      sessionStorage.removeItem(IND_PENDING)
-      sessionStorage.removeItem(IND_JOB_ID)
+      marketSession.remove(IND_PENDING)
+      marketSession.remove(IND_JOB_ID)
       setProgress(0)
       setJobId(null)
     }
@@ -1026,8 +1044,8 @@ function IndustryTab() {
 
   useEffect(() => {
     if (!pollQ.isError) return
-    sessionStorage.removeItem(IND_PENDING)
-    sessionStorage.removeItem(IND_JOB_ID)
+    marketSession.remove(IND_PENDING)
+    marketSession.remove(IND_JOB_ID)
     setJobId(null)
     setProgress(0)
   }, [pollQ.isError])
@@ -1037,8 +1055,8 @@ function IndustryTab() {
   // 새로고침 후 재개
   useEffect(() => {
     if (autoStartedRef.current) return
-    const hasPending = sessionStorage.getItem(IND_PENDING) === '1'
-    const hasJobId   = !!sessionStorage.getItem(IND_JOB_ID)
+    const hasPending = marketSession.get(IND_PENDING) === '1'
+    const hasJobId   = !!marketSession.get(IND_JOB_ID)
     if (hasPending && !hasJobId && selectedId) {
       autoStartedRef.current = true
       startMut.mutate()
@@ -1048,7 +1066,7 @@ function IndustryTab() {
   // 진행 바 타이머
   useEffect(() => {
     if (!isRunning) return
-    const startMs = parseInt(sessionStorage.getItem(IND_START) || String(Date.now()), 10)
+    const startMs = parseInt(marketSession.get(IND_START) || String(Date.now()), 10)
     const maxMs   = MODE_MAX_MS.industry
     const tick = () => {
       const ms = Date.now() - startMs
@@ -1065,19 +1083,19 @@ function IndustryTab() {
       cancelMut.mutate(jobId)
     } else if (startMut.isPending) {
       wantCancelRef.current = true
-      sessionStorage.removeItem(IND_PENDING)
-      sessionStorage.removeItem(IND_JOB_ID)
+      marketSession.remove(IND_PENDING)
+      marketSession.remove(IND_JOB_ID)
       setProgress(0)
     }
   }
 
   const startAnalysis = () => {
-    sessionStorage.setItem(IND_INDUSTRY, selectedId)
-    sessionStorage.setItem(IND_TIER,     modelTier)
-    sessionStorage.setItem(IND_START,    String(Date.now()))
-    sessionStorage.setItem(IND_PENDING,  '1')
-    sessionStorage.removeItem(IND_RESULT)
-    sessionStorage.removeItem(IND_JOB_ID)
+    marketSession.set(IND_INDUSTRY, selectedId)
+    marketSession.set(IND_TIER,     modelTier)
+    marketSession.set(IND_START,    String(Date.now()))
+    marketSession.set(IND_PENDING,  '1')
+    marketSession.remove(IND_RESULT)
+    marketSession.remove(IND_JOB_ID)
     wantCancelRef.current = false
     setResult(null)
     setJobId(null)
@@ -1150,7 +1168,7 @@ function IndustryTab() {
       {/* 헤더 컨트롤 */}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <BookOpen className="w-4 h-4 text-[#9b59b6]" />
+          <BookOpen className="w-4 h-4 text-[#10b981]" />
           <div>
             <h1 className="text-base font-bold text-[#e2e8f0]">산업 리서치</h1>
           </div>
@@ -1160,7 +1178,7 @@ function IndustryTab() {
             onClick={() => requireLogin(() => setShowHist(true))}
             disabled={isRunning}
             title={isAuthed ? '저장된 리포트 보기' : '로그인 후 사용 가능합니다'}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0] hover:border-[#9b59b6]/40 rounded transition-colors disabled:opacity-40"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0] hover:border-[#10b981]/40 rounded transition-colors disabled:opacity-40"
           >
             {isAuthed ? <History className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5" />}
             과거 레포트
@@ -1173,11 +1191,11 @@ function IndustryTab() {
                 'flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] rounded font-bold transition-colors',
                 pdfBusy
                   ? 'border border-[#1e2d40] text-[#64748b] opacity-50 cursor-not-allowed'
-                  : 'border border-[#9b59b6]/50 bg-[#9b59b6]/10 text-[#c084fc] hover:bg-[#9b59b6]/20'
+                  : 'border border-[#10b981]/50 bg-[#10b981]/10 text-[#34d399] hover:bg-[#10b981]/20'
               )}
             >
               {pdfBusy
-                ? <span className="w-3.5 h-3.5 border-2 border-[#9b59b6] border-t-transparent rounded-full animate-spin" />
+                ? <span className="w-3.5 h-3.5 border-2 border-[#10b981] border-t-transparent rounded-full animate-spin" />
                 : <Download className="w-3.5 h-3.5" />
               }
               PDF
@@ -1198,21 +1216,21 @@ function IndustryTab() {
               key={ind.id}
               onClick={() => {
                 setSelectedId(ind.id)
-                sessionStorage.setItem(IND_INDUSTRY, ind.id)
+                marketSession.set(IND_INDUSTRY, ind.id)
               }}
               disabled={isRunning}
               className={cn(
                 'text-left p-2.5 rounded border transition-all disabled:opacity-40 disabled:cursor-not-allowed',
                 selectedId === ind.id
-                  ? 'border-[#9b59b6]/50 bg-[#9b59b6]/10'
-                  : 'border-[#1e2d40] hover:border-[#9b59b6]/30 hover:bg-[#0a1628]',
+                  ? 'border-[#10b981]/50 bg-[#10b981]/10'
+                  : 'border-[#1e2d40] hover:border-[#10b981]/30 hover:bg-[#0a1628]',
               )}
             >
               <div className="flex items-center gap-1.5 mb-1">
                 <span className="text-sm">{ind.icon}</span>
                 <span className={cn(
                   'text-[10px] font-bold truncate',
-                  selectedId === ind.id ? 'text-[#c084fc]' : 'text-[#94a3b8]',
+                  selectedId === ind.id ? 'text-[#34d399]' : 'text-[#94a3b8]',
                 )}>{ind.name_kr}</span>
               </div>
               <div className="text-[9px] text-[#475569] truncate">{ind.name_en}</div>
@@ -1234,7 +1252,7 @@ function IndustryTab() {
                 title={locked ? '심층 분석은 현재 사용할 수 없습니다' : undefined}
                 className={cn(
                   'px-3 py-1.5 text-left rounded font-medium transition-colors min-w-[80px] disabled:opacity-40 disabled:cursor-not-allowed',
-                  modelTier === t ? 'bg-[#9b59b6] text-white' : 'bg-[#0b0f1a] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0]'
+                  modelTier === t ? 'bg-[#10b981] text-white' : 'bg-[#0b0f1a] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0]'
                 )}>
                 <div className="text-[11px] font-bold">{label}</div>
                 {locked && <div className="text-[9px] opacity-70">사용 불가</div>}
@@ -1257,7 +1275,7 @@ function IndustryTab() {
           <button
             onClick={() => requireLogin(startAnalysis)}
             disabled={isRunning || !selectedId}
-            className="flex items-center gap-1.5 px-4 py-2 bg-[#9b59b6] hover:bg-[#7c3aed] disabled:opacity-50 text-white text-sm font-bold rounded transition-colors"
+            className="flex items-center gap-1.5 px-4 py-2 bg-[#10b981] hover:bg-[#059669] disabled:opacity-50 text-white text-sm font-bold rounded transition-colors"
           >
             {isAuthed ? <Play className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5" />}
             {isRunning ? '생성 중...' : '산업 레포트 생성'}
@@ -1281,7 +1299,7 @@ function IndustryTab() {
         <div className="space-y-3">
           <div className="bg-[#060b14] border border-[#1e2d40] rounded-lg p-3">
             <span className="text-[10px] text-[#4a5568] font-bold tracking-wider">산업: </span>
-            <span className="text-sm font-bold text-[#c084fc]">
+            <span className="text-sm font-bold text-[#34d399]">
               {result.industry_name_kr || result.industry_id}
             </span>
             {result.industry_name_en && (
@@ -1380,7 +1398,7 @@ function HistoryTab() {
             className={cn(
               'px-3 py-1 text-[11px] rounded font-bold transition-colors',
               filter === f
-                ? 'bg-[#2e75b6] text-white'
+                ? 'bg-[#10b981] text-white'
                 : 'bg-[#0b0f1a] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0]',
             )}
           >
@@ -1409,8 +1427,8 @@ function HistoryTab() {
               className={cn(
                 'w-full text-left px-4 py-3 rounded border transition-all',
                 selected === r.name
-                  ? 'border-[#2e75b6]/50 bg-[#0a1628]'
-                  : 'border-[#1e2d40] bg-[#060b14] hover:border-[#2e75b6]/30 hover:bg-[#0a1628]',
+                  ? 'border-[#10b981]/50 bg-[#0a1628]'
+                  : 'border-[#1e2d40] bg-[#060b14] hover:border-[#10b981]/30 hover:bg-[#0a1628]',
               )}
             >
               <div className="flex items-center gap-2 mb-1">
@@ -1453,11 +1471,11 @@ function HistoryTab() {
                 'flex-shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] rounded font-bold transition-colors',
                 pdfBusy
                   ? 'border border-[#1e2d40] text-[#64748b] opacity-50 cursor-not-allowed'
-                  : 'border border-[#2e75b6]/50 bg-[#2e75b6]/10 text-[#60a5fa] hover:bg-[#2e75b6]/20'
+                  : 'border border-[#10b981]/50 bg-[#10b981]/10 text-[#10b981] hover:bg-[#10b981]/20'
               )}
             >
               {pdfBusy
-                ? <span className="w-3.5 h-3.5 border-2 border-[#2e75b6] border-t-transparent rounded-full animate-spin" />
+                ? <span className="w-3.5 h-3.5 border-2 border-[#10b981] border-t-transparent rounded-full animate-spin" />
                 : <Download className="w-3.5 h-3.5" />
               }
               PDF
@@ -1518,11 +1536,11 @@ function MacroLinkTab() {
                 href={item.href}
                 target="_blank"
                 rel="noreferrer"
-                className="block bg-[#060b14] border border-[#1e2d40] rounded p-3 hover:border-[#2e75b6]/40 hover:bg-[#0a1628] transition-all group"
+                className="block bg-[#060b14] border border-[#1e2d40] rounded p-3 hover:border-[#10b981]/40 hover:bg-[#0a1628] transition-all group"
               >
                 <div className="flex items-center justify-between gap-2 mb-1">
-                  <span className="text-xs font-medium text-[#e2e8f0] group-hover:text-[#2e75b6] transition-colors">{item.label}</span>
-                  <span className="text-[#1e2d40] group-hover:text-[#2e75b6] transition-colors">↗</span>
+                  <span className="text-xs font-medium text-[#e2e8f0] group-hover:text-[#10b981] transition-colors">{item.label}</span>
+                  <span className="text-[#1e2d40] group-hover:text-[#10b981] transition-colors">↗</span>
                 </div>
                 <p className="text-[10px] text-[#4a5568]">{item.desc}</p>
               </a>
@@ -1542,7 +1560,7 @@ export default function LensReport() {
     <div className="p-5 space-y-4 max-w-full">
       {/* 헤더 */}
       <div className="flex items-center gap-2">
-        <BookOpen className="w-4 h-4 text-[#2e75b6]" />
+        <BookOpen className="w-4 h-4 text-[#10b981]" />
         <div>
           <h1 className="text-base font-bold text-[#e2e8f0]">AI 리서치</h1>
         </div>
@@ -1557,7 +1575,7 @@ export default function LensReport() {
             className={cn(
               'px-4 py-2.5 text-[11px] font-bold tracking-wider transition-colors',
               tab === i
-                ? 'text-[#2e75b6] border-b-2 border-[#2e75b6]'
+                ? 'text-[#10b981] border-b-2 border-[#10b981]'
                 : 'text-[#4a5568] hover:text-[#64748b]',
             )}
           >
@@ -1595,9 +1613,9 @@ export default function LensReport() {
         .lens-md td { color: #e2e8f0; padding: 7px 10px; border-bottom: 1px solid #0f172a; font-size: 13px; }
         .lens-md tr:hover td { background: #0a1628; }
         .lens-md code { background: #0f172a; color: #10b981; padding: 2px 5px; border-radius: 3px; font-size: 12px; }
-        .lens-md blockquote { border-left: 3px solid #2e75b6; padding-left: 10px; color: #94a3b8; margin: 6px 0; }
+        .lens-md blockquote { border-left: 3px solid #10b981; padding-left: 10px; color: #94a3b8; margin: 6px 0; }
         .lens-md hr { border-color: #1e2d40; margin: 12px 0; }
-        .lens-md a { color: #60a5fa; text-decoration: underline; }
+        .lens-md a { color: #34d399; text-decoration: underline; }
       `}</style>
     </div>
   )
