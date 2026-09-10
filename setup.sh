@@ -67,7 +67,16 @@ if [ -f backend/.env ]; then
 elif [ "$HAVE_GCLOUD" = 1 ]; then
   {
     echo "# setup.sh 가 Secret Manager 에서 생성했다. 커밋되지 않는다."
-    echo "DATABASE_URL=$(sm DATABASE_URL)"
+    echo "#"
+    echo "# DATABASE_URL 은 일부러 쓰지 않는다. backend/db/__init__.py 가 그 값을"
+    echo "# DB_* 보다 우선하므로, 여기에 운영 Neon URL 을 넣으면 로컬 개발이"
+    echo "# 조용히 운영 DB 에 붙는다. 운영 DB 가 필요하면 ./dev.sh --prod-db 로"
+    echo "# 그때만 명시적으로 건다."
+    echo "DB_HOST=localhost"
+    echo "DB_PORT=5432"
+    echo "DB_NAME=postgres"
+    echo "DB_USER=${USER:-postgres}"
+    echo "DB_PASSWORD="
     for k in ANTHROPIC_API_KEY PERPLEXITY_API_KEY KOREA_BANK_API_KEY \
              KAKAO_REST_API_KEY KAKAO_CLIENT_SECRET \
              NAVER_CLIENT_ID NAVER_CLIENT_SECRET; do
@@ -75,9 +84,9 @@ elif [ "$HAVE_GCLOUD" = 1 ]; then
     done
   } > backend/.env
   chmod 600 backend/.env
-  MISSING="$(grep -c '=$' backend/.env || true)"
+  MISSING="$(grep -cE '^[A-Z_]+_KEY=$|^[A-Z_]+_SECRET=$|^[A-Z_]+_ID=$' backend/.env || true)"
   [ "$MISSING" -gt 0 ] && warn "값이 비어 있는 키가 $MISSING 개 있습니다 — backend/.env 를 확인하세요"
-  echo "  backend/.env 생성 (DATABASE_URL 이 DB_* 보다 우선한다)"
+  echo "  backend/.env 생성 (로컬 DB · 운영은 ./dev.sh --prod-db 로만)"
 else
   warn "gcloud 인증이 없어 backend/.env 를 만들지 못했습니다."
   warn "  gcloud auth login && gcloud config set project $PROJECT"
@@ -97,6 +106,15 @@ else
   warn "  기존 머신에서 한 번만 Secret Manager 에 올려두면 이후 자동으로 받습니다:"
   warn "    gcloud secrets create FIREBASE_ADMIN_JSON --project=$PROJECT \\"
   warn "      --data-file=secrets/firebase-admin.json"
+fi
+
+say "로컬 PostgreSQL"
+if lsof -nP -iTCP:5432 -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "  5432 리스닝 확인"
+else
+  warn "5432 에 PostgreSQL 이 없습니다. 로컬 개발은 여기에 붙는다."
+  warn "  macOS:  brew install postgresql@16 && brew services start postgresql@16"
+  warn "  스키마는 기동 시 init_schema() 가 자동 적용하므로 빈 DB 면 된다."
 fi
 
 if [ ! -f frontend/.env.local ]; then
