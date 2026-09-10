@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone, time as _time
+from datetime import datetime, timezone
 from typing import Callable
 
 import yfinance as yf
@@ -15,12 +15,10 @@ import yfinance as yf
 logger = logging.getLogger(__name__)
 
 
-def _is_market_open() -> bool:
-    """미국 장중 여부 (UTC 기준 13:30~20:00, 평일)."""
-    now = datetime.now(timezone.utc)
-    if now.weekday() >= 5:
-        return False
-    return _time(13, 30) <= now.time() < _time(20, 0)
+# 장중 판정이 필요해지면 `market_calendar.is_us_market_open()` 을 쓴다.
+# 이 파일에도 `_is_market_open()` 이 있었는데, 주말만 보고 공휴일을 개장으로
+# 오판하는 구현이었다 — market_calendar 가 대체한 사본 셋 중 하나다.
+# 호출자가 없어 아무 증상이 없었고, 그래서 옮겨지지 않은 채 남아 있었다.
 
 
 # 시장별 벤치마크. 한국 브리핑에 SPY·VIX 를 붙이면 "내 종목이 S&P 대비
