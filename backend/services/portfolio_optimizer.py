@@ -12,6 +12,7 @@ Pipeline (모든 IO 병렬 실행):
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -20,20 +21,30 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-import requests
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-PERPLEXITY_API_KEY  = os.getenv("PERPLEXITY_API_KEY", "")
+logger = logging.getLogger(__name__)
+
 # AI 뷰 생성 모델. 추론 + 실시간 웹 검색이 필요해 sonar-pro 사용
 # (뉴스 요약용 _fetch_news 는 더 가벼운 sonar 로 충분).
+# API 키는 여기서 읽지 않는다 — services/perplexity 가 호출 시점에 읽으므로
+# 키를 교체하거나 테스트에서 바꿔도 재로딩이 필요 없다.
 _PPLX_MODEL         = os.getenv("PERPLEXITY_MODEL", "sonar-pro")
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def _safe(v, digits: int = 2) -> Optional[float]:
+def _round_or_none(v, digits: int = 2) -> Optional[float]:
+    """숫자면 반올림해서, 아니면 None. **반올림 함수다 — 기본값 함수가 아니다.**
+
+    이름이 `_safe` 였다. 그런데 같은 이름이 `portfolio_calculator` 에는
+    `(v, default=0.0)`, `routers/ticker.py` 에는 `(v, default=None)` 으로 있고
+    거기서는 둘째 인자가 **기본값**이다. 그래서 `_safe(x, 1)` 이 이 파일에서는
+    "소수 1자리" 이고 저기서는 "없으면 1" 이었다 — 두 파일을 오가며 작업하면
+    밟는다. 하는 일을 이름에 적어 그 혼동을 없앤다.
+    """
     try:
         return round(float(v), digits) if v is not None else None
     except (TypeError, ValueError):
@@ -264,14 +275,14 @@ def _gather_fundamentals(tickers: list[str]) -> dict:
 
             return t, {
                 # ── 밸류에이션 ──────────────────────────────────
-                "pe_forward":       _safe(info.get("forwardPE")),
-                "pe_trailing":      _safe(info.get("trailingPE")),
-                "pb_ratio":         _safe(info.get("priceToBook")),
-                "peg_ratio":        _safe(info.get("pegRatio")),
-                "ev_ebitda":        _safe(info.get("enterpriseToEbitda")),
-                "price_to_sales":   _safe(info.get("priceToSalesTrailing12Months")),
+                "pe_forward":       _round_or_none(info.get("forwardPE")),
+                "pe_trailing":      _round_or_none(info.get("trailingPE")),
+                "pb_ratio":         _round_or_none(info.get("priceToBook")),
+                "peg_ratio":        _round_or_none(info.get("pegRatio")),
+                "ev_ebitda":        _round_or_none(info.get("enterpriseToEbitda")),
+                "price_to_sales":   _round_or_none(info.get("priceToSalesTrailing12Months")),
                 "div_yield_pct":    _pct(info.get("dividendYield")),
-                "market_cap_b":     _safe((info.get("marketCap") or 0) / 1e9, 1),
+                "market_cap_b":     _round_or_none((info.get("marketCap") or 0) / 1e9, 1),
                 # ── 성장 & 수익성 ────────────────────────────────
                 "rev_growth_yoy":   _pct(info.get("revenueGrowth")),
                 "earnings_growth":  _pct(info.get("earningsGrowth")),
@@ -280,22 +291,22 @@ def _gather_fundamentals(tickers: list[str]) -> dict:
                 "profit_margin":    _pct(info.get("profitMargins")),
                 "gross_margin":     _pct(info.get("grossMargins")),
                 "ebitda_margin":    _pct(info.get("ebitdaMargins")),
-                "revenue_per_share":_safe(info.get("revenuePerShare")),
-                "eps_trailing":     _safe(info.get("trailingEps")),
-                "eps_forward":      _safe(info.get("forwardEps")),
+                "revenue_per_share":_round_or_none(info.get("revenuePerShare")),
+                "eps_trailing":     _round_or_none(info.get("trailingEps")),
+                "eps_forward":      _round_or_none(info.get("forwardEps")),
                 # ── 재무 건전성 ──────────────────────────────────
-                "debt_to_equity":   _safe(info.get("debtToEquity")),
-                "current_ratio":    _safe(info.get("currentRatio")),
-                "quick_ratio":      _safe(info.get("quickRatio")),
-                "free_cashflow_b":  _safe((info.get("freeCashflow") or 0) / 1e9, 1),
+                "debt_to_equity":   _round_or_none(info.get("debtToEquity")),
+                "current_ratio":    _round_or_none(info.get("currentRatio")),
+                "quick_ratio":      _round_or_none(info.get("quickRatio")),
+                "free_cashflow_b":  _round_or_none((info.get("freeCashflow") or 0) / 1e9, 1),
                 # ── 시장 리스크 ──────────────────────────────────
-                "beta":             _safe(info.get("beta")),
-                "short_ratio":      _safe(info.get("shortRatio")),  # 공매도 청산 소요일
+                "beta":             _round_or_none(info.get("beta")),
+                "short_ratio":      _round_or_none(info.get("shortRatio")),  # 공매도 청산 소요일
                 "short_pct_float":  _pct(info.get("shortPercentOfFloat")),
                 # ── 애널리스트 컨센서스 ──────────────────────────
-                "analyst_target":       _safe(tgt),
+                "analyst_target":       _round_or_none(tgt),
                 "analyst_upside_pct":   analyst_upside,
-                "analyst_rating_mean":  _safe(info.get("recommendationMean")),  # 1=strong buy, 5=sell
+                "analyst_rating_mean":  _round_or_none(info.get("recommendationMean")),  # 1=strong buy, 5=sell
                 "analyst_rating_key":   info.get("recommendationKey", ""),
                 "analyst_count":        info.get("numberOfAnalystOpinions"),
                 # ── 메타 ─────────────────────────────────────────
@@ -304,7 +315,8 @@ def _gather_fundamentals(tickers: list[str]) -> dict:
                 "country":  info.get("country", ""),
             }
         except Exception as e:
-            print(f"[Fundamentals {t}] {e}")
+            logger.warning("펀더멘털 수집 실패 (%s) — 그 종목은 값 없이 진행", t,
+                           exc_info=True)
             return t, {}
 
     with ThreadPoolExecutor(max_workers=min(len(tickers), 8)) as ex:
@@ -323,9 +335,7 @@ def _gather_fundamentals(tickers: list[str]) -> dict:
 def _fetch_news(tickers: list[str], market: str = "US") -> str:
     """종목별 전망 요약. 한국이면 국내 경제지에서 회사명으로 찾는다 —
     '005930.KS' 로 물으면 국내 기사가 거의 걸리지 않는다."""
-    if not PERPLEXITY_API_KEY:
-        return ""
-    from backend.services.news_sources import focus_block, perplexity_extra
+    from backend.services.news_sources import focus_block
     if market == "KR":
         from backend.services.markets import name_map_for
         _nm = name_map_for(tickers[:12], "KR")
@@ -340,23 +350,10 @@ def _fetch_news(tickers: list[str], market: str = "US") -> str:
         "Focus on information that would change forward return expectations vs historical trends."
         + focus_block(market)
     )
-    try:
-        resp = requests.post(
-            "https://api.perplexity.ai/chat/completions",
-            json={
-                "model": "sonar",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 2000,
-                **perplexity_extra(market),
-            },
-            headers={"Authorization": f"Bearer {PERPLEXITY_API_KEY}", "Content-Type": "application/json"},
-            timeout=30,
-        )
-        if resp.ok:
-            return resp.json()["choices"][0]["message"]["content"]
-    except Exception:
-        pass
-    return ""
+    from backend.services.perplexity import search
+    # max_tokens 만 올린다 — 종목 12개의 전망을 담아야 한다. 모델·temperature·
+    # timeout·출처 범위는 공유 클라이언트의 뉴스 수집 기본값이 그대로 맞다.
+    return search(prompt, market=market, max_tokens=2000, label="Optimizer news")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -479,9 +476,6 @@ def _generate_ai_views(
     투자의견 변경을 직접 조회할 수 있다. 정량 데이터(가격·펀더멘털)는 우리가 넣어주고,
     최신 정성 정보는 모델이 스스로 찾게 하는 구조.
     """
-    if not PERPLEXITY_API_KEY:
-        return {}
-
     horizon = (
         f"{int(holding_period_years * 12)}개월"
         if holding_period_years < 1
@@ -533,40 +527,37 @@ def _generate_ai_views(
   }}
 }}"""
 
+    from backend.services.perplexity import search
+
+    raw = search(
+        prompt,
+        market=market,
+        max_tokens=3000,
+        label="Optimizer AI views",
+        # 예측용이라 모델·system·temperature·timeout 을 올린다:
+        #   sonar-pro  — 뉴스 요약보다 추론이 필요하다
+        #   system     — JSON 만 내라는 지시. 이게 없으면 마크다운·각주가 섞인다
+        #   0.2        — API 기본값보다 낮춰 예측 편차를 줄인다 (뉴스 수집용
+        #                기본값 0.0 을 쓰면 이 경로의 출력이 달라진다)
+        #   120s       — 웹 검색이 붙어 뉴스 요약보다 느리다
+        model=_PPLX_MODEL,
+        system=(
+            "You are a CFA-certified portfolio manager with a mandate to provide unbiased, "
+            "cold-blooded return forecasts. You do NOT have a bullish bias. "
+            "If data signals downside, you assign negative expected returns without hesitation. "
+            "Use your web search to verify the latest earnings, guidance and analyst actions. "
+            "Output ONLY valid JSON. No markdown, no code blocks, no citations, no explanation."
+        ),
+        temperature=0.2,
+        timeout=120,
+    )
+    if not raw:
+        # 실패 이유는 공유 클라이언트가 이미 로그에 남겼다.
+        return {}
+
     try:
-        resp = requests.post(
-            "https://api.perplexity.ai/chat/completions",
-            json={
-                "model": _PPLX_MODEL,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a CFA-certified portfolio manager with a mandate to provide unbiased, "
-                            "cold-blooded return forecasts. You do NOT have a bullish bias. "
-                            "If data signals downside, you assign negative expected returns without hesitation. "
-                            "Use your web search to verify the latest earnings, guidance and analyst actions. "
-                            "Output ONLY valid JSON. No markdown, no code blocks, no citations, no explanation."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                "max_tokens": 3000,
-                # 예측 일관성을 위해 낮은 temperature (기본값은 편차가 크다)
-                "temperature": 0.2,
-            },
-            headers={
-                "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            timeout=120,   # 웹 검색이 붙어 Claude 보다 응답이 느리다
-        )
-        if not resp.ok:
-            print(f"[AI Views] Perplexity {resp.status_code}: {resp.text[:200]}")
-            return {}
-        raw = resp.json()["choices"][0]["message"]["content"].strip()
         # Perplexity 는 각주([1] 등)를 붙이는 경우가 있어 JSON 추출 전에 제거
-        raw = re.sub(r"\[\d+\]", "", raw)
+        raw = re.sub(r"\[\d+\]", "", raw.strip())
 
         m = re.search(r"\{[\s\S]*\}", raw)
         if m:
@@ -590,7 +581,8 @@ def _generate_ai_views(
         return result
 
     except Exception as e:
-        print(f"[AI Views parse error] {e}")
+        logger.warning("AI 뷰 JSON 파싱 실패 — AI 뷰 없이 진행 (raw 앞부분: %s)",
+                       raw[:200], exc_info=True)
         return {}
 
 
@@ -658,7 +650,8 @@ def _run_pypfopt(
         # 폴백 기본값 0.0 (편향 중립)
         posterior_returns = {t: round(float(ret_bl.get(t, mu_hist.get(t, 0.0))), 4) for t in tickers}
     except Exception as e:
-        print(f"[BL error] {e}")
+        logger.warning("Black-Litterman 실패 — 사후 수익률을 과거 평균으로 대체",
+                       exc_info=True)
         ret_bl = mu_hist
         posterior_returns = {t: round(float(mu_hist.get(t, 0.0)), 4) for t in tickers}
 
@@ -696,7 +689,8 @@ def _run_pypfopt(
                 "sharpe_ratio":    round(float(sh), 4),
             }
         except Exception as ex:
-            print(f"[Opt {method} error] {ex}")
+            logger.warning("최적화 실패 (%s) — 그 조합은 결과에서 빠진다", method,
+                           exc_info=True)
             return None
 
     def _attach_ext(result: dict | None) -> dict | None:
@@ -755,7 +749,8 @@ def _run_pypfopt(
                 "sharpe_ratio":    round(sharpe, 4),
             }
         except Exception as ex:
-            print(f"[Opt HRP error] {ex}")
+            logger.warning("HRP 최적화 실패 — 그 조합은 결과에서 빠진다",
+                           exc_info=True)
             return None
 
     # ── Step 1: max_sharpe 두 가지 ───────────────────────────────────────────

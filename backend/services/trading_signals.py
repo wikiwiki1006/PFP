@@ -7,8 +7,12 @@ sys.path 조작 없이 독립 실행 가능.
 """
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 # ── S&P500 + 나스닥 전수 스캔 유니버스 ──────────────────────────────────────────
 SP500_NASDAQ_UNIVERSE = [
@@ -206,6 +210,12 @@ def scan_universe_with_targets(
     short_picks: list[dict] = []
     scanned = 0
 
+    # 실패를 종목마다 로그로 남기면 500종목 스캔에서 수백 줄이 되어 로그가
+    # 쓸모없어진다. 아무것도 남기지 않으면 후보가 왜 적은지 알 수 없다 (§1.3).
+    # 루프에서는 모으고 끝에서 한 줄로 낸다 — 실패가 한 원인에 몰렸는지
+    # 흩어졌는지가 그 줄로 구별된다.
+    failures: dict[str, list[str]] = {"평균회귀": [], "모멘텀 돌파": []}
+
     tickers = [t for t in price_df.columns
                if t in set(SP500_NASDAQ_UNIVERSE + list(price_df.columns))]
 
@@ -243,8 +253,8 @@ def scan_universe_with_targets(
                     "score":    abs(z),
                     "reason":   f"상단밴드 이탈 (Z={z:.2f}) → 중앙선 {_fmt_price(mid, currency)} 하락 기대",
                 })
-        except Exception:
-            pass
+        except Exception as e:
+            failures["평균회귀"].append(f"{ticker}({type(e).__name__}: {e})")
 
         # ── 모멘텀 돌파 ────────────────────────────────────────────────────
         try:
@@ -266,8 +276,15 @@ def scan_universe_with_targets(
                             "score":  3.5,
                             "reason": f"N일 고점 {_fmt_price(resistance, currency)} 돌파 + 거래량 급증",
                         })
-        except Exception:
-            pass
+        except Exception as e:
+            failures["모멘텀 돌파"].append(f"{ticker}({type(e).__name__}: {e})")
+
+    for stage, msgs in failures.items():
+        if msgs:
+            logger.warning(
+                "%s 계산 실패 %d/%d 종목 — 그 종목은 후보에서 빠진다. 앞 3건: %s",
+                stage, len(msgs), scanned, " · ".join(msgs[:3]),
+            )
 
     def _dedup_top(lst: list[dict]) -> list[dict]:
         seen: dict = {}
