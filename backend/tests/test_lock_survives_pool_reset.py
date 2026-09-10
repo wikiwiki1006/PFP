@@ -93,15 +93,6 @@ def test_observer_sees_the_lock(observer, lock_uid):
 
 # ── 본론 ──────────────────────────────────────────────────────────────────────
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "backend/db/__init__.py _try_reinit_pool() calls _pool.closeall(), "
-        "which closes the connection another request is holding its advisory "
-        "lock on, so the lock dies mid-critical-section. Delete this marker "
-        "once a reset spares in-use connections."
-    ),
-)
 def test_lock_outlives_a_pool_reinit(observer, lock_uid):
     """풀 재초기화가 남의 락을 끊으면 안 된다.
 
