@@ -184,7 +184,24 @@ def scan_universe_with_targets(
     top_n: int = 10,
     bb_window: int = 20,
     stop_pct: float = 0.04,
+    *,
+    market: str,
 ) -> dict:
+    """유니버스 스캔 → 매수·매도 후보와 목표가.
+
+    `market` 은 기본값 없는 키워드 전용 인자다. `reason` 문자열이 금액을 담고
+    **그대로 화면에 보이므로**, 시장을 모르면 한국 종목에 `중앙선 $71900.00` 이
+    뜬다 (§1.4 — 원화는 `$` 도 소수점도 쓰지 않는다). 기본값을 두면 빠뜨린
+    호출부가 조용히 달러가 되고, 위치 인자로 두면 실수로 다른 값이 들어갈 수
+    있어 둘 다 막는다.
+    """
+    from backend.services.markets import get_market
+    from backend.services.report_writer import _fmt_price
+
+    # 이 함수는 루프 안에서 `cur` 을 '현재가'로 쓴다 — 통화 변수에 그 이름을
+    # 쓰면 첫 반복에서 덮어써져 _fmt_price 가 통화 자리에 가격을 받는다.
+    currency = get_market(market).currency
+
     long_picks:  list[dict] = []
     short_picks: list[dict] = []
     scanned = 0
@@ -215,7 +232,7 @@ def scan_universe_with_targets(
                     "stop":   round(cur * (1 - stop_pct), 2),
                     "upside": round((mid - cur) / cur * 100, 1),
                     "score":  abs(z),
-                    "reason": f"하단밴드 이탈 (Z={z:.2f}) → 중앙선 ${mid:.2f} 회귀 기대",
+                    "reason": f"하단밴드 이탈 (Z={z:.2f}) → 중앙선 {_fmt_price(mid, currency)} 회귀 기대",
                 })
             elif signal == "SELL":
                 short_picks.append({
@@ -224,7 +241,7 @@ def scan_universe_with_targets(
                     "stop":     round(cur * (1 + stop_pct), 2),
                     "downside": round((cur - mid) / cur * 100, 1),
                     "score":    abs(z),
-                    "reason":   f"상단밴드 이탈 (Z={z:.2f}) → 중앙선 ${mid:.2f} 하락 기대",
+                    "reason":   f"상단밴드 이탈 (Z={z:.2f}) → 중앙선 {_fmt_price(mid, currency)} 하락 기대",
                 })
         except Exception:
             pass
@@ -247,7 +264,7 @@ def scan_universe_with_targets(
                             "stop":   round(cur * (1 - stop_pct), 2),
                             "upside": 8.0,
                             "score":  3.5,
-                            "reason": f"N일 고점 ${resistance:.2f} 돌파 + 거래량 급증",
+                            "reason": f"N일 고점 {_fmt_price(resistance, currency)} 돌파 + 거래량 급증",
                         })
         except Exception:
             pass
