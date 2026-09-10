@@ -33,7 +33,16 @@ except ImportError:
 _pool: Optional[Any] = None
 
 
-class PoolExhausted(RuntimeError):
+class DBBusy(RuntimeError):
+    """지금은 처리할 수 없지만 **다시 시도하면 되는** 상태.
+
+    고장이 아니라 혼잡이다. 그래서 500(우리가 망가졌다)이 아니라 503 으로
+    번역돼야 한다 — 500 은 사용자에게 재시도해도 되는지를 알려주지 않는다.
+    `main.py` 의 예외 핸들러가 이 계열을 503 + `str(exc)` 로 내려보낸다.
+    """
+
+
+class PoolExhausted(DBBusy):
     """풀에 남은 커넥션이 없다. **커넥션 장애가 아니라 백프레셔다.**
 
     둘을 구분하는 이유는 대응이 정반대이기 때문이다. 커넥션이 죽었으면 풀을
@@ -46,6 +55,18 @@ class PoolExhausted(RuntimeError):
     이 쥐고 있던 락이 `closeall()` 로 함께 풀리는데, 재초기화를 유발한 요청
     하나만 에러를 받고 나머지는 **락이 사라진 줄도 모른 채 계속 진행한다.**
     (실측: 풀을 채운 뒤 pg_locks 를 관찰하니 advisory lock 이 1 → 0 이 됐다.)
+    """
+
+
+class WriteLockUnavailable(DBBusy):
+    """사용자별 쓰기 락을 잡지 못했다.
+
+    예전에는 못 잡아도 그냥 진행했다(가용성 우선). 그런데 락 획득이 실패하는
+    주된 원인이 풀 고갈이고, **풀이 고갈됐다는 건 동시 요청이 몰렸다는 뜻이라
+    바로 그때가 경쟁이 실제로 터지는 순간이다.** 가장 위험한 지점에서만
+    보호가 사라지는 셈이었다.
+
+    유실은 되돌릴 수 없고 사용자가 알지도 못한다. 503 은 다시 누르면 된다.
     """
 
 
@@ -98,14 +119,25 @@ def _dsn_label() -> str:
 def init_pool(minconn: int = 2, maxconn: Optional[int] = None) -> bool:
     """연결 풀 초기화. 성공 시 True, 실패 시 False(파일 폴백).
 
-    maxconn 기본값은 Cloud Run 의 인스턴스당 동시 요청 수(40)에 맞춘다.
+    maxconn 기본값은 Cloud Run 의 인스턴스당 동시 요청 수(40)의 **두 배**다.
     이보다 작으면 요청은 스레드풀에 올라갔는데 커넥션이 없어 대기하게 되고,
     동시 접속이 늘수록 그 대기가 그대로 응답 지연이 된다.
-    DB(Neon) 는 900 연결까지 받으므로 5 인스턴스 × 40 = 200 은 여유가 있다.
+    DB(Neon) 는 900 연결까지 받으므로 5 인스턴스 × 80 = 400 은 여유가 있다.
+
+    **두 배인 이유는 쓰기 요청이 커넥션을 두 개 쥐기 때문이다.**
+    `portfolio_repo.user_write_lock` 이 advisory lock 용으로 하나를 잡아
+    핸들러가 끝날 때까지 놓지 않고, 그 안의 실제 쿼리가 `get_conn()` 으로
+    또 하나를 꺼낸다 (실측으로 확인: 요청 1건 = 커넥션 2개).
+    예전 값 40 은 "1요청 = 1커넥션" 을 가정한 값이었고, 락이 들어오면서 그
+    가정이 깨졌는데 숫자는 그대로였다. 그래서 쓰기 20건이면 40개가 다 나갔다.
+
+    락과 본문 쿼리가 같은 커넥션을 쓰도록 바꾸면(그게 근본 해법이다) 다시
+    1요청 = 1커넥션이 되므로 **이 두 배도 같이 되돌려야 한다.** 그때 이 주석을
+    고치지 않으면 80 이 근거를 잃은 채 굳는다 — 지금 40 이 그랬던 것처럼.
     """
     global _pool
     if maxconn is None:
-        maxconn = max(4, int(os.getenv("DB_POOL_MAX", "40")))
+        maxconn = max(4, int(os.getenv("DB_POOL_MAX", "80")))
     if not _PSYCOPG2_OK:
         logger.warning("psycopg2 미설치 → 파일 폴백 모드")
         return False
