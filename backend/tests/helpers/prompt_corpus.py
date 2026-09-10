@@ -7,18 +7,24 @@ backend/tests/helpers/prompt_corpus.py
 "한 빌더는 규칙을 알고 사본은 모르는" 형태였다 — 통화 표기, 거시지표 시장 분기,
 금액 계산, 도구 없는 웹서치 지시. 그래서 **빌더 전부**를 같은 규칙에 건다.
 
-빌더는 넷이다 (`report_writer` 는 프롬프트 변형이 여럿이라 각각 담는다):
+빌더 목록 (프롬프트 변형이 여럿인 것은 각각 담는다):
 
     ai_analysis.py          _format_portfolio · build_macro_block
+                            _build_agents (에이전트 9개) · generate_daily_brief
     daily_report.py         _build_prompt
     report_writer.py        _equity_prompt(+part1/part2) · _industry_prompt
     portfolio_optimizer.py  _build_ticker_section
 
-**네 번째는 어느 목록에도 없었다.** 프롬프트를 만드는 곳은 `report_*`·`ai_*`
-라는 이름 안에만 있지 않다. 새 빌더가 생기면 여기에 추가한다 — 여기 없는
-빌더는 어떤 규칙도 받지 않는다.
+**빌더를 셀 때 사본을 세면 안 된다.** 목록이 처음엔 셋이었고,
+`portfolio_optimizer._build_ticker_section` 은 어디에도 없었다 — 그리고 거기에
+§1.4 사고가 그대로 살아 있었다. 사본을 세면 "내가 아는 것과 같은 코드" 만
+세게 되고, 모르는 자리는 구조적으로 안 세어진다.
 
-전부 네트워크를 타지 않는 순수 함수다. 거시지표만 바깥을 보므로 값을 주입한다.
+기준은 코드 모양이 아니라 역할이다: **숫자나 사실을 문자열로 만들어 모델에게
+넘기는 자리는 전부 빌더다.** 여기 없는 빌더는 어떤 규칙도 받지 않는다.
+
+대부분 순수 함수다. 바깥을 보는 둘만 주입한다 — 거시지표 수집, 그리고
+`generate_daily_brief` 의 모델 호출(그 반환을 가로채 프롬프트를 얻는다).
 """
 from __future__ import annotations
 
@@ -138,6 +144,53 @@ def _optimizer_prompts() -> list[Prompt]:
     ]
 
 
+def _agent_prompts() -> list[Prompt]:
+    """`_build_agents` 는 에이전트마다 프롬프트를 하나씩 만든다.
+
+    합쳐서 한 항목으로 담지 않는다 — 합치면 어느 에이전트가 규칙을 어겼는지
+    실패 메시지에서 안 보인다. 아홉 중 하나만 시장 분기를 빠뜨리는 것이 바로
+    이 리포에서 반복된 형태다.
+    """
+    from backend.services import ai_analysis
+
+    out: list[Prompt] = []
+    for market, holdings in (("KR", KR_HOLDINGS), ("US", US_HOLDINGS)):
+        portfolio_str = ai_analysis._format_portfolio(holdings, market)
+        for agent in ai_analysis._build_agents("관세 인상", portfolio_str, market=market):
+            out.append(Prompt(
+                f"ai_analysis._build_agents#{agent['id']}({agent['label']})",
+                market, agent["prompt"],
+            ))
+    return out
+
+
+def _daily_brief_prompt() -> list[Prompt]:
+    """`generate_daily_brief` 는 프롬프트를 만들자마자 모델에 넘긴다.
+
+    마지막 줄이 `return call_claude(prompt, ...)` 라, 그 함수를 가로채면
+    프롬프트 문자열을 그대로 받을 수 있다. 별도 진입점을 만들지 않고 실제
+    경로가 만드는 문자열을 그대로 잰다.
+    """
+    from backend.services import ai_analysis
+
+    kr_prices = {"005930.KS": {"price": 71900, "chg_pct": 1.2, "pnl_pct": 0.0,
+                               "pos_val": 719_000, "day_pnl": 10_239}}
+    us_prices = {"AAPL": {"price": 231.45, "chg_pct": 1.2, "pnl_pct": 0.0,
+                          "pos_val": 2314.5, "day_pnl": 25.5}}
+    news = [{"ticker": "AAPL", "title": "테스트 헤드라인"}]
+
+    out = []
+    for market, holdings, prices, macro in (
+        ("KR", KR_HOLDINGS, kr_prices, "[한국 거시지표]\n  한국은행 기준금리: 2.50%"),
+        ("US", US_HOLDINGS, us_prices, "[US macro indicators]\n  Fed funds: 4.25%"),
+    ):
+        with mock.patch.object(ai_analysis, "call_claude", lambda prompt, *a, **kw: prompt), \
+             mock.patch.object(ai_analysis, "build_macro_block", lambda m, _b=macro: _b):
+            text = ai_analysis.generate_daily_brief(holdings, prices, news, market)
+        out.append(Prompt("ai_analysis.generate_daily_brief", market, text))
+    return out
+
+
 def build_corpus() -> list[Prompt]:
     """빌더 전부의 프롬프트. 새 빌더가 생기면 여기에 더한다."""
     from backend.services import ai_analysis
@@ -149,6 +202,8 @@ def build_corpus() -> list[Prompt]:
                ai_analysis._format_portfolio(US_HOLDINGS, "US")),
     ]
     out += _macro_prompts()
+    out += _agent_prompts()
+    out += _daily_brief_prompt()
     out += _daily_prompts()
     out += _report_prompts()
     out += _optimizer_prompts()

@@ -149,6 +149,25 @@ def test_won_amounts_have_no_decimals(prompt: Prompt):
 # 판정을 좁게 둔다: 산문 속 물음표가 아니라 **값 자리**의 자리표시자만 잡는다.
 _PLACEHOLDER = re.compile(r"(?:[:\s(|])\?(?=[\sB%|)])|\bN/A\b|\$\?")
 
+
+def _data_lines(text: str) -> str:
+    """마크다운 표 행을 뺀 나머지.
+
+    프롬프트에는 **모델이 채울 출력 서식**이 표로 들어간다. 그 칸의 `?%` 는
+    데이터가 아니라 빈칸 표시다 — 같은 행의 다른 칸도 '어떤 조건이 갖춰지면'
+    처럼 지시문이다. 이 리포의 프롬프트는 `XX%`·`[BUY/HOLD/SELL]`·`$XXX.XX`
+    도 같은 뜻으로 쓴다.
+
+    그걸 위반으로 잡으면 정상적인 서식 지정이 전부 빨개지고, 그러면 이 검사는
+    무시당한다. 그래서 `|` 로 시작하는 줄은 보지 않는다.
+
+    **놓치는 것**: 데이터를 마크다운 표로 실어 보내는 빌더가 생기면 그 안의
+    자리표시자는 안 걸린다. 지금 그런 빌더는 없고, 실제 결함
+    (`_build_ticker_section` 의 `$?B | ? — ?`)은 `|` 로 시작하지 않아 그대로
+    잡힌다. 그런 빌더가 생기면 이 함수를 다시 봐야 한다.
+    """
+    return "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("|"))
+
 _B2_XFAIL = {
     "portfolio_optimizer._build_ticker_section(빈값)[KR]": (
         "_build_ticker_section falls back to '?' for missing fundamentals and "
@@ -164,7 +183,7 @@ _B2_XFAIL = {
 @pytest.mark.parametrize("prompt", _cases(xfail=_B2_XFAIL))
 def test_missing_values_are_not_placeholder_strings(prompt: Prompt):
     """B2 — `N/A` · `?` 를 값 자리에 적지 않는다."""
-    found = _PLACEHOLDER.findall(prompt.text)
+    found = _PLACEHOLDER.findall(_data_lines(prompt.text))
     assert not found, (
         f"{prompt.builder} puts placeholder text where a value belongs "
         f"({len(found)} occurrence(s)) -- the model quotes it as if it were a "
@@ -238,9 +257,14 @@ def test_won_decimal_detector(text, should_match, why):
     ("배당수익률 N/A", True, "N/A"),
     ("이 종목의 성장성은 어떤가?", False, "산문 속 물음표는 잡지 않는다"),
     ("어느 쪽이 유리한가? 아래를 보라", False, "산문 속 물음표"),
+    # 출력 서식 표의 빈칸. 모델이 채우라고 둔 자리이지 데이터가 아니다.
+    ("| 낙관 (상승) | ?% | 어떤 조건이 갖춰지면 | S&P500 +?% 예상 |", False,
+     "마크다운 표는 모델이 채울 서식이다"),
+    ("  ■ 005930.KS  (시가총액 $?B | Technology — Semi)", True,
+     "표가 아닌 줄의 자리표시자는 데이터다 — `|` 가 있어도 줄 시작이 아니다"),
 ])
 def test_placeholder_detector(text, should_match, why):
-    assert bool(_PLACEHOLDER.search(text)) is should_match, why
+    assert bool(_PLACEHOLDER.search(_data_lines(text))) is should_match, why
 
 
 @pytest.mark.parametrize("pattern, text, should_match", [
