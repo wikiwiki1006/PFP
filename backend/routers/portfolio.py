@@ -309,10 +309,17 @@ def _add_trade_locked(body: AddTradeRequest, uid: str, market: str):
         holdings = get_holdings(uid, market=market)
         # 백그라운드에서 섹터 자동 조회 후 업데이트
         def _bg_sector():
-            sector = _fetch_sector(ticker)
-            if sector and sector != "Other":
-                # 섹터만 UPDATE — 조회를 기다리는 사이 체결된 매매를 되돌리지 않는다
-                update_holding_sector(ticker, sector, uid, market=market)
+            try:
+                sector = _fetch_sector(ticker)
+                if sector and sector != "Other":
+                    # 섹터만 UPDATE — 조회를 기다리는 사이 체결된 매매를 되돌리지 않는다
+                    update_holding_sector(ticker, sector, uid, market=market)
+            except Exception as e:
+                # 데몬 스레드라 예외를 안 잡으면 stderr 트레이스백만 남고 끝난다.
+                # 섹터는 부가 정보라 요청을 실패시킬 이유는 없지만, 어디서 왜
+                # 실패했는지는 남겨야 한다.
+                logger.warning(f"섹터 자동 조회 실패 (ticker={ticker}, "
+                               f"uid={uid}, market={market}): {e}")
         threading.Thread(target=_bg_sector, daemon=True).start()
 
     trade_date = (body.date or "").strip() or datetime.now().strftime("%Y-%m-%d")
@@ -1067,8 +1074,12 @@ def setup_portfolio(body: PortfolioSetupRequest, _auth: dict = Depends(current_u
                 sec = _fetch_sector(r["ticker"])
                 if sec and sec != "Other":
                     update_holding_sector(r["ticker"], sec, uid, market=market)
-            except Exception:
-                pass
+            except Exception as e:
+                # 한 종목이 실패해도 나머지는 계속 채운다. 다만 조용히 넘기지는
+                # 않는다 — 섹터가 전부 'Other' 로 남아도 화면은 정상으로 보이고,
+                # 그러면 원인을 찾을 단서가 아무 데도 없다.
+                logger.warning(f"섹터 자동 조회 실패 (ticker={r['ticker']}, "
+                               f"uid={uid}, market={market}): {e}")
     threading.Thread(target=_bg_sectors, daemon=True).start()
 
     return {
