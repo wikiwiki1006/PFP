@@ -6,6 +6,7 @@
 #   ./dev.sh --slot 1       포트 8001/3001 — 병렬 worktree 용
 #   ./dev.sh --slot 2 --db-branch test    창 전용 DB (db-targets.env 참고)
 #   ./dev.sh --slot 1 --auth-emulator   인증을 로컬 에뮬레이터로 (운영과 분리)
+#   ./dev.sh --scheduler                백그라운드 수집을 켠다 (기본은 꺼짐)
 #
 # 로그인은 고정 테스트 계정으로만 한다:
 #     test@gmail.com / 10october@
@@ -38,6 +39,7 @@ SLOT=0
 PROD_DB=0
 DB_BRANCH=""
 AUTH_EMU=0
+SCHEDULER=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -45,6 +47,7 @@ while [ $# -gt 0 ]; do
     --slot)      SLOT="${2:?--slot 에 숫자가 필요합니다}"; shift 2 ;;
     --db-branch) DB_BRANCH="${2:?--db-branch 에 이름이 필요합니다}"; shift 2 ;;
     --auth-emulator) AUTH_EMU=1; shift ;;
+    --scheduler)     SCHEDULER=1; shift ;;
     -h|--help)   sed -n '2,30p' "$0"; exit 0 ;;
     *)           echo "알 수 없는 옵션: $1"; exit 1 ;;
   esac
@@ -73,6 +76,27 @@ for p in "$BE_PORT" "$FE_PORT"; do
     exit 1
   fi
 done
+
+# ── 백그라운드 수집 ───────────────────────────────────────────────────────────
+#
+# main.py 의 기본값은 ENABLE_SCHEDULER=true 다. 그대로 두면 기동할 때마다
+# 공통 티커 프리패치(2년치) + SP500 전 종목 수집 + 1분 주기 스케줄러가 돈다.
+# 운영에서는 맞지만 병렬 개발에서는 아니다:
+#
+#   - 창이 다섯이면 같은 수집이 다섯 번 돈다. yfinance 는 IP 단위로 막으므로
+#     한 사람이 레이트리밋에 걸리면 다섯 창이 같이 죽는다.
+#   - 창마다 DB 가 다르니 캐시가 공유되지 않아 중복이 그대로 5배가 된다.
+#   - 측정 중에 행 수가 저절로 늘어 벤치마크 기준값이 이동한다.
+#
+# 그래서 로컬 기본은 끔. 수집 경로 자체를 시험해야 하면 --scheduler 로 켜되,
+# 한 번에 한 창만 켜라.
+if [ "$SCHEDULER" = 1 ]; then
+  export ENABLE_SCHEDULER=true
+  echo "▸ 수집: 켜짐 — 다른 창도 켜져 있으면 yfinance 레이트리밋에 걸립니다"
+else
+  export ENABLE_SCHEDULER=false
+  echo "▸ 수집: 꺼짐 (시세는 온디맨드로만) · 켜려면 --scheduler"
+fi
 
 # ── 인증 에뮬레이터 ───────────────────────────────────────────────────────────
 #
