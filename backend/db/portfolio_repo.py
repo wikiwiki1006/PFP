@@ -1,24 +1,38 @@
 """
 backend/db/portfolio_repo.py
 ──────────────────────────────
-holdings / trade_log 사용자별 CRUD.
-쓰기: DB 전용 (파일 쓰기 없음 — 클라우드 배포 대응).
-읽기: DB 우선, DB 미연결 시 pfp/data/*.json 에서 읽어 로컬 개발 지원.
+holdings / trade_log 사용자별 CRUD. 읽기·쓰기 모두 DB 전용이다.
+
+예전에는 읽기에 파일 폴백이 있었다 — DB 가 없거나 조회가 실패하면
+`pfp/data/holdings.json` · `trade_log.json` 을 읽어 돌려줬다. 인증이 붙기 전,
+사용자가 한 명이던 시절의 로컬 개발 편의다. 제거한 이유:
+
+  1. 그 파일에는 `user_id` 도 `market` 도 없다. 폴백이 도는 순간 **모든
+     사용자가 같은 파일 하나를 자기 포트폴리오로 받고** 미국·한국 구분도
+     사라진다. CLAUDE.md §1.1 과 §1.2 를 동시에 어긴다.
+  2. 파일이 없을 때 돌려주던 빈 값이 더 위험하다. 보유·거래 변경은 전부
+     read-modify-write 다 (`user_write_lock` 주석 참고) — 읽어서 계산한 뒤
+     절대값으로 덮어쓴다. 조회가 일시적으로 실패해 `{}` 가 돌아오면 그 다음
+     쓰기가 **보유를 지운다.** 커넥션 단위 오류는 다음 커넥션에서 회복되므로
+     읽기만 실패하고 쓰기는 성공하는 조합이 실제로 가능하다.
+  3. 실패와 "보유 없음" 이 구분되지 않는다(§1.3). 화면은 빈 포트폴리오를
+     정상으로 그리므로 사용자에게는 데이터가 사라진 것으로 보인다.
+  4. 원본이 없다. `pfp/data/` 는 리포에 존재하지 않는다. 남은 건 `.gitignore`
+     의 경로 두 줄뿐인데 그게 오히려 위험하다 — 누가 그 파일을 만들면 잠복이
+     그대로 유출로 바뀐다.
+
+그래서 DB 를 못 읽으면 빈 값 대신 예외를 올린다. `get_conn()` 이 이미 3회
+재시도와 풀 재초기화를 하므로, 여기까지 올라온 예외는 그 사다리가 전부
+실패했다는 뜻이다. 조용히 비우는 것보다 500 이 정직하다.
 """
 from __future__ import annotations
 
-import json
 import logging
 from contextlib import contextmanager
-from pathlib import Path
 
 from backend.db import get_conn, is_available
 
 logger = logging.getLogger(__name__)
-
-_DATA_DIR = Path(__file__).parent.parent.parent / "pfp" / "data"
-_DB_FILE  = _DATA_DIR / "holdings.json"
-_LOG_FILE = _DATA_DIR / "trade_log.json"
 
 
 # ── Holdings ───────────────────────────────────────────────────────────────────
@@ -27,26 +41,22 @@ def get_holdings(user_id: str = "default", market: str = "US") -> dict:
     """{ ticker: {q, avg, sector} } 반환. 해당 시장 보유분만.
 
     market 을 안 주면 미국이다. 프론트가 시장을 보내지 않는 옛 요청도
-    기존과 똑같이 동작하게 하기 위한 기본값이다."""
-    if is_available():
-        try:
-            with get_conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT ticker, qty, avg_cost, sector "
-                        "FROM holdings WHERE user_id=%s AND market=%s",
-                        (user_id, market),
-                    )
-                    rows = cur.fetchall()
-            return {r[0]: {"q": r[1], "avg": r[2], "sector": r[3]} for r in rows}
-        except Exception as e:
-            logger.warning(f"DB get_holdings 실패, 파일 폴백: {e}")
+    기존과 똑같이 동작하게 하기 위한 기본값이다.
 
-    # 로컬 개발용 읽기 전용 폴백
-    if not _DB_FILE.exists():
-        return {}
-    raw = json.loads(_DB_FILE.read_text())
-    return raw.get("my_holdings", raw)
+    DB 를 못 읽으면 예외를 올린다 (모듈 docstring 참고). 빈 dict 는 "보유
+    없음" 이라는 뜻으로만 쓴다."""
+    if not is_available():
+        raise RuntimeError("DB 미연결 — 보유 종목을 읽을 수 없다")
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT ticker, qty, avg_cost, sector "
+                "FROM holdings WHERE user_id=%s AND market=%s",
+                (user_id, market),
+            )
+            rows = cur.fetchall()
+    return {r[0]: {"q": r[1], "avg": r[2], "sector": r[3]} for r in rows}
 
 
 def save_holding(
@@ -180,37 +190,35 @@ def delete_holding(ticker: str, user_id: str = "default", with_trades: bool = Fa
 # ── Trade Log ──────────────────────────────────────────────────────────────────
 
 def get_trade_log(user_id: str = "default", market: str = "US") -> list[dict]:
-    """[{id, date, ticker, type, q, price, memo}, ...] 반환."""
-    if is_available():
-        try:
-            with get_conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """SELECT id, trade_date, ticker, trade_type, qty, price, memo
-                           FROM trade_log WHERE user_id=%s AND market=%s
-                           ORDER BY trade_date ASC, id ASC""",
-                        (user_id, market),
-                    )
-                    rows = cur.fetchall()
-            return [
-                {
-                    "id":     r[0],
-                    "date":   str(r[1]),
-                    "ticker": r[2],
-                    "type":   r[3],
-                    "q":      r[4],
-                    "price":  r[5],
-                    "memo":   r[6],
-                }
-                for r in rows
-            ]
-        except Exception as e:
-            logger.warning(f"DB get_trade_log 실패, 파일 폴백: {e}")
+    """[{id, date, ticker, type, q, price, memo}, ...] 반환.
 
-    # 로컬 개발용 읽기 전용 폴백
-    if not _LOG_FILE.exists():
-        return []
-    return json.loads(_LOG_FILE.read_text())
+    get_holdings 와 같다 — DB 를 못 읽으면 빈 목록 대신 예외를 올린다.
+    거래 이력이 비어 보이면 그 위에서 계산하는 현금 원장·수익률이 전부
+    조용히 틀어진다."""
+    if not is_available():
+        raise RuntimeError("DB 미연결 — 거래 이력을 읽을 수 없다")
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, trade_date, ticker, trade_type, qty, price, memo
+                   FROM trade_log WHERE user_id=%s AND market=%s
+                   ORDER BY trade_date ASC, id ASC""",
+                (user_id, market),
+            )
+            rows = cur.fetchall()
+    return [
+        {
+            "id":     r[0],
+            "date":   str(r[1]),
+            "ticker": r[2],
+            "type":   r[3],
+            "q":      r[4],
+            "price":  r[5],
+            "memo":   r[6],
+        }
+        for r in rows
+    ]
 
 
 def update_trade_by_id(trade_id: int, record: dict, user_id: str = "default",
