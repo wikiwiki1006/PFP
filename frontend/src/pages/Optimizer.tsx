@@ -9,7 +9,7 @@ import { useLoginPrompt } from '@/components/auth/LockedPreview'
 import LoadingSpinner from '@/components/LoadingSpinner'
 import { startAIOptimizeJob, getAIOptimizeJob, cancelAIOptimizeJob, getHoldings, checkTickerExists } from '@/api'
 import type { AIOptimizationResult, OptimizationMode } from '@/types'
-import { cn } from '@/lib/utils'
+import { cn, colorForValue } from '@/lib/utils'
 import { formatPrice } from '@/lib/market'
 import { marketSession } from '@/lib/marketStorage'
 import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
@@ -636,8 +636,11 @@ function AIViewsTable({ result }: { result: AIOptimizationResult }) {
                   <td className="py-2 px-3">
                     {view ? <SentimentBadge s={view.sentiment} /> : '—'}
                   </td>
+                  {/* 색도 값과 같은 판단을 해야 한다. `?? 0` 이면 view 가 없을 때
+                      0 >= 0 이 되어 '—' 가 초록으로 칠해진다 — 값은 모른다고 하면서
+                      색은 긍정을 말하는 셈이다. colorForValue 는 null 을 회색으로 준다. */}
                   <td className={cn('py-2 px-3 font-mono font-semibold',
-                    (view?.expected_return ?? 0) >= 0 ? 'text-[#10b981]' : 'text-[#ef4444]')}>
+                    colorForValue(view?.expected_return))}>
                     {view ? `${view.expected_return >= 0 ? '+' : ''}${(view.expected_return * 100).toFixed(1)}%` : '—'}
                   </td>
                   <td className="py-2 px-3">
@@ -650,7 +653,10 @@ function AIViewsTable({ result }: { result: AIOptimizationResult }) {
                       </div>
                     ) : '—'}
                   </td>
-                  <td className={cn('py-2 px-3 font-mono', (post ?? 0) >= 0 ? 'text-[#8b5cf6]' : 'text-[#ef4444]')}>
+                  {/* 위와 같다. 이쪽은 양수 색이 보라라 colorForValue 를 쓸 수 없어
+                      null 을 직접 갈라낸다. */}
+                  <td className={cn('py-2 px-3 font-mono',
+                    post == null ? 'text-[#64748b]' : post >= 0 ? 'text-[#8b5cf6]' : 'text-[#ef4444]')}>
                     {post != null ? `${post >= 0 ? '+' : ''}${(post * 100).toFixed(1)}%` : '—'}
                   </td>
                 </tr>,
