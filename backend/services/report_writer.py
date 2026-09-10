@@ -6,6 +6,7 @@ yfinance 실제 데이터 + Perplexity 뉴스 + Haiku 구조화 + Sonnet 분석
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 import requests
@@ -20,6 +21,8 @@ from dotenv import load_dotenv
 from backend.services.job_store import JobCancelled
 
 load_dotenv(Path(__file__).parent.parent / ".env")
+
+logger = logging.getLogger(__name__)
 
 ANTHROPIC_API_KEY  = os.getenv("ANTHROPIC_API_KEY", "")
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "")
@@ -542,6 +545,7 @@ def gather_equity_perplexity(ticker: str, company_name: str, market: str = "US")
     """
     from backend.services.news_sources import focus_block, perplexity_extra
     if not PERPLEXITY_API_KEY:
+        logger.warning("종목 뉴스 수집 건너뜀 (%s) — PERPLEXITY_API_KEY 미설정", ticker)
         return ""
     try:
         # 응답을 **영어로** 받는다. 이 결과는 그대로 Claude 입력이 되는데,
@@ -584,6 +588,10 @@ Collect the following **in English**, concise bullet points. Favor news and narr
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
     except Exception:
+        # 조용히 "" 를 돌려주면 뉴스로 쓴 리포트와 뉴스 없이 쓴 리포트가
+        # 구별되지 않는다. 호출자는 이 사실을 프롬프트에도 적는다 (§1.3).
+        logger.warning("종목 뉴스 수집 실패 (%s, market=%s) — 뉴스 없이 진행",
+                       ticker, market, exc_info=True)
         return ""
 
 
@@ -591,6 +599,8 @@ def gather_industry_perplexity(meta: dict, market: str = "US") -> str:
     """Perplexity sonar로 산업 최신 뉴스·트렌드·규제 동향 수집."""
     from backend.services.news_sources import focus_block, perplexity_extra
     if not PERPLEXITY_API_KEY:
+        logger.warning("산업 뉴스 수집 건너뜀 (%s) — PERPLEXITY_API_KEY 미설정",
+                       meta.get("name_en", "?"))
         return ""
     try:
         # 영어로 수집 — Claude 입력 토큰을 크게 줄인다 (한국어 대비 약 1/3)
@@ -628,6 +638,8 @@ Collect the following **in English**, concise bullet points.
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
     except Exception:
+        logger.warning("산업 뉴스 수집 실패 (%s, market=%s) — 뉴스 없이 진행",
+                       meta.get("name_en", "?"), market, exc_info=True)
         return ""
 
 
