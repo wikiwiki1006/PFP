@@ -7,8 +7,10 @@ yfinance 실제 데이터 + Perplexity 뉴스 + Haiku 구조화 + Sonnet 분석
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
@@ -238,8 +240,16 @@ def _fmt_amount(value, currency: str) -> str:
     매출 333조원(KRW)을 10억으로 나눈 뒤 달러를 붙인 값이다. 받아 본 모델은
     이걸 달러로 해석해 기업 규모를 1,300배 부풀려 서술한다.
 
-    원화는 조·억으로 끊는다. 'B'(십억)는 원화에 쓰지 않는 단위라, 숫자가
+    원화는 조·억·만으로 끊는다. 'B'(십억)는 원화에 쓰지 않는 단위라, 숫자가
     맞더라도 모델이 달러로 오해하기 쉽다.
+
+    구간과 자릿수는 프론트의 `frontend/src/lib/market.ts::formatCompact` 와
+    **같아야 한다.** 같은 금액이 화면과 리포트에서 다르게 적히면 어느 쪽이
+    맞는지 사용자가 알 수 없다. CLAUDE.md §1.4 의 표가 그 함수에서 나왔다.
+
+    여기가 갈라져 있었다. 억을 소수점 없이 적어서 1.49억이 `₩1억` 으로
+    나갔다 — **33% 어긋난 금액이 리포트에 실린다.** 0 을 적는 것과 달리
+    그럴듯해서 아무도 의심하지 않는다 (§1.3b).
     """
     try:
         v = float(value)
@@ -248,19 +258,69 @@ def _fmt_amount(value, currency: str) -> str:
     sign = "-" if v < 0 else ""
     a = abs(v)
 
+    def _round_half_up(x: float) -> int:
+        # JS 의 Math.round 는 .5 를 올린다. 파이썬 round()·format 은 짝수로
+        # 내린다(bankers rounding). 프론트와 같은 값을 적으려면 여기서 맞춘다.
+        return int(math.floor(x + 0.5))
+
+    def _quantize(x: float, digits: int) -> Decimal:
+        """소수 `digits` 자리로 반올림한다. 동점은 올린다.
+
+        `Decimal(x)` 는 그 float 의 **정확한** 2진 값을 준다. JS 의 `toFixed`
+        와 `toLocaleString` 이 둘 다 그 정확한 값을 기준으로 판정하므로
+        여기서도 그래야 한다.
+
+        `math.floor(x * 10**digits + 0.5)` 로 하면 안 된다 — 곱셈이 오차를
+        만들어 없던 동점을 만든다. 1,045,000 은 `/1e6` 하면 정확히 1.045 가
+        아니라 그보다 조금 작은 값이라 JS 는 `$1.04M` 을 준다. 그런데
+        `1.045 * 100` 이 부동소수에서 104.5 로 떨어지면서 올려 `$1.05M` 이
+        됐다. 실제로 그렇게 246건이 어긋났다.
+        """
+        return Decimal(x).quantize(Decimal(1).scaleb(-digits), rounding=ROUND_HALF_UP)
+
+    def _to_fixed(x: float, digits: int) -> str:
+        """JS `Number.prototype.toFixed` 와 같은 문자열.
+
+        파이썬 `f"{x:,.2f}"` 로 대신하면 두 가지가 어긋난다.
+
+        1. **자리구분이 붙는다.** `toFixed` 는 안 붙인다 —
+           `(999999/1e3).toFixed(1)` 은 `"1000.0"` 이지 `"1,000.0"` 이 아니다.
+        2. **반올림 방향이 다르다.** `(1.125).toFixed(2)` 는 `"1.13"`(올림),
+           파이썬 `format` 은 `"1.12"`(짝수로 내림)다.
+        """
+        return f"{_quantize(x, digits):f}"
+
+    def _max_frac(x: float, digits: int) -> str:
+        """JS `toLocaleString(_, {maximumFractionDigits: digits})` 와 같은 문자열.
+
+        `toFixed` 와 달리 **필요할 때만** 소수를 붙이고, 자리구분은 붙인다 —
+        850 은 `850`, 1.234 는 `1.2`, 9999.5 는 `9,999.5`.
+        """
+        s = f"{_quantize(x, digits):,f}"
+        return s.rstrip("0").rstrip(".") if "." in s else s
+
+    # 어느 구간이 자리구분을 쓰는지가 프론트에서 갈린다 — 조·억·T·B·M·K 는
+    # `toFixed` 라 안 쓰고, 만·원 단위는 `toLocaleString` 이라 쓴다.
     if currency == "KRW":
         if a >= 1e12:
-            return f"{sign}₩{a / 1e12:,.1f}조"
+            return f"{sign}₩{_to_fixed(a / 1e12, 2)}조"
         if a >= 1e8:
-            return f"{sign}₩{a / 1e8:,.0f}억"
-        return f"{sign}₩{a:,.0f}"
+            return f"{sign}₩{_to_fixed(a / 1e8, 2)}억"
+        if a >= 1e4:
+            # 만 구간만 자릿수 규칙이 다르다. 정수로 반올림하면 12,340 이
+            # ₩1만(19% 오차), 14,999 가 ₩1만(33% 오차)이 된다. 소수 1자리를
+            # 필요할 때만 붙여서 ₩850만 은 그대로 두고 ₩1.2만 을 얻는다.
+            return f"{sign}₩{_max_frac(a / 1e4, 1)}만"
+        return f"{sign}₩{_round_half_up(a):,}"
     if a >= 1e12:
-        return f"{sign}${a / 1e12:,.2f}T"
+        return f"{sign}${_to_fixed(a / 1e12, 2)}T"
     if a >= 1e9:
-        return f"{sign}${a / 1e9:,.2f}B"
+        return f"{sign}${_to_fixed(a / 1e9, 2)}B"
     if a >= 1e6:
-        return f"{sign}${a / 1e6:,.2f}M"
-    return f"{sign}${a:,.2f}"
+        return f"{sign}${_to_fixed(a / 1e6, 2)}M"
+    if a >= 1e3:
+        return f"{sign}${_to_fixed(a / 1e3, 1)}K"
+    return f"{sign}${_to_fixed(a, 2)}"
 
 
 def _fmt_price(value, currency: str) -> str:

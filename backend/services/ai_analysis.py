@@ -1122,20 +1122,43 @@ def generate_daily_brief(
         )
     price_block = "\n".join(price_lines) if price_lines else "  (데이터 없음)"
 
-    stock_val = sum(d["pos_val"] for d in price_data.values() if d.get("pos_val") is not None)
-    day_pnls  = [d["day_pnl"] for d in price_data.values() if d.get("day_pnl") is not None]
-    cash_val  = float(holdings.get("CASH", {}).get("q") or 0)
-    total_line = (
-        f"  주식 평가액 {_fmt_price(stock_val, cur)}"
-        f" + 현금 {_fmt_price(cash_val, cur)}"
-        f" = 총자산 {_fmt_price(stock_val + cash_val, cur)}"
-    )
-    if len(day_pnls) == len(price_data) and day_pnls:
-        total_line += f"  ·  오늘 손익 합계 {_fmt_price(sum(day_pnls), cur)}"
-    elif day_pnls:
-        # 일부만 계산되면 합계를 내지 않는다. 부분 합을 전체 합처럼 적으면
-        # 모델은 그걸 포트폴리오 전체 손익으로 인용한다.
-        total_line += "  ·  오늘 손익 합계: 일부 종목 데이터 없음 — 합산 불가"
+    # 합계의 기준은 `price_data` 가 아니라 **보유 종목**이다. 가격을 못 받은
+    # 종목은 조립부에서 통째로 빠지므로, price_data 만 보고 더하면 그 종목이
+    # 없었던 것처럼 총자산이 줄어든다 — 빠졌다는 사실은 프롬프트 어디에도
+    # 없어서 모델이 알 방법이 없다 (§1.3·B3).
+    held     = [t for t in holdings if t != "CASH"]
+    cash_val = float(holdings.get("CASH", {}).get("q") or 0)
+
+    def _missing(field: str) -> list[str]:
+        return [t for t in held if (price_data.get(t) or {}).get(field) is None]
+
+    def _sum(field: str) -> float:
+        return sum(float(price_data[t][field]) for t in held)
+
+    no_val = _missing("pos_val")
+    no_pnl = _missing("day_pnl")
+
+    if no_val:
+        # 종목 줄은 `평가액 —` 로 나간다. 여기서 남은 것만 더해 '총자산' 이라고
+        # 적으면 같은 프롬프트 안에서 두 줄이 서로 다른 말을 하게 된다.
+        total_line = (
+            f"  주식 평가액·총자산: {', '.join(no_val)} 의 평가액이 없어 합산 불가"
+            f"  ·  현금 {_fmt_price(cash_val, cur)}"
+        )
+    else:
+        stock_val = _sum("pos_val")
+        total_line = (
+            f"  주식 평가액 {_fmt_price(stock_val, cur)}"
+            f" + 현금 {_fmt_price(cash_val, cur)}"
+            f" = 총자산 {_fmt_price(stock_val + cash_val, cur)}"
+        )
+
+    if not held:
+        pass
+    elif no_pnl:
+        total_line += f"  ·  오늘 손익 합계: {', '.join(no_pnl)} 데이터 없음 — 합산 불가"
+    else:
+        total_line += f"  ·  오늘 손익 합계 {_fmt_price(_sum('day_pnl'), cur)}"
 
     top_news = "\n".join(f"  - [{n['ticker']}] {n['title']}" for n in news_items[:8])
 
