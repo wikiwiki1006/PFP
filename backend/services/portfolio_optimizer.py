@@ -36,7 +36,15 @@ _PPLX_MODEL         = os.getenv("PERPLEXITY_MODEL", "sonar-pro")
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def _safe(v, digits: int = 2) -> Optional[float]:
+def _round_or_none(v, digits: int = 2) -> Optional[float]:
+    """숫자면 반올림해서, 아니면 None. **반올림 함수다 — 기본값 함수가 아니다.**
+
+    이름이 `_safe` 였다. 그런데 같은 이름이 `portfolio_calculator` 에는
+    `(v, default=0.0)`, `routers/ticker.py` 에는 `(v, default=None)` 으로 있고
+    거기서는 둘째 인자가 **기본값**이다. 그래서 `_safe(x, 1)` 이 이 파일에서는
+    "소수 1자리" 이고 저기서는 "없으면 1" 이었다 — 두 파일을 오가며 작업하면
+    밟는다. 하는 일을 이름에 적어 그 혼동을 없앤다.
+    """
     try:
         return round(float(v), digits) if v is not None else None
     except (TypeError, ValueError):
@@ -267,14 +275,14 @@ def _gather_fundamentals(tickers: list[str]) -> dict:
 
             return t, {
                 # ── 밸류에이션 ──────────────────────────────────
-                "pe_forward":       _safe(info.get("forwardPE")),
-                "pe_trailing":      _safe(info.get("trailingPE")),
-                "pb_ratio":         _safe(info.get("priceToBook")),
-                "peg_ratio":        _safe(info.get("pegRatio")),
-                "ev_ebitda":        _safe(info.get("enterpriseToEbitda")),
-                "price_to_sales":   _safe(info.get("priceToSalesTrailing12Months")),
+                "pe_forward":       _round_or_none(info.get("forwardPE")),
+                "pe_trailing":      _round_or_none(info.get("trailingPE")),
+                "pb_ratio":         _round_or_none(info.get("priceToBook")),
+                "peg_ratio":        _round_or_none(info.get("pegRatio")),
+                "ev_ebitda":        _round_or_none(info.get("enterpriseToEbitda")),
+                "price_to_sales":   _round_or_none(info.get("priceToSalesTrailing12Months")),
                 "div_yield_pct":    _pct(info.get("dividendYield")),
-                "market_cap_b":     _safe((info.get("marketCap") or 0) / 1e9, 1),
+                "market_cap_b":     _round_or_none((info.get("marketCap") or 0) / 1e9, 1),
                 # ── 성장 & 수익성 ────────────────────────────────
                 "rev_growth_yoy":   _pct(info.get("revenueGrowth")),
                 "earnings_growth":  _pct(info.get("earningsGrowth")),
@@ -283,22 +291,22 @@ def _gather_fundamentals(tickers: list[str]) -> dict:
                 "profit_margin":    _pct(info.get("profitMargins")),
                 "gross_margin":     _pct(info.get("grossMargins")),
                 "ebitda_margin":    _pct(info.get("ebitdaMargins")),
-                "revenue_per_share":_safe(info.get("revenuePerShare")),
-                "eps_trailing":     _safe(info.get("trailingEps")),
-                "eps_forward":      _safe(info.get("forwardEps")),
+                "revenue_per_share":_round_or_none(info.get("revenuePerShare")),
+                "eps_trailing":     _round_or_none(info.get("trailingEps")),
+                "eps_forward":      _round_or_none(info.get("forwardEps")),
                 # ── 재무 건전성 ──────────────────────────────────
-                "debt_to_equity":   _safe(info.get("debtToEquity")),
-                "current_ratio":    _safe(info.get("currentRatio")),
-                "quick_ratio":      _safe(info.get("quickRatio")),
-                "free_cashflow_b":  _safe((info.get("freeCashflow") or 0) / 1e9, 1),
+                "debt_to_equity":   _round_or_none(info.get("debtToEquity")),
+                "current_ratio":    _round_or_none(info.get("currentRatio")),
+                "quick_ratio":      _round_or_none(info.get("quickRatio")),
+                "free_cashflow_b":  _round_or_none((info.get("freeCashflow") or 0) / 1e9, 1),
                 # ── 시장 리스크 ──────────────────────────────────
-                "beta":             _safe(info.get("beta")),
-                "short_ratio":      _safe(info.get("shortRatio")),  # 공매도 청산 소요일
+                "beta":             _round_or_none(info.get("beta")),
+                "short_ratio":      _round_or_none(info.get("shortRatio")),  # 공매도 청산 소요일
                 "short_pct_float":  _pct(info.get("shortPercentOfFloat")),
                 # ── 애널리스트 컨센서스 ──────────────────────────
-                "analyst_target":       _safe(tgt),
+                "analyst_target":       _round_or_none(tgt),
                 "analyst_upside_pct":   analyst_upside,
-                "analyst_rating_mean":  _safe(info.get("recommendationMean")),  # 1=strong buy, 5=sell
+                "analyst_rating_mean":  _round_or_none(info.get("recommendationMean")),  # 1=strong buy, 5=sell
                 "analyst_rating_key":   info.get("recommendationKey", ""),
                 "analyst_count":        info.get("numberOfAnalystOpinions"),
                 # ── 메타 ─────────────────────────────────────────
