@@ -125,10 +125,14 @@ export default function Market() {
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
             {MACRO_ITEMS.map(({ key, label, format, threshold }) => {
               const value = macroQ.data[key]
+              // 값이 없으면 경고도 아니다. null 을 비교에 넣으면 0 으로
+              // 취급돼 "GDP 성장률이 기준 미만" 같은 판단이 지어진다.
               const isWarning =
-                key === 'gdp' || key === 't10y2y'
-                  ? value < threshold
-                  : value > threshold
+                value == null
+                  ? false
+                  : key === 'gdp' || key === 't10y2y'
+                    ? value < threshold
+                    : value > threshold
               return (
                 <div
                   key={key}
@@ -144,7 +148,7 @@ export default function Market() {
                       isWarning ? 'text-[#f59e0b]' : 'text-[#e2e8f0]'
                     )}
                   >
-                    {format(value)}
+                    {value == null ? '—' : format(value)}
                   </div>
                   {isWarning && (
                     <div className="text-xs text-[#f59e0b] mt-1">⚠ Watch</div>

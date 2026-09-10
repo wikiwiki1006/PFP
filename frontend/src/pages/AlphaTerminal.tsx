@@ -2656,14 +2656,32 @@ export default function AlphaTerminal() {
                 </LockedPreview>
               )}
               {botTab === 1 && macroQ.data && (
+                <div>
+                {/* '—' 만 뜨면 조회에 실패한 것인지 원래 없는 값인지 구분되지
+                    않는다. 서버가 어느 시리즈를 못 읽었는지 알려주므로 그대로 밝힌다. */}
+                {macroQ.data.missing && macroQ.data.missing.length > 0 && (
+                  <div className="mb-2 text-[11px] text-[#f59e0b]">
+                    일부 지표를 FRED 에서 읽지 못했습니다 ({macroQ.data.missing.join(', ')}).
+                    해당 항목은 '—' 로 표시됩니다.
+                  </div>
+                )}
                 <div className="grid grid-cols-3 gap-3">
                   {[
-                    { label: '기준금리',       value: `${macroQ.data.fed_rate}%` },
-                    { label: '실업률',         value: `${macroQ.data.unemployment}%` },
-                    { label: 'CPI (전년비)',   value: `${macroQ.data.cpi}%` },
-                    { label: 'GDP 성장률',     value: `${macroQ.data.gdp}%` },
-                    { label: '10Y-2Y 스프레드', value: `${fp(macroQ.data.t10y2y)}p`, color: fv(macroQ.data.t10y2y) < 0 ? '#ef4444' : '#10b981' },
-                    { label: 'HY 스프레드',    value: `${fn(macroQ.data.bamlh0a0hym2, 0)} bps`, color: fv(macroQ.data.bamlh0a0hym2) > 500 ? '#ef4444' : '#f59e0b' },
+                    // 템플릿 리터럴에 그대로 보간하면 null 이 "null%" 로 찍힌다.
+                    // 아래 두 항목은 fp/fn 을 거쳐 이미 '—' 를 내는데 위 넷만
+                    // 위장하고 있었다 — 같은 배열 안에서 관례가 갈렸다.
+                    { label: '기준금리',       value: `${fp(macroQ.data.fed_rate, 2, false)}` },
+                    { label: '실업률',         value: `${fp(macroQ.data.unemployment, 2, false)}` },
+                    { label: 'CPI (전년비)',   value: `${fp(macroQ.data.cpi, 2, false)}` },
+                    { label: 'GDP 성장률',     value: `${fp(macroQ.data.gdp, 2, false)}` },
+                    // 색도 값과 같은 판단을 해야 한다. fv 는 null 을 0 으로 만드므로
+                    // 스프레드를 못 읽었을 때 '역전 아님'(초록)을 단정하게 된다.
+                    { label: '10Y-2Y 스프레드', value: `${fp(macroQ.data.t10y2y)}p`,
+                      color: macroQ.data.t10y2y == null ? '#64748b'
+                             : macroQ.data.t10y2y < 0 ? '#ef4444' : '#10b981' },
+                    { label: 'HY 스프레드',    value: `${fn(macroQ.data.bamlh0a0hym2, 0)} bps`,
+                      color: macroQ.data.bamlh0a0hym2 == null ? '#64748b'
+                             : macroQ.data.bamlh0a0hym2 > 500 ? '#ef4444' : '#f59e0b' },
                   ].map(item => (
                     <div key={item.label} className="bg-[#060b14] border border-[#1e2d40] rounded p-3">
                       <div className="text-[11px] text-[#94a3b8] font-bold tracking-wider uppercase mb-1">{item.label}</div>
@@ -2673,6 +2691,7 @@ export default function AlphaTerminal() {
                       >{item.value}</div>
                     </div>
                   ))}
+                </div>
                 </div>
               )}
             </div>

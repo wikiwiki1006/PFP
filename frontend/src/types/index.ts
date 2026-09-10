@@ -106,14 +106,18 @@ export interface SectorData {
 }
 
 export interface MacroData {
-  fed_rate: number
-  unemployment: number
-  cpi: number
-  gdp: number
-  y10?: number
-  y2?: number
-  t10y2y: number
-  bamlh0a0hym2: number
+  /** null = FRED 에서 읽지 못함. 하드코딩 상수로 메우지 않는다 (어느 것이
+   *  없었는지는 `missing` 에 있다). */
+  fed_rate: number | null
+  unemployment: number | null
+  cpi: number | null
+  gdp: number | null
+  y10?: number | null
+  y2?: number | null
+  t10y2y: number | null
+  bamlh0a0hym2: number | null
+  /** 읽지 못한 지표의 FRED 시리즈 이름. 비어 있으면 전부 실측이다. */
+  missing?: string[]
   source?: string
 }
 
