@@ -688,7 +688,9 @@ def ticker_search(q: str = "", limit: int = 5, market: str = Depends(market_para
             if rows:
                 return [{"ticker": r[0], "name": r[1] or ""} for r in rows]
     except Exception as e:
-        print(f"[ticker_search DB error] {e}")
+        # 폴백은 내장 시총 상위 목록이라 검색 결과가 조용히 좁아진다. 값이
+        # 틀리지는 않지만 "왜 이 종목이 안 나오지" 의 원인이 로그에만 남는다.
+        logger.warning(f"종목 검색 DB 조회 실패, 내장 목록으로 폴백 (q={q!r}): {e}")
 
     # 폴백: 내장 시총 상위 목록
     prefix  = [(t, n) for t, n in _US_TICKERS if t.startswith(q)]

@@ -544,7 +544,8 @@ export interface TickerDetailInfo {
   industry: string
   market_cap: string
   pe: number | null
-  div_yield: number
+  /** null = 배당 정보 없음. 0 (무배당)과 구분해야 한다. */
+  div_yield: number | null
 }
 
 export interface TickerDetailPerformance {

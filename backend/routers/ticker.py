@@ -304,6 +304,12 @@ def get_ticker_detail(
             for b, c in zip(bins[:-1], counts)
         ]
 
+    # 배당수익률이 없는 것과 0% 인 것은 다르다. yfinance 가 필드를 안 주면
+    # '무배당' 이 아니라 '모름' 이다 — 0.0 으로 채우면 배당주를 무배당으로
+    # 오해하고 후보에서 빼게 된다. 바로 옆 pe 는 이미 None 을 쓴다.
+    _dy = _safe(info.get("dividendYield"), None)
+    div_yield = None if _dy is None else round(_dy * 100, 2)
+
     result = {
         "ticker":  sym,
         "period":  period,
@@ -314,7 +320,7 @@ def get_ticker_detail(
             "industry":   info.get("industry") or "N/A",
             "market_cap": _fmt_cap(info.get("marketCap")),
             "pe":         _safe(info.get("trailingPE"),   None),
-            "div_yield":  round(_safe(info.get("dividendYield"), 0.0) * 100, 2),
+            "div_yield":  div_yield,
         },
         "performance": {
             "1w":        _perf(5),
