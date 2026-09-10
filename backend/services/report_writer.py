@@ -9,7 +9,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-import requests
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
@@ -25,7 +24,6 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 logger = logging.getLogger(__name__)
 
 ANTHROPIC_API_KEY  = os.getenv("ANTHROPIC_API_KEY", "")
-PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "")
 TODAY = datetime.now().strftime("%Y년 %m월 %d일")
 
 # ── 시스템 프롬프트 ──────────────────────────────────────────────────────────────
@@ -549,16 +547,14 @@ def gather_equity_perplexity(ticker: str, company_name: str, market: str = "US")
     한국 종목이면 국내 경제지에서, 한국 투자자 관점으로 모은다. 예전에는
     시장 구분이 없어 삼성전자 리포트도 미국 매체 기사로 썼다.
     """
-    from backend.services.news_sources import focus_block, perplexity_extra
-    if not PERPLEXITY_API_KEY:
-        logger.warning("종목 뉴스 수집 건너뜀 (%s) — PERPLEXITY_API_KEY 미설정", ticker)
-        return ""
-    try:
-        # 응답을 **영어로** 받는다. 이 결과는 그대로 Claude 입력이 되는데,
-        # 같은 내용이라도 한국어는 글자당 약 1토큰, 영어는 약 0.23토큰이라
-        # 실측상 Claude 입력이 66% 줄어든다 (2,308 → 791 토큰).
-        # 최종 리포트는 Claude 가 한국어로 쓰므로 사용자 화면은 영향받지 않는다.
-        prompt = f"""Today: {TODAY}
+    from backend.services.news_sources import focus_block
+    from backend.services import perplexity
+
+    # 응답을 **영어로** 받는다. 이 결과는 그대로 Claude 입력이 되는데,
+    # 같은 내용이라도 한국어는 글자당 약 1토큰, 영어는 약 0.23토큰이라
+    # 실측상 Claude 입력이 66% 줄어든다 (2,308 → 791 토큰).
+    # 최종 리포트는 Claude 가 한국어로 쓰므로 사용자 화면은 영향받지 않는다.
+    prompt = f"""Today: {TODAY}
 Stock: {company_name} ({ticker})
 
 Collect the following **in English**, concise bullet points. Favor news and narrative over raw figures.
@@ -576,41 +572,17 @@ Collect the following **in English**, concise bullet points. Favor news and narr
 - 1-2 current trends relevant to {company_name}
 {focus_block(market, company_name)}"""
 
-        resp = requests.post(
-            "https://api.perplexity.ai/chat/completions",
-            headers={
-                "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "sonar",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 1500,
-                "temperature": 0.0,
-                **perplexity_extra(market),
-            },
-            timeout=30,
-        )
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
-    except Exception:
-        # 조용히 "" 를 돌려주면 뉴스로 쓴 리포트와 뉴스 없이 쓴 리포트가
-        # 구별되지 않는다. 호출자는 이 사실을 프롬프트에도 적는다 (§1.3).
-        logger.warning("종목 뉴스 수집 실패 (%s, market=%s) — 뉴스 없이 진행",
-                       ticker, market, exc_info=True)
-        return ""
+    return perplexity.search(prompt, market=market, max_tokens=1500,
+                             label=f"equity:{ticker}")
 
 
 def gather_industry_perplexity(meta: dict, market: str = "US") -> str:
     """Perplexity sonar로 산업 최신 뉴스·트렌드·규제 동향 수집."""
-    from backend.services.news_sources import focus_block, perplexity_extra
-    if not PERPLEXITY_API_KEY:
-        logger.warning("산업 뉴스 수집 건너뜀 (%s) — PERPLEXITY_API_KEY 미설정",
-                       meta.get("name_en", "?"))
-        return ""
-    try:
-        # 영어로 수집 — Claude 입력 토큰을 크게 줄인다 (한국어 대비 약 1/3)
-        prompt = f"""Today: {TODAY}
+    from backend.services.news_sources import focus_block
+    from backend.services import perplexity
+
+    # 영어로 수집 — Claude 입력 토큰을 크게 줄인다 (한국어 대비 약 1/3)
+    prompt = f"""Today: {TODAY}
 Industry: {meta['name_en']}
 Key names: {meta['coverage']}
 
@@ -626,27 +598,8 @@ Collect the following **in English**, concise bullet points.
 - Recently reported market size, growth rate, demand indicators
 {focus_block(market, meta['name_en'])}"""
 
-        resp = requests.post(
-            "https://api.perplexity.ai/chat/completions",
-            headers={
-                "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "sonar",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 1500,
-                "temperature": 0.0,
-                **perplexity_extra(market),
-            },
-            timeout=30,
-        )
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
-    except Exception:
-        logger.warning("산업 뉴스 수집 실패 (%s, market=%s) — 뉴스 없이 진행",
-                       meta.get("name_en", "?"), market, exc_info=True)
-        return ""
+    return perplexity.search(prompt, market=market, max_tokens=1500,
+                             label=f"industry:{meta.get('name_en', '?')}")
 
 
 # ── 프롬프트 빌더 ─────────────────────────────────────────────────────────────────
