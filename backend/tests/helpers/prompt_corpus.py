@@ -113,12 +113,14 @@ def _report_prompts() -> list[Prompt]:
 
 
 def _optimizer_prompts() -> list[Prompt]:
-    """`_build_ticker_section` 은 **market 인자를 받지 않는다.**
+    """`_build_ticker_section` 은 `market` 을 **필수 인자로** 받는다.
 
-    시장을 모르니 통화도 모른다 — 그래서 한국 종목이 들어와도 달러로 적힌다.
-    여기서는 티커로 시장을 나눠 담는다. 값이 채워진 경우와 비어 있는 경우를
-    둘 다 넣는 이유는, 없는 값을 `'?'` 로 적어 넣는 문제가 후자에서만 보이기
-    때문이다.
+    예전에는 아예 받지 않아서, 시장을 모르니 통화도 몰랐고 한국 종목이 들어와도
+    달러로 적혔다. 기본값을 두지 않는 이유는 빠뜨린 호출부가 조용히 달러가 되지
+    않게 하려는 것이다 — 빠뜨리면 여기서 TypeError 가 난다.
+
+    값이 채워진 경우와 비어 있는 경우를 둘 다 넣는 이유는, 없는 값을 `'?'` 로
+    적어 넣는 문제가 후자에서만 보이기 때문이다.
     """
     from backend.services.portfolio_optimizer import _build_ticker_section
 
@@ -128,13 +130,13 @@ def _optimizer_prompts() -> list[Prompt]:
                "industry": "Consumer Electronics", "free_cashflow_b": 108.8, "roe": 147.0}
     return [
         Prompt("portfolio_optimizer._build_ticker_section", "KR",
-               _build_ticker_section("005930.KS", {}, kr_fund)),
+               _build_ticker_section("005930.KS", {}, kr_fund, "KR")),
         Prompt("portfolio_optimizer._build_ticker_section", "US",
-               _build_ticker_section("AAPL", {}, us_fund)),
+               _build_ticker_section("AAPL", {}, us_fund, "US")),
         Prompt("portfolio_optimizer._build_ticker_section(빈값)", "KR",
-               _build_ticker_section("005930.KS", {}, {})),
+               _build_ticker_section("005930.KS", {}, {}, "KR")),
         Prompt("portfolio_optimizer._build_ticker_section(빈값)", "US",
-               _build_ticker_section("AAPL", {}, {})),
+               _build_ticker_section("AAPL", {}, {}, "US")),
     ]
 
 

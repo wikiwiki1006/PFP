@@ -363,9 +363,41 @@ def _fetch_news(tickers: list[str], market: str = "US") -> str:
 # 4. GPT AI View 생성 — 전향적 분석
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_ticker_section(t: str, ps: dict, f: dict) -> str:
-    """종목 한 개의 데이터를 GPT 프롬프트용 텍스트로 변환."""
-    lines = [f"■ {t}  (시가총액 ${f.get('market_cap_b', '?')}B | {f.get('sector', '?')} — {f.get('industry', '?')})"]
+def _build_ticker_section(t: str, ps: dict, f: dict, market: str) -> str:
+    """종목 한 개의 데이터를 LLM 프롬프트용 텍스트로 변환.
+
+    `market` 에 기본값을 두지 않는다. 예전 시그니처가 시장을 아예 받지 않아
+    한국 종목이 `$500000.0B` 로 프롬프트에 실렸다 — CLAUDE.md §1.4 가 인용하는
+    그 사고(삼성전자 매출 333조원이 `$333605.94B` 로 실려 규모가 1,300배로
+    서술됨)가 이 빌더에서는 고쳐지지 않은 채 남아 있었다. 기본값을 두면
+    빠뜨린 호출부가 다시 조용히 달러가 되므로, 빠뜨리면 TypeError 가 나게 둔다.
+
+    통화 포맷은 `report_writer._fmt_amount`/`_fmt_price` 에 위임한다. 같은 규칙을
+    파일마다 다시 구현했다가 한 곳만 고쳐지는 것이 이 결함의 원인이었다.
+
+    값이 없으면 그 줄·그 항목을 **적지 않는다.** `'?'` 를 값 자리에 넣으면
+    모델이 그걸 수치처럼 인용한다.
+    """
+    from backend.services.markets import get_market
+    from backend.services.report_writer import _fmt_amount, _fmt_price
+
+    cur = get_market(market).currency
+
+    def _amt_b(value) -> Optional[str]:
+        """10억 단위로 들어온 값을 원래 크기로 되돌려 통화 포맷에 넘긴다."""
+        try:
+            return _fmt_amount(float(value) * 1e9, cur)
+        except (TypeError, ValueError):
+            return None
+
+    head = [t]
+    cap = _amt_b(f.get("market_cap_b")) if f.get("market_cap_b") is not None else None
+    if cap:
+        head.append(f"시가총액 {cap}")
+    industry = " — ".join(x for x in (f.get("sector"), f.get("industry")) if x)
+    if industry:
+        head.append(industry)
+    lines = [f"■ {t}  ({' | '.join(head[1:])})" if len(head) > 1 else f"■ {t}"]
 
     # 가격 모멘텀
     rets = []
@@ -396,7 +428,10 @@ def _build_ticker_section(t: str, ps: dict, f: dict) -> str:
     if f.get("roe") is not None:             growth.append(f"ROE {f['roe']:.1f}%")
     if f.get("profit_margin") is not None:   growth.append(f"순이익률 {f['profit_margin']:.1f}%")
     if f.get("ebitda_margin") is not None:   growth.append(f"EBITDA마진 {f['ebitda_margin']:.1f}%")
-    if f.get("free_cashflow_b") is not None: growth.append(f"FCF ${f['free_cashflow_b']:.1f}B")
+    if f.get("free_cashflow_b") is not None:
+        fcf = _amt_b(f["free_cashflow_b"])
+        if fcf:
+            growth.append(f"FCF {fcf}")
     if growth:
         lines.append(f"  성장·수익성: {' | '.join(growth)}")
 
@@ -411,11 +446,21 @@ def _build_ticker_section(t: str, ps: dict, f: dict) -> str:
 
     # 애널리스트 컨센서스
     if f.get("analyst_upside_pct") is not None:
-        key  = f.get("analyst_rating_key", "") or f"평점 {f.get('analyst_rating_mean', '?'):.1f}/5"
-        cnt  = f.get("analyst_count", "?")
-        tgt  = f.get("analyst_target", "?")
-        upside = f.get("analyst_upside_pct", 0)
-        lines.append(f"  애널리스트: 목표가 ${tgt} (현재대비 {upside:+.1f}%) | {key} | {cnt}명 커버")
+        # 예전에는 없는 값을 '?' 로 적었다 — `목표가 $? | 평점 ?/5 | ?명 커버`.
+        # 게다가 `f"{'?':.1f}"` 는 ValueError 라, 컨센서스는 있는데 평점만 없는
+        # 종목에서 이 줄이 예외를 냈다. 있는 항목만 적는다.
+        parts = [f"현재대비 {f['analyst_upside_pct']:+.1f}%"]
+        if f.get("analyst_target") is not None:
+            parts[0] = f"목표가 {_fmt_price(f['analyst_target'], cur)} ({parts[0]})"
+        rating = f.get("analyst_rating_key") or (
+            f"평점 {f['analyst_rating_mean']:.1f}/5"
+            if f.get("analyst_rating_mean") is not None else None
+        )
+        if rating:
+            parts.append(rating)
+        if f.get("analyst_count") is not None:
+            parts.append(f"{f['analyst_count']}명 커버")
+        lines.append(f"  애널리스트: {' | '.join(parts)}")
 
     return "\n".join(lines)
 
@@ -426,6 +471,7 @@ def _generate_ai_views(
     fundamentals: dict,
     news_ctx: str,
     holding_period_years: float = 1.0,
+    market: str = "US",
 ) -> dict:
     """밸류에이션·성장·애널리스트·모멘텀 종합 → Perplexity → forward-looking AI views.
 
@@ -442,7 +488,8 @@ def _generate_ai_views(
         else f"{holding_period_years:.0f}년"
     )
 
-    sections = [_build_ticker_section(t, price_stats.get(t, {}), fundamentals.get(t, {}))
+    sections = [_build_ticker_section(t, price_stats.get(t, {}),
+                                      fundamentals.get(t, {}), market)
                 for t in tickers]
 
     ticker_list = ", ".join(f'"{t}"' for t in tickers)
@@ -844,7 +891,8 @@ def run_ai_optimization(
 
     # ③ AI views (펀더멘털 + 뉴스 기반)
     _notify(2, "AI 밸류에이션·모멘텀 분석 중...")
-    ai_views = _generate_ai_views(valid, price_stats, fundamentals, news_ctx, holding_period_years)
+    ai_views = _generate_ai_views(valid, price_stats, fundamentals, news_ctx,
+                                  holding_period_years, market)
 
     # Fallback: AI 실패 시 과거수익(신뢰도 30%) — or 0.0으로 중립 기본값
     if not ai_views:

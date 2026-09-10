@@ -55,15 +55,6 @@ _KNOWN_VIOLATIONS = {
     ("backend/services/daily_report.py", "_build_prompt"):
         "종목 줄·합계 줄이 통화 포맷을 인라인으로 다시 구현한다 "
         "(cur + 포맷 지정자). (소유: reportmanage)",
-    ("backend/services/portfolio_optimizer.py", "_build_ticker_section"):
-        "시가총액·FCF·목표가에 '$' 를 고정한다. market 인자가 없어 시장을 "
-        "알 수 없고, 한국 종목이 '$500000.0B' 로 프롬프트에 실린다 — "
-        "CLAUDE.md 1.4 의 그 사고다. (소유: programoptimize)",
-    ("backend/services/trading_signals.py", "scan_universe_with_targets"):
-        "매매 신호의 reason 문자열 3곳이 '$' 와 소수점 2자리를 고정한다 "
-        "(중앙선 회귀·돌파 기대). 프롬프트가 아니라 **화면에 그대로 보이는** "
-        "문자열이라, 한국 종목이면 '중앙선 $71900.00' 이 사용자에게 뜬다. "
-        "(소유: 미지정 — 통합 판단 필요)",
 }
 
 

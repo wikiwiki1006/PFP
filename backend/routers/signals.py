@@ -109,7 +109,7 @@ def scan_universe(
 
         _logger.info(f"스캔 데이터 로드 완료: {price_df.shape[1]}개 티커 × {len(price_df)}일")
 
-        raw = scan_universe_with_targets(price_df, volume_df, top_n=top_n)
+        raw = scan_universe_with_targets(price_df, volume_df, top_n=top_n, market=market)
 
         def _clean(picks: list[dict]) -> list[dict]:
             out = []
