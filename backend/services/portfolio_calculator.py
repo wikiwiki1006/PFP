@@ -303,29 +303,34 @@ def equity_curve_to_records(
         if len(b_clean) > 0:
             sp500_indexed = b / float(b_clean.iloc[0]) * float(curve.iloc[0])
 
-    def _bv(date):
-        if sp500_indexed is None or date not in sp500_indexed.index:
+    # 벤치마크는 위에서 `curve.index` 로 reindex 했으므로 행 위치가 그대로 맞는다.
+    # 날짜 라벨로 매번 `.loc` 을 걸면 날짜 수만큼 인덱스 조회가 생긴다.
+    bench_vals = None if sp500_indexed is None else sp500_indexed.to_numpy()
+
+    def _bv(i: int):
+        if bench_vals is None:
             return None
-        v = sp500_indexed.loc[date]
+        v = bench_vals[i]
         return None if pd.isna(v) else round(float(v), 2)
 
     cash_evt: dict = cash_event_amounts or {}
 
+    # 날짜 문자열도 한 번에 만든다 — 루프 안에서 Timestamp.strftime 을 날짜마다
+    # 부르면 날짜 수만큼 포맷 파싱이 반복된다.
+    date_strs = curve.index.strftime("%Y-%m-%d").tolist()
+
     # 날짜별 주식 거래 목록 (포인트 마커용)
-    trade_by_date = _trades_by_chart_date(
-        trade_markers,
-        [d.strftime("%Y-%m-%d") for d in curve.index],
-    )
+    trade_by_date = _trades_by_chart_date(trade_markers, date_strs)
 
     records = []
-    for date, val in curve.items():
+    for i, val in enumerate(curve.to_numpy()):
         if pd.isna(val):
             continue
-        date_str = date.strftime("%Y-%m-%d")
+        date_str = date_strs[i]
         records.append({
             "date":               date_str,
             "value":              round(float(val), 2),
-            "benchmark_value":    _bv(date),
+            "benchmark_value":    _bv(i),
             "cash_event":         date_str in cash_evt,
             "cash_event_amount":  cash_evt.get(date_str, 0),
             "trades":             trade_by_date.get(date_str, []),
@@ -907,31 +912,39 @@ def return_pct_to_records(
 
     cash_evts = cash_events or {}
 
-    trade_by_date = _trades_by_chart_date(
-        trade_markers,
-        [d.strftime("%Y-%m-%d") for d in curve.index],
-    )
+    # 날짜 문자열·벤치마크·자산을 모두 `curve.index` 기준 위치 배열로 맞춘다.
+    # 루프 안에서 날짜 라벨로 `.loc` 을 걸면 날짜마다 인덱스 조회가 두 번씩 생겨
+    # 이 함수 시간의 절반이 그 조회였다. b_full 은 이미 curve.index 로 reindex 돼
+    # 있고, equity 는 여기서 한 번 맞춘다 — 없는 날짜는 NaN 이 되어 원래의
+    # `date in equity.index` 검사와 같은 경로로 걸러진다.
+    # 루프 안의 `date >= first_date` 검사도 함께 뺐다 — curve 는 위에서 이미
+    # `index >= first_date` 로 잘려 있어 모든 날짜가 항상 그 조건을 만족한다.
+    date_strs = curve.index.strftime("%Y-%m-%d").tolist()
+    b_vals  = None if b_full is None else b_full.to_numpy()
+    eq_vals = None if equity is None else equity.reindex(curve.index).to_numpy()
+
+    trade_by_date = _trades_by_chart_date(trade_markers, date_strs)
 
     records = []
-    for date, pct in curve.items():
+    for i, pct in enumerate(curve.to_numpy()):
         if pd.isna(pct):
             continue
-        date_str = date.strftime("%Y-%m-%d")
+        date_str = date_strs[i]
 
         sp_val = None
-        if b_full is not None and sp_first_val and date >= first_date and date in b_full.index:
-            v = b_full.loc[date]
+        if b_vals is not None and sp_first_val:
+            v = b_vals[i]
             if not pd.isna(v):
                 sp_val = round((float(v) / sp_first_val - 1) * 100, 2)
 
         eq_val = None
-        if equity is not None and date in equity.index:
-            v = equity.loc[date]
+        if eq_vals is not None:
+            v = eq_vals[i]
             if not pd.isna(v):
                 eq_val = round(float(v), 2)
 
         # 입출금 이벤트: 양수=입금, 음수=출금 (점 마커용)
-        cf_val = cash_evts.get(date_str) if date >= first_date else None
+        cf_val = cash_evts.get(date_str)
 
         records.append({
             "date":         date_str,
