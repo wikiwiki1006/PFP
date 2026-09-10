@@ -81,3 +81,6 @@ secrets/
 prom_video/
 *.mp4
 *.MP4
+
+# 창별 DB 연결 문자열 — 비밀값이다
+db-targets.env

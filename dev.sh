@@ -4,7 +4,7 @@
 #   ./dev.sh                로컬 DB, 포트 8000/3000 (기본)
 #   ./dev.sh --prod-db      운영 DB (조회·재현용, 쓰기 주의)
 #   ./dev.sh --slot 1       포트 8001/3001 — 병렬 worktree 용
-#   ./dev.sh --slot 2 --db-branch agent-test
+#   ./dev.sh --slot 2 --db-branch test    창 전용 DB (db-targets.env 참고)
 #   ./dev.sh --slot 1 --auth-emulator   인증을 로컬 에뮬레이터로 (운영과 분리)
 #
 # 로그인은 고정 테스트 계정으로만 한다:
@@ -129,12 +129,27 @@ if [ "$PROD_DB" = 1 ]; then
   DB_URL="$(gcloud secrets versions access latest \
     --secret=DATABASE_URL --project=personalfinancialplatform)"
 elif [ -n "$DB_BRANCH" ]; then
-  # Neon 브랜치별 연결 문자열을 환경변수로 미리 넣어 둔다:
-  #   export PFP_DB_agent_test="postgres://..."
+  # 창마다 다른 DB 를 준다. 이름 하나로 두 가지를 가리킬 수 있다:
+  #   - 로컬 postgres 의 창 전용 데이터베이스 (pfp_develop 등)
+  #   - Neon 브랜치
+  # 어느 쪽이든 연결 문자열을 PFP_DB_<이름> 환경변수에서 찾는다.
+  #
+  # 그 변수들은 db-targets.env 에 모아 둔다 (gitignore). 파일로 두는 이유는
+  # 창마다 export 를 다시 하게 하면 하나가 빠뜨렸을 때 조용히 공유 DB 로
+  # 떨어지기 때문이다 — 그러면 격리했다고 믿는 채로 서로 덮어쓴다.
+  [ -f ./db-targets.env ] && . ./db-targets.env
   VAR="PFP_DB_${DB_BRANCH//-/_}"
   DB_URL="${!VAR:-}"
-  [ -n "$DB_URL" ] || { echo "$VAR 가 설정되어 있지 않습니다 (Neon 브랜치 연결 문자열)"; exit 1; }
-  echo "▸ 백엔드 ($BE_PORT) — Neon 브랜치 '$DB_BRANCH'"
+  if [ -z "$DB_URL" ]; then
+    echo "$VAR 가 설정되어 있지 않습니다."
+    echo "db-targets.env 에 있어야 합니다. 통합 세션에 요청하세요."
+    [ -f ./db-targets.env ] && {
+      echo "현재 db-targets.env 에 있는 이름:"
+      grep -o '^PFP_DB_[A-Za-z0-9_]*' ./db-targets.env | sed 's/^PFP_DB_/  /'
+    }
+    exit 1
+  fi
+  echo "▸ 백엔드 ($BE_PORT) — DB '$DB_BRANCH'"
 else
   DB_URL="${DATABASE_URL:-}"
   echo "▸ 백엔드 ($BE_PORT) — 로컬 DB"

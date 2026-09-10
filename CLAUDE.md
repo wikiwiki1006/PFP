@@ -332,24 +332,42 @@ Claude Code 세션 여러 개가 역할을 나눠 이 리포를 **동시에** �
 같은 DB 를 쓰면 같은 종목 행을 서로 덮는다. 테스트 창이 보유를 지우면 기능 창의
 화면이 빈다.
 
-**현재는 전 창이 DB 하나를 공유한다.** `backend/.env` 가 Neon URL 이 아니라
-`DB_HOST`/`DB_USER` 형식이라 `--db-branch` 를 아직 쓸 수 없다. 가르기 전까지는
-규칙으로 막는다:
-
-- 전 창이 고정 테스트 계정 하나만 쓴다 (`test@gmail.com`).
-- **보유 종목을 지우거나 통째로 갈아엎지 않는다.** 특히 테스트 창. 픽스처가
-  필요하면 지우지 말고 자기 티커를 추가한다.
-- 스키마 변경은 `backend/db/schema.py` 로만 간다. DB 에 직접 `ALTER TABLE` 치지
-  않는다 — 다른 창이 이유를 모른 채 깨진다.
-
-가를 준비가 되면 Neon 브랜치를 역할마다 만들고 연결 문자열을 넣는다.
+**창마다 독립 데이터베이스가 있다.** 로컬 도커 postgres(5433) 안에 역할별로
+하나씩 — `pfp_develop`, `pfp_dbmanage`, `pfp_test`, `pfp_reportmanage`,
+`pfp_programoptimize`. 전부 개발 데이터 사본을 그대로 갖고 시작하므로
+(시세 69만 행 포함) 빈 DB 로 시작하는 불편이 없다.
 
 ```bash
-export PFP_DB_develop="postgres://..."     # 하이픈은 밑줄로
 ./dev.sh --slot 1 --db-branch develop
 ```
 
-`--prod-db` 는 통합 세션에서 재현이 필요할 때만, 조회로만 쓴다.
+연결 문자열은 `db-targets.env` 에 있다 (gitignore, 워크트리마다 복사본).
+`dev.sh` 가 그 파일을 읽어 `PFP_DB_<이름>` 을 찾는다. 이름을 틀리면 기동을
+거부한다 — 조용히 공유 DB 로 떨어지면 격리했다고 믿는 채로 서로 덮어쓴다.
+
+한 창이 `delete from holdings` 를 해도 다른 창은 그대로다. 실제로 그렇게
+검증했다.
+
+**`sslmode=disable` 을 빼지 마라.** `_dsn()` 은 `DATABASE_URL` 에 `sslmode` 가
+없으면 `require` 를 붙인다 (Neon 용). 로컬 도커는 SSL 을 안 하므로 그대로 두면
+연결이 거부된다.
+
+#### Neon 은 실데이터다 — 역할 창은 붙지 않는다
+
+`backend/.env` 의 `CONNECTION_STRING` 이 Neon 을 가리킨다. 그곳에는 실제
+서비스 데이터가 있다:
+
+| | Neon | 로컬 도커 |
+|---|---|---|
+| users | 12 | 3 |
+| holdings | 30 | 4 |
+| reports | 46 | 39 |
+
+코드는 `DATABASE_URL` 을 읽고 `CONNECTION_STRING` 은 읽지 않는다. **그 상태를
+유지한다** — 이름이 어긋나 있는 것이 안전장치다. 승격시키지 마라.
+
+Neon 조회가 필요하면 통합 세션이 그 값을 명시적으로 넘겨 쓴다. 쓰기는 하지 않는다.
+`--prod-db` 는 GCP Secret Manager 쪽 운영 DB 로, 이것과 또 다르다.
 
 ### 7.5 병합
 
