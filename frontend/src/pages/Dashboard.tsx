@@ -171,7 +171,7 @@ export default function Dashboard() {
                       </span>
                     </td>
                     <td className="px-4 py-2.5 text-right font-mono text-[#64748b]">
-                      {(h.weight * 100).toFixed(1)}%
+                      {h.weight == null ? '—' : `${(h.weight * 100).toFixed(1)}%`}
                     </td>
                   </tr>
                 ))}

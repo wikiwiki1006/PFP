@@ -40,22 +40,32 @@ import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
 import TickerLabel from '@/components/TickerLabel'
 import { marketSession } from '@/lib/marketStorage'
 
-// null/NaN-safe 숫자 포맷터
-const fn = (v: number | null | undefined, d = 2) => ((v == null || isNaN(v as number)) ? 0 : v).toFixed(d)
+// 표시용 포맷터는 계산 불가를 '—'로 그린다. 0으로 위장하지 않는다.
+//
+// 예전에는 fn/fp 가 null 을 0 으로 바꿔 '0.00' / '+0.00%' 를 그렸다. 그러면
+// '진짜 보합'과 '데이터 없음'이 화면에서 구분되지 않는다. 더 나쁜 것은 색이다 —
+// 0 은 `>= 0` 을 통과하므로 계산 불가가 초록(이익)으로 칠해졌다. 보유 테이블에서
+// 일변동률 칸은 '—' 인데 바로 옆 손익 칸은 초록 +0.00% 인 상태가 실제로 있었다.
+//
+// 필드마다 안전한 포맷터를 따로 두면 다음 필드에서 같은 일이 반복된다. 그래서
+// 기본값을 안전한 쪽으로 뒤집었다.
+const NA = '—'
+const isNA = (v: number | null | undefined): boolean => v == null || isNaN(v as number)
+
+const fn = (v: number | null | undefined, d = 2) => isNA(v) ? NA : (v as number).toFixed(d)
 const fp = (v: number | null | undefined, d = 2, sign = true) => {
-  const n = (v == null || isNaN(v as number)) ? 0 : (v as number)
+  if (isNA(v)) return NA
+  const n = v as number
   return sign ? `${n >= 0 ? '+' : ''}${n.toFixed(d)}%` : `${n.toFixed(d)}%`
 }
-const fv = (v: number | null | undefined) => (v == null || isNaN(v as number)) ? 0 : (v as number)
 
-// 일변동률 전용: null(계산 불가)을 0%로 위장하지 않고 '—'로 표시한다.
-// null을 +0.00%로 렌더하면 '진짜 보합'과 '데이터 없음'이 구분되지 않는다.
-const fpNullable = (v: number | null | undefined, d = 2) =>
-  (v == null || isNaN(v as number)) ? '—' : `${v >= 0 ? '+' : ''}${(v as number).toFixed(d)}%`
+// 계산에만 쓴다 (곱셈·비교·합계). **표시나 색 결정에 쓰지 말 것** — null 이 0 이
+// 되므로, 색에 쓰면 계산 불가가 초록으로 칠해진다. 색은 chgColor 를 쓴다.
+const fv = (v: number | null | undefined) => isNA(v) ? 0 : (v as number)
 
 // 상승 녹색 / 하락 빨강 / 정확히 0 또는 없음 → 회색 (0%를 녹색으로 칠하지 않는다)
 const chgColor = (v: number | null | undefined) =>
-  (v == null || isNaN(v as number) || v === 0) ? '#64748b' : (v as number) > 0 ? '#10b981' : '#ef4444'
+  isNA(v) || v === 0 ? '#64748b' : (v as number) > 0 ? '#10b981' : '#ef4444'
 
 const SECTORS = [
   'Technology','Healthcare','Financials','Consumer Discretionary',
@@ -1417,15 +1427,17 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
                         <td className="py-2 px-2.5 font-mono text-[12px] text-[#cbd5e1]">{formatPrice(h.current_price)}</td>
                         <td className="py-2 px-2.5 font-mono text-[13px] font-bold" style={{ color: chgColor(h.chg_pct) }}
                           title={h.as_of ? `${h.as_of} 기준${h.is_live ? ' (실시간)' : ' 종가'}` : '데이터 부족'}>
-                          {fpNullable(h.chg_pct, 2)}
+                          {fp(h.chg_pct, 2)}
                         </td>
-                        <td className="py-2 px-2.5 font-mono text-[13px] font-bold" style={{ color: fv(h.pnl_pct) >= 0 ? '#10b981' : '#ef4444' }}>
+                        <td className="py-2 px-2.5 font-mono text-[13px] font-bold" style={{ color: chgColor(h.pnl_pct) }}>
                           {fp(h.pnl_pct, 2)}
                         </td>
                         {/* 소수점 0자리로 반올림하면 1% 미만 포지션이 전부 "0%"가 되어
                             실제 0과 구분되지 않는다 → 1% 미만은 소수 2자리로 표시 */}
                         <td className="py-2 px-2.5 font-mono text-[12px] text-[#cbd5e1]">
-                          {fn(fv(h.weight) * 100, fv(h.weight) * 100 < 1 ? 2 : 1)}%
+                          {isNA(h.weight)
+                            ? NA
+                            : `${fn((h.weight as number) * 100, (h.weight as number) * 100 < 1 ? 2 : 1)}%`}
                         </td>
                         {/* SELL 버튼 — 데스크탑은 hover 시에만, 모바일은 hover 가 없어 항상 보인다 */}
                         <td className="py-2 px-1 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
@@ -2489,11 +2501,11 @@ export default function AlphaTerminal() {
               <Pill label="총 자산" value={formatPrice(m.total_equity)} />
               <Pill
                 label={m.market_open ? '1Day · LIVE' : m.as_of ? `1Day (${m.as_of.slice(5).replace('-', '/')})` : '1Day'}
-                value={fpNullable(m.today_change_pct)}
+                value={fp(m.today_change_pct)}
                 color={chgColor(m.today_change_pct)} />
-              <Pill label="1Week"        value={fpNullable(m.perf_1w)}   color={chgColor(m.perf_1w)} />
-              <Pill label="1Month"       value={fpNullable(m.perf_1m)}   color={chgColor(m.perf_1m)} />
-              <Pill label="누적 수익"  value={fp(m.total_return_pct)}  color={fv(m.total_return_pct) >= 0 ? '#10b981' : '#ef4444'} />
+              <Pill label="1Week"        value={fp(m.perf_1w)}   color={chgColor(m.perf_1w)} />
+              <Pill label="1Month"       value={fp(m.perf_1m)}   color={chgColor(m.perf_1m)} />
+              <Pill label="누적 수익"  value={fp(m.total_return_pct)}  color={chgColor(m.total_return_pct)} />
               <Pill label="베타"       value={fn(m.portfolio_beta)} />
               <Pill label="변동성"        value={fn(m.vix)}               color={fv(m.vix) > 25 ? '#ef4444' : fv(m.vix) > 18 ? '#f59e0b' : '#10b981'} />
             </div>
