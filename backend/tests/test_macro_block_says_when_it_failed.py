@@ -85,21 +85,13 @@ def test_real_fred_data_does_reach_the_prompt():
     assert not _mentions_failure(block), f"정상인데 실패로 적었다: {block!r}"
 
 
-# ── C2. 수집 실패도 프롬프트에 남는다 (아직 안 지킨다) ──────────────────────────
-
-_C2_XFAIL = (
-    "build_macro_block returns an empty string when collection raises, so the "
-    "macro section disappears from the prompt with nothing in its place. An "
-    "omission is not 'no data' to the model — it is no instruction at all, so "
-    "it fills the gap from prior knowledge. Say the collection failed instead, "
-    "the way the FRED-fallback branch already does. Fixing it in the function "
-    "also makes both call sites safe: gather_yfinance_market_data skips a "
-    "falsy block silently while generate_daily_brief substitutes a failure "
-    "line, and only one of them is right. (owner: reportmanage)"
-)
+# ── C2. 수집 실패도 프롬프트에 남는다 ───────────────────────────────────────────
+#
+# `build_macro_block` 이 어떤 경우에도 빈 문자열을 돌려주지 않게 해서 닫았다.
+# 호출자마다 보완하게 두면 한쪽만 보완한다는 것이 이 결함의 교훈이라, 보완을
+# 함수 안으로 옮겼다 — 새 호출자도 자동으로 안전하다.
 
 
-@pytest.mark.xfail(strict=True, reason=_C2_XFAIL)
 @pytest.mark.parametrize("market, target, err", [
     ("US", "backend.services.market_data.get_fred_macro", "FRED down"),
     ("KR", "backend.services.korea_macro.get_korea_macro", "ECOS down"),

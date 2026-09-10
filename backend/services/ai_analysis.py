@@ -71,15 +71,36 @@ def build_macro_block(market: str) -> str:
     스프레드를 근거로 쓰였다 — 통화 포맷이 두 곳에 갈라져 한쪽만 고쳐졌던
     것과 같은 형태다.
 
-    값이 없는 항목은 넣지 않는다. 'N/A' 를 넣으면 모델이 그걸 수치처럼
-    인용한다 (`korea_macro.format_for_prompt` 와 같은 이유).
+    값이 없는 항목은 수치로 넣지 않는다. 'N/A' 를 넣으면 모델이 그걸 수치처럼
+    인용한다 (`korea_macro.format_for_prompt` 와 같은 이유). 대신 **무엇이
+    없는지는 적는다** — 이름 없이 빼면 모델은 그 지표를 물어보지 않은 것과
+    구별하지 못하고 사전지식으로 메운다.
+
+    **빈 문자열을 돌려주지 않는다.** 돌려주면 매크로 섹션이 프롬프트에서 통째로
+    사라지는데, 생략은 모델에게 '데이터 없음' 이 아니라 지시가 아예 없는 것이라
+    빈 자리를 기억으로 채운다 (§1.3·C2). 호출자가 각자 보완하게 두면 한쪽만
+    보완한다 — 실제로 `gather_yfinance_market_data` 는 조용히 건너뛰고
+    `generate_daily_brief` 는 실패 줄을 넣고 있었다.
     """
     from backend.services.markets import normalize
 
+    is_kr = normalize(market) == "KR"
+    title = "[한국 거시지표]" if is_kr else "[US macro indicators]"
+
+    def _failed(why: str) -> str:
+        note = (f"  (수집 실패 — {why}. 거시지표 수치를 인용하거나 추정하지 마세요.)"
+                if is_kr else
+                f"  (unavailable — {why}. Do not cite or infer macro figures.)")
+        return f"{title}\n{note}"
+
     try:
-        if normalize(market) == "KR":
+        if is_kr:
             from backend.services.korea_macro import get_korea_macro, format_for_prompt
-            return format_for_prompt(get_korea_macro(ttl=3600))
+            block = format_for_prompt(get_korea_macro(ttl=3600))
+            if not block.strip():
+                logger.warning("한국 거시지표를 하나도 받지 못했다")
+                return _failed("한국은행 지표를 하나도 받지 못했습니다")
+            return block
 
         from backend.services.market_data import get_fred_macro
         fred = get_fred_macro(ttl=3600)
@@ -87,7 +108,7 @@ def build_macro_block(market: str) -> str:
         # 프롬프트에 넣지 않는다.
         if fred.get("source") == "fallback":
             logger.warning("FRED 거시지표 폴백 — 실측값 없이 진행")
-            return "[US macro indicators]\n  (unavailable — FRED lookup failed)"
+            return _failed("FRED lookup failed")
 
         rows = [
             ("Fed funds",               fred.get("fed_rate"),        "%",  "{:.2f}"),
@@ -99,10 +120,29 @@ def build_macro_block(market: str) -> str:
         ]
         lines = [f"  {label}: {fmt.format(value)}{unit}"
                  for label, value, unit, fmt in rows if value is not None]
-        return "[US macro indicators]\n" + "\n".join(lines) if lines else ""
+        if not lines:
+            logger.warning("FRED 거시지표를 하나도 받지 못했다")
+            return _failed("no FRED figures came back")
+
+        block = f"{title}\n" + "\n".join(lines)
+        # 일부만 받았으면 그 사실을 적는다. 행을 조용히 빼면 모델은 '못 받은
+        # 지표' 와 '애초에 안 넣은 지표' 를 구별하지 못해 기억으로 메운다.
+        #
+        # 빠진 지표의 **이름은 적지 않는다.** 이름만 적힌 줄이 값처럼 읽힐 여지를
+        # 두지 않으려는 것이고(B2), 모델에게 필요한 지시는 "여기 있는 것만
+        # 인용하라" 라서 이름이 없어도 성립한다.
+        #
+        # 생산자의 `missing` 을 믿지 않고 행 값에서 직접 본다 — 한때 부분 폴백이
+        # `source: "FRED"` 로 나가 위 가드를 통과했다.
+        if any(value is None for _, value, *_ in rows):
+            logger.warning("FRED 거시지표 일부 없음 (market=%s)", market)
+            block += ("\n  (some indicators were unavailable and are omitted;"
+                      " cite only what is listed above, do not infer the rest.)")
+        return block
     except Exception:
         logger.warning("거시지표 수집 실패 (market=%s)", market, exc_info=True)
-        return ""
+        return _failed("한국은행 지표 조회가 오류로 끝났습니다" if is_kr
+                       else "collection raised")
 
 
 def gather_yfinance_market_data(market: str = "US") -> str:
