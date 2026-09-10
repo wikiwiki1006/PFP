@@ -5,6 +5,7 @@
 #   ./dev.sh --prod-db      운영 DB (조회·재현용, 쓰기 주의)
 #   ./dev.sh --slot 1       포트 8001/3001 — 병렬 worktree 용
 #   ./dev.sh --slot 2 --db-branch agent-test
+#   ./dev.sh --slot 1 --auth-emulator   인증을 로컬 에뮬레이터로 (운영과 분리)
 #
 # 로그인은 고정 테스트 계정으로만 한다:
 #     test@gmail.com / 10october@
@@ -36,12 +37,14 @@ fi
 SLOT=0
 PROD_DB=0
 DB_BRANCH=""
+AUTH_EMU=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --prod-db)   PROD_DB=1; shift ;;
     --slot)      SLOT="${2:?--slot 에 숫자가 필요합니다}"; shift 2 ;;
     --db-branch) DB_BRANCH="${2:?--db-branch 에 이름이 필요합니다}"; shift 2 ;;
+    --auth-emulator) AUTH_EMU=1; shift ;;
     -h|--help)   sed -n '2,30p' "$0"; exit 0 ;;
     *)           echo "알 수 없는 옵션: $1"; exit 1 ;;
   esac
@@ -70,6 +73,39 @@ for p in "$BE_PORT" "$FE_PORT"; do
     exit 1
   fi
 done
+
+# ── 인증 에뮬레이터 ───────────────────────────────────────────────────────────
+#
+# 이 변수들은 **파일에 쓰지 않는다.** 이 프로세스의 환경으로만 넘긴다.
+#
+# firebase_admin 은 FIREBASE_AUTH_EMULATOR_HOST 가 보이면 ID 토큰의 서명 검증을
+# 건너뛴다 (_token_gen.py: `if emulated: verified_claims = payload`). 그 값이
+# backend/.env 에 남아 있으면 deploy.sh 가 그 백엔드를 cloudflared 로 인터넷에
+# 공개하는 순간 누구나 토큰을 위조할 수 있다. deploy.sh 에 가드가 있지만,
+# 애초에 파일에 남기지 않는 것이 맞다.
+#
+# 프론트는 VITE_USE_AUTH_EMULATOR 를 본다. vite 의 loadEnv 가 process.env 에서
+# VITE_ 접두사 키를 그대로 가져가므로 .env.local 파일이 필요 없다.
+#
+# 백엔드와 프론트는 반드시 같이 켜야 한다. 한쪽만 켜면 가입은 되는데 로그인은
+# 안 되는 상태가 된다 (routers/auth.py 의 IDENTITY_TOOLKIT 주석 참고).
+if [ "$AUTH_EMU" = 1 ]; then
+  if ! port_busy 9099; then
+    echo "인증 에뮬레이터가 9099 에 떠 있지 않습니다."
+    echo ""
+    echo "먼저 다른 창에서 띄우세요 (한 번만 — 다섯 슬롯이 같이 씁니다):"
+    echo "    ./auth-emulator.sh"
+    echo ""
+    echo "에뮬레이터 없이 그냥 돌리려면 --auth-emulator 를 빼세요. 다만 그러면"
+    echo "운영 Firebase 인증에 붙으므로 새 계정을 만들면 안 됩니다."
+    exit 1
+  fi
+  export FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099
+  export VITE_USE_AUTH_EMULATOR=true
+  echo "▸ 인증: 에뮬레이터 127.0.0.1:9099 (운영 계정과 분리됨)"
+else
+  echo "▸ 인증: 운영 Firebase — 새 계정을 만들지 마세요 (test@gmail.com 만)"
+fi
 
 # 프론트가 죽었을 때 고아 uvicorn 이 남지 않게 한다. pkill 은 Git Bash 에 없어서
 # 백엔드 PID 를 직접 들고 있다가 죽인다 — Windows 에선 --reload 가 자식을 하나 더
