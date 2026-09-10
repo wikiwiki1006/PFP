@@ -1,13 +1,30 @@
 """
 backend/db/schema.py
 ──────────────────────
-테이블 DDL 정의 + 최초 실행 시 JSON → DB 마이그레이션.
+테이블 DDL 정의. 기동할 때마다 실행되며 멱등이다.
+
+예전에는 여기서 `pfp/data/*.json` 과 `outputs/*.md` 를 DB 로 옮기는 1회성
+마이그레이션(`_migrate_json`)도 돌렸다. 인증이 붙기 전, 사용자가 한 명이고
+데이터가 파일에 있던 시절의 코드다. 제거한 이유는 세 가지가 동시에 막고
+있었기 때문이다:
+
+  1. 그 코드는 `ON CONFLICT(user_id, ticker)` 로 upsert 했는데, 거기 맞는
+     유니크 제약이 더는 없다. 아래 DO 블록이 `holdings` 기본키를
+     `(user_id, market, ticker)` 3컬럼으로 바꾼다. 실제로 실행하면
+     `no unique or exclusion constraint matching the ON CONFLICT
+     specification` 로 죽는다.
+  2. 전부 `user_id='default'` 로 넣는데 `fk_holdings_user` 가 `users` 를
+     참조한다. 그 행이 없는 DB 에서는 FK 위반으로 죽고, 있는 DB 에서는
+     스킵 가드(`holdings WHERE user_id='default'`)에 걸려 애초에 들어오지
+     않는다. 성공하는 경로가 없다.
+  3. 설령 들어갔어도 조회 경로가 전부 토큰의 uid 로 거르므로(CLAUDE.md §1.2)
+     `'default'` 행은 어떤 사용자에게도 보이지 않는다.
+
+원본도 남아 있지 않다 — `pfp/data/` 는 리포에 존재하지 않는다.
 """
 from __future__ import annotations
 
-import json
 import logging
-from pathlib import Path
 
 from backend.db import get_conn, is_available
 
@@ -300,7 +317,7 @@ CREATE INDEX IF NOT EXISTS idx_market_snapshot_updated
 
 
 def init_schema():
-    """DDL 실행 후 기존 JSON 데이터 마이그레이션 (최초 1회)."""
+    """DDL 실행 (멱등). 기동할 때마다 돌아도 안전하다."""
     if not is_available():
         return
     try:
@@ -308,102 +325,5 @@ def init_schema():
             with conn.cursor() as cur:
                 cur.execute(_DDL)
         logger.info("DB 스키마 초기화 완료")
-        _migrate_json()
     except Exception as e:
         logger.error(f"스키마 초기화 오류: {e}")
-
-
-def _migrate_json():
-    """pfp/data/*.json → DB 마이그레이션 (이미 데이터 있으면 스킵)."""
-    from backend.db import execute
-
-    try:
-        row = execute(
-            "SELECT COUNT(*) AS cnt FROM holdings WHERE user_id='default'",
-            fetch="one",
-        )
-        if row and row["cnt"] > 0:
-            return
-    except Exception:
-        return
-
-    data_dir = Path(__file__).parent.parent.parent / "pfp" / "data"
-
-    # holdings.json
-    holdings_file = data_dir / "holdings.json"
-    if holdings_file.exists():
-        try:
-            raw = json.loads(holdings_file.read_text())
-            holdings = raw.get("my_holdings", raw)
-            with get_conn() as conn:
-                with conn.cursor() as cur:
-                    for ticker, info in holdings.items():
-                        cur.execute(
-                            """INSERT INTO holdings(user_id, ticker, qty, avg_cost, sector)
-                               VALUES(%s,%s,%s,%s,%s)
-                               ON CONFLICT(user_id, ticker) DO UPDATE
-                               SET qty=EXCLUDED.qty, avg_cost=EXCLUDED.avg_cost,
-                                   sector=EXCLUDED.sector""",
-                            ("default", ticker,
-                             float(info.get("q", 0)),
-                             float(info.get("avg", 0)),
-                             info.get("sector", "Other")),
-                        )
-            logger.info(f"holdings.json → DB 마이그레이션 완료 ({len(holdings)}개 종목)")
-        except Exception as e:
-            logger.warning(f"holdings 마이그레이션 실패: {e}")
-
-    # trade_log.json
-    trade_file = data_dir / "trade_log.json"
-    if trade_file.exists():
-        try:
-            trades = json.loads(trade_file.read_text())
-            with get_conn() as conn:
-                with conn.cursor() as cur:
-                    for t in trades:
-                        cur.execute(
-                            """INSERT INTO trade_log
-                                   (user_id, trade_date, ticker, trade_type, qty, price, memo)
-                               VALUES(%s,%s,%s,%s,%s,%s,%s)
-                               ON CONFLICT DO NOTHING""",
-                            ("default",
-                             t.get("date"),
-                             t.get("ticker"),
-                             t.get("type"),
-                             float(t.get("q", 0)),
-                             t.get("price"),
-                             t.get("memo")),
-                        )
-            logger.info(f"trade_log.json → DB 마이그레이션 완료 ({len(trades)}건)")
-        except Exception as e:
-            logger.warning(f"trade_log 마이그레이션 실패: {e}")
-
-    # outputs/*.md → reports 테이블
-    outputs_dir = Path(__file__).parent.parent.parent / "outputs"
-    if outputs_dir.exists():
-        md_files = list(outputs_dir.glob("*.md"))
-        migrated = 0
-        try:
-            with get_conn() as conn:
-                with conn.cursor() as cur:
-                    for f in md_files:
-                        rtype = (
-                            "daily_brief" if f.name.startswith("daily_brief") else
-                            "industry_research" if "industry" in f.name else
-                            "equity_research"
-                        )
-                        try:
-                            cur.execute(
-                                """INSERT INTO reports(user_id, report_type, filename, content)
-                                   VALUES(%s,%s,%s,%s)
-                                   ON CONFLICT(filename) DO NOTHING""",
-                                ("default", rtype, f.name,
-                                 f.read_text(encoding="utf-8")),
-                            )
-                            migrated += 1
-                        except Exception:
-                            pass
-            if migrated:
-                logger.info(f"outputs/*.md → DB 마이그레이션 완료 ({migrated}개)")
-        except Exception as e:
-            logger.warning(f"reports 마이그레이션 실패: {e}")
