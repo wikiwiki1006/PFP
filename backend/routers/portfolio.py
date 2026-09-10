@@ -137,29 +137,33 @@ def update_holding(
 ):
     uid = _auth["uid"]
     ticker = ticker.upper()
-    holdings = get_holdings(uid, market=market)
-    if ticker not in holdings:
-        raise HTTPException(status_code=404, detail=f"{ticker} 미보유")
+    # 읽기부터 쓰기까지 전부 락 안이어야 한다. get_holdings 가 밖에 남으면
+    # 두 요청이 같은 old_q 를 읽고 같은 delta 를 계산해 DEPOSIT 이 두 번 남는다
+    # (제출 버튼 더블클릭으로 재현). 락은 사용자 단위라 다른 사용자는 안 막힌다.
+    with user_write_lock(uid):
+        holdings = get_holdings(uid, market=market)
+        if ticker not in holdings:
+            raise HTTPException(status_code=404, detail=f"{ticker} 미보유")
 
-    # 현금 직접 수정 시 DEPOSIT/WITHDRAW 이벤트를 거래 이력에 기록
-    if ticker == "CASH":
-        old_q = float(holdings["CASH"].get("q", 0))
-        new_q = float(body.q)
-        delta = round(new_q - old_q, 2)
-        if abs(delta) >= 0.01:
-            event_date = (body.date or "").strip() or datetime.now().strftime("%Y-%m-%d")
-            add_trade({
-                "date":   event_date,
-                "ticker": "CASH",
-                "type":   "DEPOSIT" if delta > 0 else "WITHDRAW",
-                "q":      abs(delta),
-                "price":  1.0,
-                "memo":   None,
-            }, uid, market=market)
+        # 현금 직접 수정 시 DEPOSIT/WITHDRAW 이벤트를 거래 이력에 기록
+        if ticker == "CASH":
+            old_q = float(holdings["CASH"].get("q", 0))
+            new_q = float(body.q)
+            delta = round(new_q - old_q, 2)
+            if abs(delta) >= 0.01:
+                event_date = (body.date or "").strip() or datetime.now().strftime("%Y-%m-%d")
+                add_trade({
+                    "date":   event_date,
+                    "ticker": "CASH",
+                    "type":   "DEPOSIT" if delta > 0 else "WITHDRAW",
+                    "q":      abs(delta),
+                    "price":  1.0,
+                    "memo":   None,
+                }, uid, market=market)
 
-    sector = body.sector or holdings[ticker].get("sector", "Other")
-    save_holding(ticker, body.q, body.avg, sector, uid, market=market)
-    return {"ok": True, "ticker": ticker}
+        sector = body.sector or holdings[ticker].get("sector", "Other")
+        save_holding(ticker, body.q, body.avg, sector, uid, market=market)
+        return {"ok": True, "ticker": ticker}
 
 
 @router.post("/holdings/{ticker}")
@@ -171,24 +175,28 @@ def add_holding(
 ):
     uid = _auth["uid"]
     ticker = ticker.upper()
-    holdings = get_holdings(uid, market=market)
-    if ticker in holdings:
-        raise HTTPException(status_code=409, detail=f"{ticker} 이미 존재. PUT으로 수정하세요.")
+    # 존재 검사가 락 밖에 있으면 TOCTOU 다. 동시 두 요청이 모두 "없음" 을 보고
+    # 409 를 통과한 뒤 각자 save_holding 을 부르는데, ON CONFLICT DO UPDATE 라
+    # 에러도 나지 않는다 — 둘 다 200 을 받고 DEPOSIT 만 두 번 남는다.
+    with user_write_lock(uid):
+        holdings = get_holdings(uid, market=market)
+        if ticker in holdings:
+            raise HTTPException(status_code=409, detail=f"{ticker} 이미 존재. PUT으로 수정하세요.")
 
-    # 현금 최초 등록 시 DEPOSIT 이벤트 기록
-    if ticker == "CASH" and float(item.q) > 0:
-        event_date = (item.date or "").strip() or datetime.now().strftime("%Y-%m-%d")
-        add_trade({
-            "date":   event_date,
-            "ticker": "CASH",
-            "type":   "DEPOSIT",
-            "q":      float(item.q),
-            "price":  1.0,
-            "memo":   None,
-        }, uid, market=market)
+        # 현금 최초 등록 시 DEPOSIT 이벤트 기록
+        if ticker == "CASH" and float(item.q) > 0:
+            event_date = (item.date or "").strip() or datetime.now().strftime("%Y-%m-%d")
+            add_trade({
+                "date":   event_date,
+                "ticker": "CASH",
+                "type":   "DEPOSIT",
+                "q":      float(item.q),
+                "price":  1.0,
+                "memo":   None,
+            }, uid, market=market)
 
-    save_holding(ticker, item.q, item.avg, item.sector or "Other", uid, market=market)
-    return {"ok": True, "ticker": ticker}
+        save_holding(ticker, item.q, item.avg, item.sector or "Other", uid, market=market)
+        return {"ok": True, "ticker": ticker}
 
 
 @router.delete("/holdings/{ticker}")
@@ -856,12 +864,23 @@ def get_metrics(_auth: dict = Depends(current_user), market: str = Depends(marke
 
     # total_return_pct: TWRR(날짜 보정 없는 시간가중수익률)의 마지막 값으로 덮어쓰기
     # calculate_metrics는 equity_curve(날짜 보정 포함)를 쓰므로 추가 입금 시 왜곡 가능
+    #
+    # 보정에 실패하면 보정 전 값을 남겨두지 않고 None 을 준다. 바로 위 주석대로
+    # 그 값은 **이미 왜곡된 것으로 알려져 있다.** 그대로 내보내면 사용자는 틀린
+    # 수익률을 정상처럼 본다 — 화면에 '—' 가 아니라 그럴듯한 숫자가 뜨므로
+    # 아무도 눈치채지 못한다. 계산 불가는 계산 불가로 보여야 한다.
     try:
         twrr, _, _, _, _ = build_return_pct_curve(holdings, trade_log, close_df, market=market)
-        if not twrr.empty:
-            metrics["total_return_pct"] = round(float(twrr.dropna().iloc[-1]), 4)
-    except Exception:
-        pass
+        # twrr.empty 만으로는 부족하다. 행은 있는데 값이 전량 NaN 이면
+        # dropna() 결과가 비어 iloc[-1] 이 IndexError 를 낸다.
+        series = twrr.dropna()
+        metrics["total_return_pct"] = (
+            round(float(series.iloc[-1]), 4) if not series.empty else None
+        )
+    except Exception as e:
+        logger.warning(f"TWRR 보정 실패 — total_return_pct 를 비운다 "
+                       f"(uid={uid}, market={market}): {e}")
+        metrics["total_return_pct"] = None
     return metrics
 
 

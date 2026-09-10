@@ -2,7 +2,8 @@
 export interface PortfolioMetrics {
   total_equity: number
   total_cost: number
-  total_return_pct: number
+  /** TWRR 보정에 실패하면 null (보정 전 값은 추가 입금 시 왜곡돼 있어 쓰지 않는다) */
+  total_return_pct: number | null
   today_change_val: number
   today_change_pct: number
   portfolio_beta: number

@@ -11,7 +11,6 @@ import re
 import threading
 import uuid
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
 from backend.services.auth import (ai_feature_user, current_user,
@@ -57,31 +56,16 @@ def _job_get(job_id: str, owner: str | None = None) -> dict | None:
     return _store.get(job_id, owner=owner)
 
 
-_DATA_DIR = Path(__file__).parent.parent.parent / "pfp" / "data"
-_DB_FILE  = _DATA_DIR / "holdings.json"
-_LOG_FILE = _DATA_DIR / "trade_log.json"
-
-
 def _load_holdings(uid: str, market: str = "US") -> dict:
     """호출자 본인의 보유 종목. uid 는 검증된 토큰에서만 나온다."""
     from backend.db.portfolio_repo import get_holdings as _db_get_holdings
-    from backend.db import is_available as _db_ok
-    if _db_ok():
-        holdings = _db_get_holdings(uid, market=market)
-        if holdings:
-            return holdings
-    if not _DB_FILE.exists():
-        return {}
-    with open(_DB_FILE) as f:
-        raw = json.load(f)
-    return raw.get("my_holdings", raw)
+    return _db_get_holdings(uid, market=market)
 
 
-def _load_trade_log() -> list:
-    if not _LOG_FILE.exists():
-        return []
-    with open(_LOG_FILE) as f:
-        return json.load(f)
+def _load_trade_log(uid: str, market: str = "US") -> list:
+    """호출자 본인의 거래 이력. 자산곡선의 취득원가가 여기서 나온다."""
+    from backend.db.portfolio_repo import get_trade_log as _db_get_trade_log
+    return _db_get_trade_log(uid, market=market)
 
 
 # ── 거시경제 분석 ─────────────────────────────────────────────────────────────
@@ -283,18 +267,8 @@ def analyst_feedback_auto(
         cached = get_analysis("analyst_feedback", cache_key, user_id=uid)
         if cached:
             return {**cached, "from_cache": True}
-    from backend.db.portfolio_repo import (
-        get_holdings as _db_get_holdings,
-        get_trade_log as _db_get_trade_log,
-    )
-    from backend.db import is_available as _db_ok
-
-    if _db_ok():
-        holdings  = _db_get_holdings(uid, market=market)
-        trade_log = _db_get_trade_log(uid, market=market)
-    else:
-        holdings  = _load_holdings(uid, market=market)
-        trade_log = _load_trade_log()
+    holdings  = _load_holdings(uid, market=market)
+    trade_log = _load_trade_log(uid, market=market)
 
     if not holdings:
         raise HTTPException(status_code=400, detail="보유 종목 없음")
@@ -375,8 +349,9 @@ def daily_brief(
     market: str = Depends(market_param),
 ):
     """오늘의 포트폴리오 브리프 마크다운 생성 (Claude Sonnet)."""
-    holdings  = portfolio or _load_holdings(_auth["uid"], market=market)
-    trade_log = _load_trade_log()
+    uid       = _auth["uid"]
+    holdings  = portfolio or _load_holdings(uid, market=market)
+    trade_log = _load_trade_log(uid, market=market)
 
     if not holdings:
         raise HTTPException(status_code=400, detail="보유 종목 없음")
