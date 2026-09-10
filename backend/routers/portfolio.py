@@ -299,9 +299,16 @@ def _add_trade_locked(body: AddTradeRequest, uid: str, market: str):
         need = qty_in * price_in
 
     if need > 0 and need > cash_now + 1e-6:
+        # 통화 포맷을 여기서 다시 구현하지 않는다. '$' 와 소수점 2자리를 고정하면
+        # 한국 거래에서 '필요 $71,900.00' 이 사용자 화면에 그대로 뜬다 — 기호도
+        # 틀리고, 원화는 호가 단위가 1원이라 소수점 자체가 없는 정밀도다.
+        from backend.services.markets import get_market
+        from backend.services.report_writer import _fmt_price
+        cur = get_market(market).currency
         raise HTTPException(
             status_code=400,
-            detail=f"현금이 부족합니다. 필요 ${need:,.2f} · 보유 ${cash_now:,.2f}",
+            detail=f"현금이 부족합니다. 필요 {_fmt_price(need, cur)} · "
+                   f"보유 {_fmt_price(cash_now, cur)}",
         )
 
     if ticker not in holdings and trade_type == "ADD":

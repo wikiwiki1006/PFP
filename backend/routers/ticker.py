@@ -5,6 +5,7 @@ routers/ticker.py
 """
 from __future__ import annotations
 
+import logging
 import math
 from typing import Optional
 
@@ -15,6 +16,8 @@ from fastapi import Depends, APIRouter, Header, HTTPException, Query
 
 from backend.services.auth import optional_user
 from backend.services.markets import market_param
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/ticker", tags=["ticker"])
 
@@ -105,7 +108,7 @@ def _build_optimizer_block(sym: str, uid: str, closes=None, market: str = "US") 
         _cp(_ok, res)
         return res
     except Exception as e:
-        print(f"[quant] optimizer 실패 {sym}: {e}")
+        logger.warning(f"포트폴리오 맥락 계산 실패 (ticker={sym}): {e}")
         optimizer["note"] = "포트폴리오 맥락 계산 실패"
         return optimizer
 
@@ -117,15 +120,19 @@ def _build_quant_block(sym: str, uid: str, closes, hist, info: dict) -> dict:
     일부가 실패해도 나머지는 표시되도록 각 블록을 독립적으로 방어한다.
     """
     from backend.services.quant_metrics import compute_quant_score, compute_panic_score
-    from backend.services.trading_signals import detect_regime_er, REGIME_SIDEWAYS
+    from backend.services.trading_signals import detect_regime_er
 
     # ── 시장 국면 (ER, 소급 보정 적용) ────────────────────────────────
-    regime, regime_er = REGIME_SIDEWAYS, None
+    # 실패를 REGIME_SIDEWAYS 로 떨어뜨리지 않는다. '횡보'는 실제 시장 판단이라,
+    # 계산이 안 된 것을 그렇게 표시하면 사용자는 근거 있는 결론으로 읽는다.
+    # 바로 아래 quant·panic 은 '계산 불가'를 명시하는데 여기만 값을 지어내고
+    # 있었다 — 같은 응답 안에서 한쪽은 모른다고 하고 한쪽은 단정한 셈이다.
+    regime, regime_er = None, None
     try:
         r = detect_regime_er(closes)
         regime, regime_er = r["current_regime"], r["current_er"]
     except Exception as e:
-        print(f"[quant] regime 실패 {sym}: {e}")
+        logger.warning(f"시장 국면 계산 실패 (ticker={sym}): {e}")
 
     _KO = {"Bull": "상승 추세", "Bear": "하락 추세", "Sideways": "횡보"}
 
@@ -133,20 +140,20 @@ def _build_quant_block(sym: str, uid: str, closes, hist, info: dict) -> dict:
     try:
         quant = compute_quant_score(closes, info or {}, er=regime_er)
     except Exception as e:
-        print(f"[quant] score 실패 {sym}: {e}")
+        logger.warning(f"퀀트 스코어 계산 실패 (ticker={sym}): {e}")
 
     panic = {"score": None, "status": "계산 불가", "components": {}}
     try:
         vol = hist["Volume"] if "Volume" in getattr(hist, "columns", []) else None
         panic = compute_panic_score(closes, vol)
     except Exception as e:
-        print(f"[quant] panic 실패 {sym}: {e}")
+        logger.warning(f"패닉 점수 계산 실패 (ticker={sym}): {e}")
 
     return {
         "score":        quant.get("score"),
         "score_label":  quant.get("label"),
         "factors":      quant.get("factors", {}),
-        "regime":       _KO.get(regime, regime),
+        "regime":       _KO.get(regime, regime) if regime else "계산 불가",
         "regime_code":  regime,
         "regime_er":    regime_er,
         "panic_score":  panic.get("score"),
