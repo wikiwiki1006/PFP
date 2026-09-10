@@ -166,7 +166,9 @@ def _run_concurrently(calls):
         t.start()
     for t in threads:
         t.join(timeout=30)
-    assert not any(t.is_alive() for t in threads), "핸들러가 30초 안에 끝나지 않았다 (락 데드락?)"
+    assert not any(t.is_alive() for t in threads), (
+        "handler did not finish within 30s -- lock deadlock? (핸들러가 끝나지 않았다)"
+    )
     return out
 
 
@@ -202,8 +204,8 @@ def test_lock_is_actually_exercised():
     "통과했지만 아무것도 증명 못 한" 상태와 진짜 통과를 구분해 둔다.
     """
     assert db.is_available(), (
-        "DB 풀이 없다. user_write_lock 이 락 없이 그냥 통과하므로 "
-        "이 파일의 결과는 아무것도 증명하지 못한다."
+        "no DB pool -- user_write_lock yields straight through, so nothing in "
+        "this file proves anything. (DB 가 없으면 락을 재보지도 못한다.)"
     )
 
 
@@ -232,18 +234,21 @@ def test_concurrent_put_records_one_deposit(uid, monkeypatch):
     monkeypatch.setattr(portfolio_router, "get_holdings", real)
 
     errors = [r for kind, r in results if kind == "err"]
-    assert not errors, f"PUT 이 예외로 끝났다: {errors}"
+    assert not errors, f"PUT raised: {errors}"
 
     qty, deposits, ledger = _cash_rows(uid)
 
-    assert qty == pytest.approx(150.0), f"최종 수량이 150 이어야 하는데 {qty}"
+    # 메시지 앞머리는 ASCII 로 둔다 — Windows 콘솔이 cp949 라 한글이 깨지는데,
+    # 조치에 필요한 숫자와 파일·함수 이름만은 깨진 출력에서도 읽혀야 한다.
+    assert qty == pytest.approx(150.0), f"qty={qty}, expected 150.0"
     assert deposits == 1, (
-        f"DEPOSIT 이 {deposits}건이다 (1건이어야 함). 두 요청이 같은 old_q 를 읽어 "
-        "각자 +50 을 기록했다 — routers/portfolio.py 의 update_holding 에 "
-        "user_write_lock 이 빠져 있다."
+        f"DEPOSIT={deposits}, expected 1 -- update_holding in "
+        "routers/portfolio.py lacks user_write_lock. "
+        "(두 요청이 같은 old_q 를 읽어 각자 +50 을 기록했다.)"
     )
     assert ledger == pytest.approx(qty - 100.0), (
-        f"거래 이력과 잔액이 갈라졌다: 원장 순변화 {ledger}, 실제 변화 {qty - 100.0}"
+        f"ledger={ledger}, actual change={qty - 100.0} -- trade_log and holdings diverged. "
+        "(거래 이력과 잔액이 갈라졌다.)"
     )
 
 
@@ -272,14 +277,18 @@ def test_concurrent_post_creates_holding_once(uid, monkeypatch):
     conflicts = [r for kind, r in results if kind == "err" and getattr(r, "status_code", None) == 409]
     other = [r for kind, r in results if kind == "err" and getattr(r, "status_code", None) != 409]
 
-    assert not other, f"409 가 아닌 예외가 났다: {other}"
+    assert not other, f"non-409 exception raised: {other}"
 
     qty, deposits, ledger = _cash_rows(uid)
 
     assert len(ok) == 1 and len(conflicts) == 1, (
-        f"성공 {len(ok)}건 / 409 {len(conflicts)}건. 동시 생성 2건이 모두 통과했다 — "
-        "routers/portfolio.py 의 add_holding 에 user_write_lock 이 빠져 있어 "
-        "존재 검사와 저장 사이가 TOCTOU 다."
+        f"ok={len(ok)}, 409={len(conflicts)}, expected 1/1 -- add_holding in "
+        "routers/portfolio.py lacks user_write_lock, so the existence check "
+        "and save_holding are TOCTOU. "
+        "(동시 생성 2건이 모두 통과했다.)"
     )
-    assert deposits == 1, f"DEPOSIT 이 {deposits}건이다 (1건이어야 함). 없던 현금이 원장에 생겼다."
-    assert ledger == pytest.approx(qty), f"원장 순변화 {ledger} 와 잔액 {qty} 가 다르다"
+    assert deposits == 1, (
+        f"DEPOSIT={deposits}, expected 1 -- cash appeared in the ledger from nowhere. "
+        "(없던 현금이 원장에 생겼다.)"
+    )
+    assert ledger == pytest.approx(qty), f"ledger={ledger}, qty={qty} -- they must match"
