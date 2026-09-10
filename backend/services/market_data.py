@@ -116,6 +116,19 @@ GICS_SECTOR_ETFS = [
 SECTOR_ETF_TICKERS = [etf for _, etf in GICS_SECTOR_ETFS]
 
 
+def sector_etfs_for(market: str = "US") -> list[tuple[str, str]]:
+    """해당 시장의 섹터 대표 ETF 목록.
+
+    미국은 SPDR 11 섹터, 한국은 KODEX 업종 ETF 를 쓴다. 목록 자체는
+    services/markets.py 가 갖고 있고 여기서는 꺼내 쓰기만 한다 — 시장 정의가
+    두 곳으로 갈라지면 한쪽만 고치는 실수가 난다.
+    """
+    from backend.services.markets import get_market
+    if (market or "US").upper() == "US":
+        return GICS_SECTOR_ETFS
+    return get_market(market).sector_etfs
+
+
 # DB에 적재할 최소 이력 깊이. 어떤 엔드포인트가 촉발했든 이 깊이로 수집한다.
 _CANONICAL_PERIOD = "2y"
 
@@ -272,28 +285,32 @@ def get_close_df(
     return result
 
 
-def _get_sector_etf_df_1mo(ttl: int = 300) -> pd.DataFrame:
+def _get_sector_etf_df_1mo(ttl: int = 300, market: str = "US") -> pd.DataFrame:
+    tickers = [etf for _, etf in sector_etfs_for(market)]
+
     def _fetch():
         from backend.db.market_cache import _yf_sem
         with _yf_sem:
             data = yf.download(
-                SECTOR_ETF_TICKERS, period="1mo", progress=False,
+                tickers, period="1mo", progress=False,
                 auto_adjust=True, threads=False
             )
         df = data["Close"].ffill() if isinstance(data.columns, pd.MultiIndex) else data.ffill()
         # 주말(토·일) 행 제거 — ffill로 채워진 주말 행이 0% 변동률을 만드는 버그 방지
         return df[df.index.dayofweek < 5]
-    return _cached("sector_etf_1mo", ttl, _fetch)
+
+    # 캐시 키에 시장을 넣지 않으면 미국 섹터 값이 한국 화면에 그대로 나온다.
+    return _cached(f"sector_etf_1mo:{market}", ttl, _fetch)
 
 
-def get_sector_etf_df(ttl: int = 60) -> pd.DataFrame:
-    return _get_sector_etf_df_1mo(ttl)
+def get_sector_etf_df(ttl: int = 60, market: str = "US") -> pd.DataFrame:
+    return _get_sector_etf_df_1mo(ttl, market)
 
 
-def get_sector_changes() -> dict[str, float]:
+def get_sector_changes(market: str = "US") -> dict[str, float]:
     """{ 'XLK': 1.23, 'XLF': -0.45, ... } 형태로 섹터 ETF 1일 등락률 반환."""
     try:
-        df = _get_sector_etf_df_1mo()
+        df = _get_sector_etf_df_1mo(market=market)
         if df.empty or len(df) < 2:
             return {}
         df = df[df.index.dayofweek < 5]  # 주말 행 제거
@@ -301,7 +318,7 @@ def get_sector_changes() -> dict[str, float]:
             return {}
         cur, prev = df.iloc[-1], df.iloc[-2]
         result = {}
-        for _, etf in GICS_SECTOR_ETFS:
+        for _, etf in sector_etfs_for(market):
             if etf in df.columns:
                 c, p = cur.get(etf), prev.get(etf)
                 if pd.notna(c) and pd.notna(p) and p:
@@ -311,14 +328,14 @@ def get_sector_changes() -> dict[str, float]:
         return {}
 
 
-def get_sector_table() -> list[dict]:
+def get_sector_table(market: str = "US") -> list[dict]:
     """섹터 ETF 상세 테이블: 1D/1W/1M/3M/6M 변동률 포함.
 
     1D/1W: _get_sector_etf_df_1mo() (yfinance 직접 — 장 중 실시간 반영)
     1M/3M/6M: get_close_df(6mo) (DB 일봉 — 긴 기간 정확도 우선)
     """
     try:
-        df_1mo = _get_sector_etf_df_1mo()
+        df_1mo = _get_sector_etf_df_1mo(market=market)
         if df_1mo.empty or len(df_1mo) < 2:
             return []
 
@@ -333,19 +350,23 @@ def get_sector_table() -> list[dict]:
         prev_1d = df_1mo.iloc[-2]
         prev_1w = df_1mo.iloc[-6] if len(df_1mo) >= 6 else df_1mo.iloc[0]
 
-        # 중장기 기간은 DB 6개월 일봉 사용
-        df_6mo  = get_close_df(SECTOR_ETF_TICKERS, period="6mo", ttl=300, include_market=False)
+        # 중장기 기간은 DB 6개월 일봉 사용.
+        # 이 시장의 ETF 로 받아야 한다. 미국 상수를 그대로 쓰면 한국 ETF 가
+        # 프레임에 없어 아래 조회가 전부 빗나가고, 1M/3M/6M 이 통째로 0.0 이 된다.
+        etf_tickers = [etf for _, etf in sector_etfs_for(market)]
+        df_6mo  = get_close_df(etf_tickers, period="6mo", ttl=300, include_market=False)
         prev_1m = df_6mo.iloc[-22]  if len(df_6mo) >= 22  else df_6mo.iloc[0] if not df_6mo.empty else prev_1d
         prev_3m = df_6mo.iloc[-66]  if len(df_6mo) >= 66  else df_6mo.iloc[0] if not df_6mo.empty else prev_1d
         prev_6m = df_6mo.iloc[-132] if len(df_6mo) >= 132 else df_6mo.iloc[0] if not df_6mo.empty else prev_1d
 
         def _chg(c, p):
-            if pd.isna(c) or pd.isna(p) or float(p) == 0:
-                return 0.0
+            """계산 불가는 None. 0.0 으로 돌려주면 '보합'과 구분되지 않는다."""
+            if p is None or pd.isna(c) or pd.isna(p) or float(p) == 0:
+                return None
             return round((float(c) / float(p) - 1) * 100, 2)
 
         rows = []
-        for label, etf in GICS_SECTOR_ETFS:
+        for label, etf in sector_etfs_for(market):
             if etf not in df_1mo.columns:
                 continue
             c = cur.get(etf)
@@ -357,9 +378,10 @@ def get_sector_table() -> list[dict]:
                 "price":         round(float(c), 2),
                 "change_1d_pct": _chg(c, prev_1d.get(etf)),
                 "change_1w_pct": _chg(c, prev_1w.get(etf)),
-                "change_1m_pct": _chg(c, prev_1m.get(etf, c)),
-                "change_3m_pct": _chg(c, prev_3m.get(etf, c)),
-                "change_6m_pct": _chg(c, prev_6m.get(etf, c)),
+                # 기본값을 현재가(c)로 두면 변동률이 0% 로 조작된다 → None 으로 둔다.
+                "change_1m_pct": _chg(c, prev_1m.get(etf)),
+                "change_3m_pct": _chg(c, prev_3m.get(etf)),
+                "change_6m_pct": _chg(c, prev_6m.get(etf)),
             })
         return rows
     except Exception:

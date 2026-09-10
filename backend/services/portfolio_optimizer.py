@@ -314,16 +314,25 @@ def _gather_fundamentals(tickers: list[str]) -> dict:
 # 3. 뉴스 (Perplexity)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _fetch_news(tickers: list[str]) -> str:
+def _fetch_news(tickers: list[str], market: str = "US") -> str:
+    """종목별 전망 요약. 한국이면 국내 경제지에서 회사명으로 찾는다 —
+    '005930.KS' 로 물으면 국내 기사가 거의 걸리지 않는다."""
     if not PERPLEXITY_API_KEY:
         return ""
-    ticker_str = ", ".join(tickers[:12])
+    from backend.services.news_sources import focus_block, perplexity_extra
+    if market == "KR":
+        from backend.services.markets import name_map_for
+        _nm = name_map_for(tickers[:12], "KR")
+        ticker_str = ", ".join(f"{_nm.get(t, t)}({t})" for t in tickers[:12])
+    else:
+        ticker_str = ", ".join(tickers[:12])
     prompt = (
         f"Provide a concise forward-looking investment summary for: {ticker_str}. "
         "Cover per ticker: recent earnings surprises, next quarter guidance, "
         "analyst upgrades/downgrades with target price changes, major catalysts (product launch, "
         "regulatory, M&A), and key risks. Include specific numbers and dates where available. "
         "Focus on information that would change forward return expectations vs historical trends."
+        + focus_block(market)
     )
     try:
         resp = requests.post(
@@ -332,6 +341,7 @@ def _fetch_news(tickers: list[str]) -> str:
                 "model": "sonar",
                 "messages": [{"role": "user", "content": prompt}],
                 "max_tokens": 2000,
+                **perplexity_extra(market),
             },
             headers={"Authorization": f"Bearer {PERPLEXITY_API_KEY}", "Content-Type": "application/json"},
             timeout=30,
@@ -764,6 +774,7 @@ def run_ai_optimization(
     holding_period_years: float = 1.0,
     weight_bounds:        tuple[float, float] = (0.0, 1.0),
     on_stage=None,  # Optional[Callable[[int, str], None]]
+    market:               str   = "US",
 ) -> dict:
     """
     Full pipeline — 모든 IO 병렬:
@@ -787,7 +798,7 @@ def run_ai_optimization(
         return _fetch_prices(tickers, period=auto_period)
 
     def _get_news():
-        return _fetch_news(tickers)
+        return _fetch_news(tickers, market)
 
     def _get_fundamentals():
         return _gather_fundamentals(tickers)

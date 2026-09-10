@@ -17,6 +17,7 @@ from backend.services.auth import optional_user
 from backend.db.portfolio_repo import get_holdings as db_get_holdings
 from backend.db.market_cache import get_common, save_common
 from backend.services.market_data import get_close_df, _cached
+from backend.services.markets import market_param
 from backend.services.trading_signals import (
     SP500_NASDAQ_UNIVERSE,
     scan_universe_with_targets,
@@ -48,6 +49,7 @@ def scan_universe(
     top_n:             int  = Query(default=10, ge=1, le=30),
     include_portfolio: bool = Query(default=True),
     _auth: Optional[dict] = Depends(optional_user),
+    market: str = Depends(market_param),
 ):
     """
     S&P500 + 나스닥 전수 스캔 — 롱/숏 타점 반환.
@@ -59,7 +61,7 @@ def scan_universe(
     # 비로그인 사용자는 표준 유니버스만 스캔한다 (남의 보유 종목이 섞이면 안 된다).
     extra    = []
     if include_portfolio and _auth:
-        extra = [t for t in db_get_holdings(_auth["uid"]) if t != "CASH"]
+        extra = [t for t in db_get_holdings(_auth["uid"], market=market) if t != "CASH"]
 
     universe = sorted(set(SP500_NASDAQ_UNIVERSE + extra))
 
@@ -382,19 +384,40 @@ def market_situation():
     return result
 
 
+def _universe_for(market: str) -> list[str]:
+    """스캔 대상 종목. 미국은 S&P500, 한국은 시총 상위(KOSPI200·KOSDAQ150 대응).
+
+    한국 유니버스는 수집 작업이 미리 만들어 둔 것을 읽기만 한다 — 시총 조회가
+    종목당 1초를 넘어 요청 처리 중에 만들면 그대로 타임아웃이다.
+    """
+    if market == "KR":
+        from backend.services.korea_universe import get_scan_universe
+        return get_scan_universe()
+    return get_sp500_universe()
+
+
 @router.get("/signal-scan")
-def signal_scan(top_n: int = Query(default=10, ge=1, le=30)):
+def signal_scan(top_n: int = Query(default=10, ge=1, le=30),
+                market: str = Depends(market_param)):
     """
     S&P500 매매신호 스캔 — SMA 1차 필터 → 통과 종목만 MACD/RSI 스코어링 → 매수/매도 상위 N개.
 
     스케줄러가 일별 가격·거래량 수집 직후 계산해 common_cache 에 저장한다.
     캐시 미스일 때만 DB(market_prices)의 종가·거래량으로 즉석 계산한다 — yfinance 호출 없음.
     """
-    cached = get_common("signal_scan_sp500")
+    cache_key = f"signal_scan:{market}"
+    cached = get_common(cache_key)
     if not cached:
         from backend.db.market_cache import get_prices_from_db, get_volume_from_db
 
-        universe = get_sp500_universe()
+        universe = _universe_for(market)
+        if not universe:
+            # 유니버스가 비어 있는 것과 시세가 아직 없는 것은 원인이 다르다.
+            # 뭉뚱그리면 무엇을 기다려야 하는지 알 수 없다.
+            raise HTTPException(
+                status_code=503,
+                detail="종목 목록을 준비하는 중입니다. 잠시 후 다시 시도하세요.",
+            )
         close_df = get_prices_from_db(universe, "1y", fill=True)
         if close_df is None or close_df.empty:
             raise HTTPException(
@@ -404,13 +427,20 @@ def signal_scan(top_n: int = Query(default=10, ge=1, le=30)):
         volume_df = get_volume_from_db(universe, "1y")
         valid = [c for c in universe if c in close_df.columns]
         cached = sma_macd_rsi_scan(close_df[valid], volume_df, top_n=10)
-        save_common("signal_scan_sp500", cached, ttl_seconds=21600)
+        save_common(cache_key, cached, ttl_seconds=21600)
 
-    return {
-        **cached,
-        "long_picks":  cached.get("long_picks", [])[:top_n],
-        "short_picks": cached.get("short_picks", [])[:top_n],
-    }
+    long_picks  = cached.get("long_picks", [])[:top_n]
+    short_picks = cached.get("short_picks", [])[:top_n]
+
+    # 한국 종목은 코드만 보여 주면 무슨 회사인지 알 수 없다. 미국은 티커가
+    # 곧 이름 역할을 하지만 '044490.KQ' 는 아무것도 알려 주지 않는다.
+    if market == "KR":
+        from backend.services.korea_universe import name_map
+        names = name_map()
+        long_picks  = [{**p, "name": names.get(p.get("ticker"), "")} for p in long_picks]
+        short_picks = [{**p, "name": names.get(p.get("ticker"), "")} for p in short_picks]
+
+    return {**cached, "long_picks": long_picks, "short_picks": short_picks}
 
 
 @router.get("/signal-score")
@@ -569,10 +599,26 @@ def pairs_auto(
     ticker:        str   = Query(..., description="기준 티커. 예: KO"),
     threshold_pct: float = Query(default=5.0, ge=0.1, le=100.0),
     top_n:         int   = Query(default=5, ge=1, le=20),
+    market:        str   = Depends(market_param),
 ):
-    """기준 종목과 가장 유사한 페어를 S&P500 유니버스에서 자동 탐색.
-    기본 파라미터(threshold=5%, top_n=5)는 사전 계산 캐시를 우선 반환해 응답이 빠름."""
+    """기준 종목과 가장 유사한 페어를 **같은 시장 안에서** 자동 탐색.
+
+    후보를 항상 S&P500 에서 뽑고 있었다. 그래서 삼성바이오로직스의 페어로
+    AMAT·CME 같은 미국 종목이 나왔다 — 통화도 거래시간도 다른 종목과의 상관은
+    허수이고, 그걸 근거로 스프레드 매매를 하면 그대로 손실이다.
+
+    기본 파라미터(threshold=5%, top_n=5)는 사전 계산 캐시를 우선 반환해 응답이 빠름.
+    """
     ticker = ticker.upper()
+
+    # 기준 종목이 이 시장 것인지 먼저 본다. 한국 화면에서 AAPL 을 조회하면
+    # 후보는 한국 종목이라 의미 없는 결과가 나온다.
+    from backend.services.markets import belongs_to
+    if not belongs_to(ticker, market):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{ticker} 는 현재 선택한 시장의 종목이 아닙니다.",
+        )
 
     # 기본 파라미터이면 사전 계산 캐시 우선 조회 (scheduler._precompute_pairs 가 저장)
     if threshold_pct == 5.0 and top_n == 5:
@@ -584,7 +630,7 @@ def pairs_auto(
         import yfinance as yf
         from backend.db.market_cache import _yf_sem
 
-        universe   = get_sp500_universe()
+        universe   = _universe_for(market)
         candidates = [t for t in universe if t != ticker][:200]
         close_df   = get_close_df([ticker] + candidates, period="2y", ttl=300)
 
@@ -605,7 +651,7 @@ def pairs_auto(
 
         return pairs_auto_detail(ticker, close_df, candidates, threshold_pct=threshold_pct, top_n=top_n)
 
-    result = _cached(f"pairs_auto::{ticker}::{threshold_pct}::{top_n}", 600, _compute)
+    result = _cached(f"pairs_auto::{market}::{ticker}::{threshold_pct}::{top_n}", 600, _compute)
     if not result.get("best"):
         raise HTTPException(status_code=400, detail=f"{ticker}에 대한 유사 종목을 찾을 수 없습니다.")
 

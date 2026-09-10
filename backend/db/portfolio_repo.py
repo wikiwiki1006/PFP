@@ -23,16 +23,19 @@ _LOG_FILE = _DATA_DIR / "trade_log.json"
 
 # ── Holdings ───────────────────────────────────────────────────────────────────
 
-def get_holdings(user_id: str = "default") -> dict:
-    """{ ticker: {q, avg, sector} } 반환."""
+def get_holdings(user_id: str = "default", market: str = "US") -> dict:
+    """{ ticker: {q, avg, sector} } 반환. 해당 시장 보유분만.
+
+    market 을 안 주면 미국이다. 프론트가 시장을 보내지 않는 옛 요청도
+    기존과 똑같이 동작하게 하기 위한 기본값이다."""
     if is_available():
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
                         "SELECT ticker, qty, avg_cost, sector "
-                        "FROM holdings WHERE user_id=%s",
-                        (user_id,),
+                        "FROM holdings WHERE user_id=%s AND market=%s",
+                        (user_id, market),
                     )
                     rows = cur.fetchall()
             return {r[0]: {"q": r[1], "avg": r[2], "sector": r[3]} for r in rows}
@@ -52,6 +55,7 @@ def save_holding(
     avg_cost: float,
     sector: str = "Other",
     user_id: str = "default",
+    market: str = "US",
 ):
     """종목 upsert. DB 미연결 또는 오류 시 로깅 후 반환."""
     if not is_available():
@@ -61,12 +65,12 @@ def save_holding(
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """INSERT INTO holdings(user_id, ticker, qty, avg_cost, sector, updated_at)
-                       VALUES(%s,%s,%s,%s,%s,NOW())
-                       ON CONFLICT(user_id, ticker) DO UPDATE
+                    """INSERT INTO holdings(user_id, market, ticker, qty, avg_cost, sector, updated_at)
+                       VALUES(%s,%s,%s,%s,%s,%s,NOW())
+                       ON CONFLICT(user_id, market, ticker) DO UPDATE
                        SET qty=EXCLUDED.qty, avg_cost=EXCLUDED.avg_cost,
                            sector=EXCLUDED.sector, updated_at=NOW()""",
-                    (user_id, ticker, float(qty), float(avg_cost), sector or "Other"),
+                    (user_id, market, ticker, float(qty), float(avg_cost), sector or "Other"),
                 )
     except Exception as e:
         logger.error(f"DB save_holding({ticker}) 실패: {e}")
@@ -124,7 +128,8 @@ def user_write_lock(user_id: str = "default"):
                 pass
 
 
-def update_holding_sector(ticker: str, sector: str, user_id: str = "default") -> bool:
+def update_holding_sector(ticker: str, sector: str, user_id: str = "default",
+                          market: str = "US") -> bool:
     """섹터만 갱신. 수량·평단은 건드리지 않는다.
 
     /auto-sector 와 백그라운드 섹터 조회는 yfinance 응답을 수 초간 기다리는데,
@@ -140,8 +145,8 @@ def update_holding_sector(ticker: str, sector: str, user_id: str = "default") ->
             with conn.cursor() as cur:
                 cur.execute(
                     "UPDATE holdings SET sector=%s, updated_at=NOW() "
-                    "WHERE user_id=%s AND ticker=%s",
-                    (sector or "Other", user_id, ticker),
+                    "WHERE user_id=%s AND market=%s AND ticker=%s",
+                    (sector or "Other", user_id, market, ticker),
                 )
                 return cur.rowcount > 0
     except Exception as e:
@@ -149,7 +154,8 @@ def update_holding_sector(ticker: str, sector: str, user_id: str = "default") ->
         return False
 
 
-def delete_holding(ticker: str, user_id: str = "default", with_trades: bool = False):
+def delete_holding(ticker: str, user_id: str = "default", with_trades: bool = False,
+                   market: str = "US"):
     """보유 종목 삭제. with_trades=True 일 때만 거래 이력도 함께 삭제."""
     if not is_available():
         logger.error(f"DB 미연결 — {ticker} 삭제 실패")
@@ -158,13 +164,13 @@ def delete_holding(ticker: str, user_id: str = "default", with_trades: bool = Fa
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "DELETE FROM holdings WHERE user_id=%s AND ticker=%s",
-                    (user_id, ticker),
+                    "DELETE FROM holdings WHERE user_id=%s AND market=%s AND ticker=%s",
+                    (user_id, market, ticker),
                 )
                 if with_trades:
                     cur.execute(
-                        "DELETE FROM trade_log WHERE user_id=%s AND ticker=%s",
-                        (user_id, ticker),
+                        "DELETE FROM trade_log WHERE user_id=%s AND market=%s AND ticker=%s",
+                        (user_id, market, ticker),
                     )
     except Exception as e:
         logger.error(f"DB delete_holding({ticker}) 실패: {e}")
@@ -173,7 +179,7 @@ def delete_holding(ticker: str, user_id: str = "default", with_trades: bool = Fa
 
 # ── Trade Log ──────────────────────────────────────────────────────────────────
 
-def get_trade_log(user_id: str = "default") -> list[dict]:
+def get_trade_log(user_id: str = "default", market: str = "US") -> list[dict]:
     """[{id, date, ticker, type, q, price, memo}, ...] 반환."""
     if is_available():
         try:
@@ -181,9 +187,9 @@ def get_trade_log(user_id: str = "default") -> list[dict]:
                 with conn.cursor() as cur:
                     cur.execute(
                         """SELECT id, trade_date, ticker, trade_type, qty, price, memo
-                           FROM trade_log WHERE user_id=%s
+                           FROM trade_log WHERE user_id=%s AND market=%s
                            ORDER BY trade_date ASC, id ASC""",
-                        (user_id,),
+                        (user_id, market),
                     )
                     rows = cur.fetchall()
             return [
@@ -207,7 +213,8 @@ def get_trade_log(user_id: str = "default") -> list[dict]:
     return json.loads(_LOG_FILE.read_text())
 
 
-def update_trade_by_id(trade_id: int, record: dict, user_id: str = "default") -> bool:
+def update_trade_by_id(trade_id: int, record: dict, user_id: str = "default",
+                       market: str = "US") -> bool:
     """거래 내역 수정. 성공 시 True."""
     if not is_available():
         logger.error("DB 미연결 — 거래 이력 수정 실패")
@@ -218,7 +225,7 @@ def update_trade_by_id(trade_id: int, record: dict, user_id: str = "default") ->
                 cur.execute(
                     """UPDATE trade_log
                        SET trade_date=%s, ticker=%s, trade_type=%s, qty=%s, price=%s, memo=%s
-                       WHERE id=%s AND user_id=%s""",
+                       WHERE id=%s AND user_id=%s AND market=%s""",
                     (
                         record.get("date"),
                         record.get("ticker"),
@@ -228,6 +235,7 @@ def update_trade_by_id(trade_id: int, record: dict, user_id: str = "default") ->
                         record.get("memo"),
                         trade_id,
                         user_id,
+                        market,
                     ),
                 )
                 return cur.rowcount > 0
@@ -236,7 +244,8 @@ def update_trade_by_id(trade_id: int, record: dict, user_id: str = "default") ->
         return False
 
 
-def delete_trade_by_id(trade_id: int, user_id: str = "default") -> bool:
+def delete_trade_by_id(trade_id: int, user_id: str = "default",
+                       market: str = "US") -> bool:
     """거래 내역 삭제. 성공 시 True."""
     if not is_available():
         logger.error("DB 미연결 — 거래 이력 삭제 실패")
@@ -245,8 +254,8 @@ def delete_trade_by_id(trade_id: int, user_id: str = "default") -> bool:
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "DELETE FROM trade_log WHERE id=%s AND user_id=%s",
-                    (trade_id, user_id),
+                    "DELETE FROM trade_log WHERE id=%s AND user_id=%s AND market=%s",
+                    (trade_id, user_id, market),
                 )
                 return cur.rowcount > 0
     except Exception as e:
@@ -254,7 +263,7 @@ def delete_trade_by_id(trade_id: int, user_id: str = "default") -> bool:
         return False
 
 
-def add_trade(record: dict, user_id: str = "default"):
+def add_trade(record: dict, user_id: str = "default", market: str = "US"):
     """거래 1건 추가. DB 미연결 또는 오류 시 로깅 후 반환."""
     if not is_available():
         logger.error("DB 미연결 — 거래 이력 저장 실패")
@@ -264,10 +273,11 @@ def add_trade(record: dict, user_id: str = "default"):
             with conn.cursor() as cur:
                 cur.execute(
                     """INSERT INTO trade_log
-                           (user_id, trade_date, ticker, trade_type, qty, price, memo)
-                       VALUES(%s,%s,%s,%s,%s,%s,%s)""",
+                           (user_id, market, trade_date, ticker, trade_type, qty, price, memo)
+                       VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""",
                     (
                         user_id,
+                        market,
                         record["date"],
                         record["ticker"],
                         record["type"],
@@ -320,19 +330,24 @@ def create_user(user_id: str, name: str, email: str = "") -> bool:
         return False
 
 
-def wipe_portfolio(user_id: str) -> dict:
-    """사용자의 보유 종목과 거래 이력을 전부 삭제한다.
+def wipe_portfolio(user_id: str, market: str = "US") -> dict:
+    """사용자의 한 시장 포트폴리오를 전부 삭제한다.
 
     '포트폴리오 새로 등록하기' 전용이다. 종목을 하나씩 지우면 그 사이 상태가
     반쯤 남아 잔고 계산이 어긋나므로, 한 트랜잭션에서 통째로 비운다.
+
+    market 으로 범위를 반드시 좁힌다. 미국·한국은 별개의 포트폴리오라
+    한쪽을 새로 등록한다고 다른 쪽까지 지워서는 안 된다.
     """
     if not is_available() or not user_id:
         return {"holdings": 0, "trades": 0}
     try:
         with get_conn() as conn, conn.cursor() as cur:
-            cur.execute("DELETE FROM trade_log WHERE user_id=%s", (user_id,))
+            cur.execute("DELETE FROM trade_log WHERE user_id=%s AND market=%s",
+                        (user_id, market))
             trades = cur.rowcount
-            cur.execute("DELETE FROM holdings WHERE user_id=%s", (user_id,))
+            cur.execute("DELETE FROM holdings WHERE user_id=%s AND market=%s",
+                        (user_id, market))
             holdings = cur.rowcount
         return {"holdings": holdings, "trades": trades}
     except Exception as e:

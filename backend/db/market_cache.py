@@ -270,12 +270,18 @@ def get_volume_from_db(
 def save_prices_to_db(df: pd.DataFrame, volume_df: Optional[pd.DataFrame] = None):
     """close_df (DatetimeIndex × tickers) → market_prices upsert.
 
-    캘린더 가드: 미국 증시 캘린더를 따르는 티커에 대해
-      ① NYSE 비거래일(주말·공휴일) 행
-      ② 아직 종가가 확정되지 않은 당일(16:00 ET 이전) 행 — 장중 부분 봉
-    은 저장하지 않는다. 이 함수가 market_prices 의 **유일한 SQL 기록 지점**이므로,
-    어떤 호출자가 ffill 된 프레임을 넘기더라도 위조 종가가 영구 저장되지 않는다.
-    (암호화폐·환율·선물·해외 종목은 자기 캘린더로 실제 거래되므로 그대로 저장한다.)
+    캘린더 가드: 각 티커가 따르는 증시 캘린더에 대해
+      ① 비거래일(주말·공휴일) 행
+      ② 아직 종가가 확정되지 않은 당일 행 — 장중 부분 봉
+    은 저장하지 않는다. 미국은 NYSE 캘린더와 16:00 ET, 한국은 KRX 캘린더와
+    15:30 KST 가 기준이다. 이 함수가 market_prices 의 **유일한 SQL 기록 지점**
+    이므로, 어떤 호출자가 ffill 된 프레임을 넘기더라도 위조 종가가 영구 저장되지
+    않는다.
+
+    한국 종목도 가드해야 한다. .KS/.KQ 는 미국 캘린더를 따르지 않는다는 이유로
+    가드를 통째로 건너뛰고 있었는데, 그러면 장중 09:00~15:30 에 수집한 부분 봉이
+    그날의 확정 종가로 DB 에 박힌다.
+    (암호화폐·환율·선물은 자기 캘린더로 24시간 거래되므로 그대로 저장한다.)
 
     volume_df 를 함께 주면 같은 (ticker, price_date) 행에 거래량을 붙인다. 종가와
     동일한 캘린더 가드를 통과한 행만 저장된다. 종가만 넘어온 호출은 기존 거래량을
@@ -288,10 +294,14 @@ def save_prices_to_db(df: pd.DataFrame, volume_df: Optional[pd.DataFrame] = None
         from psycopg2.extras import execute_values
         from backend.services.market_calendar import (
             is_us_trading_day, last_completed_session, uses_us_session_calendar,
+            is_kr_trading_day, last_completed_kr_session, uses_kr_session_calendar,
         )
 
         us_cal   = {t: uses_us_session_calendar(str(t)) for t in df.columns}
+        kr_cal   = {t: uses_kr_session_calendar(str(t)) for t in df.columns}
         last_ses = last_completed_session()
+        # 한국 티커가 없으면 KRX 캘린더를 굳이 받아오지 않는다 (yfinance 호출 1회).
+        last_kr  = last_completed_kr_session() if any(kr_cal.values()) else None
 
         def _vol_at(ticker, dt) -> "float | None":
             if volume_df is None or ticker not in volume_df.columns:
@@ -310,6 +320,7 @@ def save_prices_to_db(df: pd.DataFrame, volume_df: Optional[pd.DataFrame] = None
         for dt, row in df.iterrows():
             d = dt.date() if hasattr(dt, "date") else dt
             day_is_session = is_us_trading_day(d)
+            kr_is_session  = is_kr_trading_day(d) if last_kr is not None else False
             for ticker in df.columns:
                 val = row.get(ticker)
                 if val is None or pd.isna(val):
@@ -317,6 +328,10 @@ def save_prices_to_db(df: pd.DataFrame, volume_df: Optional[pd.DataFrame] = None
                 if us_cal[ticker]:
                     # 비거래일이거나, 아직 종가 미확정인 당일 → 저장 금지
                     if not day_is_session or d > last_ses:
+                        skipped += 1
+                        continue
+                elif kr_cal[ticker]:
+                    if not kr_is_session or d > last_kr:
                         skipped += 1
                         continue
                 rows.append((str(ticker), d, float(val), _vol_at(ticker, dt)))
@@ -370,9 +385,16 @@ def get_stale_tickers(tickers: list[str], max_age_hours: int = _STALE_HOURS) -> 
             return list(tickers)
 
         from backend.services.market_calendar import (
-            last_completed_session, uses_us_session_calendar,
+            last_completed_session, last_completed_kr_session,
+            uses_us_session_calendar, uses_kr_session_calendar,
         )
         us_expected = last_completed_session()
+        # 한국 종목을 '어제' 기준으로 보면 안 된다. KRX 는 15:30 KST 에 닫히므로
+        # 그 시각을 지난 당일 종가가 이미 확정돼 있고, 반대로 연휴 중에는 어제가
+        # 거래일이 아니라 영원히 미달로 잡힌다.
+        kr_expected = last_completed_kr_session() if any(
+            uses_kr_session_calendar(str(t)) for t in tickers
+        ) else None
         # 24시간 자산은 어제까지 있으면 충분 (오늘 봉은 아직 진행 중)
         other_expected = date.today() - timedelta(days=1)
 
@@ -386,7 +408,12 @@ def get_stale_tickers(tickers: list[str], max_age_hours: int = _STALE_HOURS) -> 
             age_h = (now_utc - last_updated).total_seconds() / 3600
             if age_h >= max_age_hours:
                 continue
-            expected = us_expected if uses_us_session_calendar(ticker) else other_expected
+            if uses_us_session_calendar(ticker):
+                expected = us_expected
+            elif kr_expected is not None and uses_kr_session_calendar(ticker):
+                expected = kr_expected
+            else:
+                expected = other_expected
             if last_date is not None and last_date < expected:
                 continue   # 기록 시각은 최신이지만 데이터 날짜가 뒤처짐 → stale
             fresh.add(ticker)
@@ -396,15 +423,42 @@ def get_stale_tickers(tickers: list[str], max_age_hours: int = _STALE_HOURS) -> 
         return list(tickers)
 
 
+def _expected_sessions(since: date, until: date, calendar: str) -> int:
+    """[since, until] 구간의 예상 거래일 수.
+
+    거래일 수는 시장마다 다르다. 같은 220일이라도 미국은 약 150일, 한국은
+    약 146일이다 — 설·추석·광복절·개천절 등 한국 공휴일이 더 많다. 그래서
+    '150행 이상'처럼 상수로 판정하면 한국 종목은 **영원히 미달**로 남아,
+    이미 다 받아 둔 종목을 수집기가 매번 다시 내려받고 신호 스캔은 한 번도
+    갱신되지 않는다. 실제 캘린더에서 세어 이 문제를 없앤다.
+    """
+    from backend.services.market_calendar import is_us_trading_day, is_kr_trading_day
+
+    if calendar == "OTHER":
+        return (until - since).days + 1     # 암호화폐·환율은 매일 거래
+
+    check = is_kr_trading_day if calendar == "KR" else is_us_trading_day
+    n, d = 0, since
+    while d <= until:
+        if check(d):
+            n += 1
+        d += timedelta(days=1)
+    return n
+
+
 def get_volume_stale_tickers(
-    tickers: list[str], min_rows: int = 150, lookback_days: int = 220
+    tickers: list[str], min_rows: int | None = None, lookback_days: int = 220
 ) -> list[str]:
     """거래량 이력이 부족한 티커 목록.
 
-    - 최근 lookback_days 안의 non-null volume 행이 min_rows 미만  → stale
-    - 최신 volume 날짜가 마지막 확정 세션보다 뒤처짐               → stale
+    - 최근 lookback_days 안의 non-null volume 행이 기대 거래일의 90% 미만 → stale
+    - 최신 volume 날짜가 그 시장의 마지막 확정 세션보다 뒤처짐            → stale
     최초 배포 직후엔 전 종목이 여기 걸려 한 번만 백필된다. 이후엔 종가가 매일
     stale 이라 같은 다운로드에 거래량이 따라오므로 자연히 비게 된다.
+
+    min_rows 를 주면 캘린더 계산 대신 그 값을 쓴다(테스트용). 기본값 None 일
+    때는 시장별 거래일 수에서 자동으로 정한다 — 상수를 쓰면 거래일이 적은
+    시장이 영구히 stale 로 남는다.
     """
     if not is_available() or not tickers:
         return list(tickers)
@@ -422,17 +476,42 @@ def get_volume_stale_tickers(
                     (tickers, since),
                 )
                 rows = cur.fetchall()
-        from backend.services.market_calendar import last_completed_session
-        expected = last_completed_session()
+        from backend.services.market_calendar import (
+            last_completed_session, last_completed_kr_session,
+            uses_kr_session_calendar, uses_us_session_calendar,
+        )
         have: dict[str, tuple] = {r[0]: (r[1], r[2]) for r in rows}
+
+        def _calendar_of(ticker: str) -> str:
+            if uses_us_session_calendar(ticker):
+                return "US"
+            return "KR" if uses_kr_session_calendar(ticker) else "OTHER"
+
+        today = date.today()
+        # 캘린더별 기준값은 티커마다 다시 계산하면 비싸다 (거래일을 하루씩 센다).
+        # 이 목록에 실제로 등장하는 캘린더만 한 번씩 구해 재사용한다.
+        needed = {_calendar_of(t) for t in tickers}
+        floor: dict[str, int] = {
+            cal: int(_expected_sessions(since, today, cal) * 0.9) if min_rows is None else min_rows
+            for cal in needed
+        }
+        last_ok: dict[str, date] = {}
+        for cal in needed:
+            if cal == "US":
+                last_ok[cal] = last_completed_session()
+            elif cal == "KR":
+                last_ok[cal] = last_completed_kr_session()
+            else:
+                last_ok[cal] = today - timedelta(days=1)
 
         stale: list[str] = []
         for t in tickers:
             rec = have.get(t)
             if rec is None:
                 stale.append(t); continue
+            cal = _calendar_of(t)
             vcount, last_vol = rec
-            if (vcount or 0) < min_rows or last_vol is None or last_vol < expected:
+            if (vcount or 0) < floor[cal] or last_vol is None or last_vol < last_ok[cal]:
                 stale.append(t)
         return stale
     except Exception as e:

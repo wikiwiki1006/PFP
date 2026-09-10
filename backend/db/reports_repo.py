@@ -33,6 +33,7 @@ def save_report(
     user_id: str = "default",
     scope: str = "private",
     subject_key: Optional[str] = None,
+    market: str = "US",
 ) -> Optional[int]:
     """보고서를 DB에 저장. DB 미연결 시 경고 후 None 반환.
 
@@ -47,18 +48,20 @@ def save_report(
             with conn.cursor() as cur:
                 cur.execute(
                     """INSERT INTO reports
-                           (user_id, report_type, filename, content, metadata, scope, subject_key)
-                       VALUES(%s,%s,%s,%s,%s,%s,%s)
+                           (user_id, report_type, filename, content, metadata, scope,
+                            subject_key, market)
+                       VALUES(%s,%s,%s,%s,%s,%s,%s,%s)
                        ON CONFLICT(filename) DO UPDATE
                        SET content=EXCLUDED.content,
                            metadata=EXCLUDED.metadata,
                            scope=EXCLUDED.scope,
                            subject_key=EXCLUDED.subject_key,
+                           market=EXCLUDED.market,
                            created_at=NOW()
                        RETURNING id""",
                     (user_id, report_type, filename, content,
                      json.dumps(metadata or {}), scope,
-                     subject_key.upper() if subject_key else None),
+                     subject_key.upper() if subject_key else None, market),
                 )
                 row = cur.fetchone()
         return row[0] if row else None
@@ -72,6 +75,7 @@ def find_fresh_shared_report(
     subject_key: str,
     model_tier: str = "basic",
     max_age_hours: Optional[int] = None,
+    market: str = "US",
 ) -> Optional[dict]:
     """유효시간 내 공용 리포트 조회. 없으면 None.
 
@@ -96,12 +100,13 @@ def find_fresh_shared_report(
                     """SELECT filename, content, metadata, created_at, user_id,
                               EXTRACT(EPOCH FROM (NOW() - created_at)) / 3600.0
                        FROM reports
-                       WHERE scope='shared' AND report_type=%s AND subject_key=%s
+                       WHERE scope='shared' AND market=%s
+                         AND report_type=%s AND subject_key=%s
                          AND COALESCE(metadata->>'model_tier', 'basic') = %s
                          AND created_at >= NOW() - (%s * INTERVAL '1 hour')
                        ORDER BY created_at DESC
                        LIMIT 1""",
-                    (report_type, subject_key.upper(), tier, ttl),
+                    (market, report_type, subject_key.upper(), tier, ttl),
                 )
                 r = cur.fetchone()
         if not r:
@@ -123,6 +128,7 @@ def list_reports(
     user_id: str,
     report_type: Optional[str] = None,
     limit: int = 30,
+    market: str = "US",
 ) -> list[dict]:
     """DB에서 **본인이 만든** 레포트 목록 조회.
 
@@ -142,9 +148,9 @@ def list_reports(
     try:
         sql = (
             "SELECT filename, report_type, metadata, created_at, scope, user_id "
-            "FROM reports WHERE user_id=%s"
+            "FROM reports WHERE user_id=%s AND market=%s"
         )
-        params: list = [user_id]
+        params: list = [user_id, market]
         if report_type:
             sql += " AND report_type=%s"
             params.append(report_type)

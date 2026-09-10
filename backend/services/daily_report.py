@@ -20,12 +20,21 @@ def _is_market_open() -> bool:
     return _time(13, 30) <= now.time() < _time(20, 0)
 
 
-def _fetch_price_data(holdings: dict) -> dict:
+# 시장별 벤치마크. 한국 브리핑에 SPY·VIX 를 붙이면 "내 종목이 S&P 대비
+# 언더퍼폼" 같은, 한국 투자자에게 의미가 옅은 서술이 나온다.
+_BENCHMARKS = {
+    "US": [("SPY", "SPY"), ("VIX", "^VIX"), ("TNX", "^TNX")],
+    "KR": [("KOSPI", "^KS11"), ("KOSDAQ", "^KQ11"), ("USDKRW", "USDKRW=X")],
+}
+
+
+def _fetch_price_data(holdings: dict, market: str = "US") -> dict:
     tickers = [t for t in holdings if t != "CASH"]
     if not tickers:
         return {}
 
-    fetch_list = list(set(tickers + ["SPY", "^VIX", "^TNX"]))
+    bench = _BENCHMARKS.get(market, _BENCHMARKS["US"])
+    fetch_list = list(set(tickers + [sym for _, sym in bench]))
     df = yf.download(fetch_list, period="5d", auto_adjust=True, progress=False)
     if df.empty:
         return {}
@@ -62,7 +71,7 @@ def _fetch_price_data(holdings: dict) -> dict:
             "sector":    holdings[t].get("sector", "N/A"),
         }
 
-    for meta_key, col in [("SPY", "SPY"), ("VIX", "^VIX"), ("TNX", "^TNX")]:
+    for meta_key, col in bench:
         if col in close.columns:
             s = close[col].dropna()
             if len(s) >= 2 + shift:
@@ -97,6 +106,28 @@ def _fetch_yf_news(ticker: str, max_items: int = 5) -> list[dict]:
         return []
 
 
+def _collect_korean_news(tickers: list[str], names: dict) -> str:
+    """한국 종목 뉴스를 국내 경제지에서 모은다.
+
+    yfinance 의 news 는 한국 종목에서 거의 비어 있고, 있어도 영문 통신사
+    기사다. 그 재료로는 국내 수급·정책 맥락이 나오지 않는다.
+    """
+    if not tickers:
+        return ""
+    from backend.services.news_sources import focus_block
+    today = datetime.now().strftime("%Y-%m-%d")
+    listed = ", ".join(f"{names.get(t, t)}({t})" for t in tickers[:12])
+    prompt = f"""Today: {today}
+Korean stocks in this portfolio: {listed}
+
+Collect **in English**, concise bullets, last 48 hours:
+[Per-stock news] 1-2 items each for the most-moved names (title, source, date, one line)
+[KOSPI/KOSDAQ session] foreign & institutional flows, sector rotation
+[Macro] KRW/USD, rates, policy or regulation affecting these names
+{focus_block("KR")}"""
+    return _perplexity_search(prompt, market="KR")
+
+
 def _collect_news(price_data: dict) -> dict:
     stock_keys = sorted(
         [k for k in price_data if not k.startswith("__")],
@@ -106,7 +137,12 @@ def _collect_news(price_data: dict) -> dict:
     return {t: _fetch_yf_news(t, max_items=5) for t in stock_keys}
 
 
-def _build_prompt(holdings: dict, price_data: dict, news: dict) -> str:
+def _build_prompt(holdings: dict, price_data: dict, news: dict,
+                  market: str = "US") -> str:
+    is_kr = market == "KR"
+    cur   = "₩" if is_kr else "$"
+    # 원화는 소수점이 없다(호가 단위 1원).
+    dec   = 0 if is_kr else 2
     stock_keys = sorted(
         [k for k in price_data if not k.startswith("__")],
         key=lambda t: price_data[t]["chg_pct"],
@@ -117,19 +153,32 @@ def _build_prompt(holdings: dict, price_data: dict, news: dict) -> str:
     cash_val   = holdings.get("CASH", {}).get("q", 0)
 
     snap_lines = [
-        f"  {t}: 종가 ${price_data[t]['close']:,.2f}  전일대비 {price_data[t]['chg_pct']:+.2f}%  "
-        f"1일 P&L ${price_data[t]['day_pnl']:+,.0f}  섹터 {price_data[t]['sector']}"
+        f"  {t}: 종가 {cur}{price_data[t]['close']:,.{dec}f}  전일대비 {price_data[t]['chg_pct']:+.2f}%  "
+        f"1일 P&L {cur}{price_data[t]['day_pnl']:+,.0f}  섹터 {price_data[t]['sector']}"
         for t in stock_keys
     ]
 
-    spy_info   = price_data.get("__SPY", {})
-    vix_info   = price_data.get("__VIX", {})
-    tnx_info   = price_data.get("__TNX", {})
-    spy_line   = f"SPY 전일 변동: {spy_info.get('chg_pct', 0):+.2f}%" if spy_info else "SPY 데이터 없음"
-    macro_line = (
-        f"VIX: {vix_info.get('close','?')} ({vix_info.get('chg_pct',0):+.2f}%)  "
-        f"10Y TNX: {tnx_info.get('close','?')}% ({tnx_info.get('chg_pct',0):+.2f}%)"
-    ) if vix_info else "매크로 데이터 없음"
+    if is_kr:
+        ks = price_data.get("__KOSPI", {})
+        kq = price_data.get("__KOSDAQ", {})
+        fx = price_data.get("__USDKRW", {})
+        bench_name = "KOSPI"
+        spy_line = (f"KOSPI 전일 변동: {ks.get('chg_pct', 0):+.2f}%"
+                    if ks else "KOSPI 데이터 없음")
+        macro_line = (
+            f"KOSDAQ: {kq.get('close','?')} ({kq.get('chg_pct',0):+.2f}%)  "
+            f"원/달러: {fx.get('close','?')} ({fx.get('chg_pct',0):+.2f}%)"
+        ) if kq or fx else "매크로 데이터 없음"
+    else:
+        spy_info   = price_data.get("__SPY", {})
+        vix_info   = price_data.get("__VIX", {})
+        tnx_info   = price_data.get("__TNX", {})
+        bench_name = "S&P 500"
+        spy_line   = f"SPY 전일 변동: {spy_info.get('chg_pct', 0):+.2f}%" if spy_info else "SPY 데이터 없음"
+        macro_line = (
+            f"VIX: {vix_info.get('close','?')} ({vix_info.get('chg_pct',0):+.2f}%)  "
+            f"10Y TNX: {tnx_info.get('close','?')}% ({tnx_info.get('chg_pct',0):+.2f}%)"
+        ) if vix_info else "매크로 데이터 없음"
 
     news_text = ""
     for t in stock_keys:
@@ -142,12 +191,23 @@ def _build_prompt(holdings: dict, price_data: dict, news: dict) -> str:
     big_movers = [t for t in stock_keys if abs(price_data[t]["chg_pct"]) >= 3.0]
     big_movers_str = ", ".join(big_movers) if big_movers else "없음 (전 종목 3% 미만 변동)"
 
+    tz_label = "한국시간" if is_kr else "미국 동부시간"
+    style_line = (
+        "위 데이터와 추가 웹서치를 결합하여, 아래 형식을 엄격히 따른 데일리 브리프를 한국어로 작성하라.\n"
+        "**한국 투자자 관점**으로 쓴다. 코스피·코스닥 수급, 원/달러 환율, 외국인·기관 매매,\n"
+        "국내 업황과 정책을 축으로 해석하고, 해외 이슈는 국내 시장에 전이되는 경로로만 다뤄라.\n"
+        "근거는 국내 경제지(한국경제·매일경제·연합인포맥스·이데일리·조선비즈 등)를 우선한다.\n"
+        "금액은 원화(조/억)로 쓰고 달러로 환산하지 마라."
+        if is_kr else
+        "위 데이터와 추가 웹서치를 결합하여, 아래 형식을 엄격히 따른 월가 인텔리전스 스타일 데일리 브리프를 한국어로 작성하라."
+    )
+
     return f"""아래는 {date_str} 기준 포트폴리오 데이터와 관련 뉴스입니다.
 
 === 포트폴리오 스냅샷 ===
 {chr(10).join(snap_lines)}
-전체 주식 평가액: ${total_val:,.0f}  현금: ${cash_val:,.0f}
-전일 총 P&L: ${total_pnl:+,.0f}
+전체 주식 평가액: {cur}{total_val:,.0f}  현금: {cur}{cash_val:,.0f}
+전일 총 P&L: {cur}{total_pnl:+,.0f}
 {spy_line}
 매크로 지표: {macro_line}
 절대 변동 3% 이상 종목: {big_movers_str}
@@ -156,17 +216,17 @@ def _build_prompt(holdings: dict, price_data: dict, news: dict) -> str:
 {news_text if news_text.strip() else "수집된 뉴스 없음 — 웹서치로 보완해 주세요."}
 
 === 지시사항 ===
-위 데이터와 추가 웹서치를 결합하여, 아래 형식을 엄격히 따른 월가 인텔리전스 스타일 데일리 브리프를 한국어로 작성하라.
+{style_line}
 미사여구 없이 핵심만. 섹션 순서·제목·구분선(---)을 정확히 유지할 것.
 절대 변동 3% 이상 종목은 반드시 섹션 2에 포함하고, 원인 분석은 뉴스 + 금융공학적 시각으로 작성하라.
 
 === 출력 형식 ===
-# 📊 ALPHA TERMINAL DAILY BRIEF ({date_str} 정산(미국 동부시간))
+# 📊 ALPHA TERMINAL DAILY BRIEF ({date_str} 정산({tz_label}))
 
 ## 1. 포트폴리오 전일 요약 (Portfolio Snapshot)
 * **최고 상승 종목:** [Ticker] ([+X.XX%])
 * **최대 하락 종목:** [Ticker] ([-X.XX%])
-* **특이 사항:** 전일 포트폴리오 전체 자산은 벤치마크(S&P 500) 대비 [아웃퍼폼/언더퍼폼] 했습니다. [구체적 수치 포함 1~2문장]
+* **특이 사항:** 전일 포트폴리오 전체 자산은 벤치마크({bench_name}) 대비 [아웃퍼폼/언더퍼폼] 했습니다. [구체적 수치 포함 1~2문장]
 
 ---
 
@@ -190,12 +250,13 @@ def _build_prompt(holdings: dict, price_data: dict, news: dict) -> str:
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "")
 
 
-def _perplexity_search(query: str) -> str:
+def _perplexity_search(query: str, market: str = "US") -> str:
     """Perplexity sonar로 실시간 웹 검색. API 키 없거나 오류 시 빈 문자열 반환."""
     if not PERPLEXITY_API_KEY:
         return ""
     try:
         import requests as _req
+        from backend.services.news_sources import perplexity_extra
         resp = _req.post(
             "https://api.perplexity.ai/chat/completions",
             headers={"Authorization": f"Bearer {PERPLEXITY_API_KEY}", "Content-Type": "application/json"},
@@ -204,6 +265,7 @@ def _perplexity_search(query: str) -> str:
                 "messages": [{"role": "user", "content": query}],
                 "max_tokens": 1500,
                 "temperature": 0.0,
+                **perplexity_extra(market),
             },
             timeout=30,
         )
@@ -216,6 +278,7 @@ def _perplexity_search(query: str) -> str:
 def generate_daily_report(
     holdings: dict,
     log: Callable[[str], None] | None = None,
+    market: str = "US",
 ) -> tuple[str, dict]:
     """
     포트폴리오 데일리 브리프 생성.
@@ -225,22 +288,33 @@ def generate_daily_report(
     _log = log or (lambda m: print(f"  {m}"))
 
     _log("1/3 가격 데이터 수집 중...")
-    price_data = _fetch_price_data(holdings)
+    price_data = _fetch_price_data(holdings, market)
     if not price_data:
         raise RuntimeError("가격 데이터를 가져오지 못했습니다.")
 
     _log("2/3  뉴스 헤드라인 수집 중...")
     news = _collect_news(price_data)
+    # 한국 종목은 yfinance 뉴스가 사실상 비어 있어 국내 매체로 따로 채운다.
+    kr_context = ""
+    if market == "KR":
+        _stocks = [k for k in price_data if not k.startswith("__")]
+        try:
+            from backend.services.markets import name_map_for
+            _names = name_map_for(_stocks, "KR")
+        except Exception:
+            _names = {}
+        kr_context = _collect_korean_news(_stocks, _names)
 
     _log("3/3  AI 브리프 생성 중 (약 30~60초)...")
     if not anthropic_key:
         raise RuntimeError("ANTHROPIC_API_KEY가 설정되지 않았습니다.")
 
-    report = _generate_with_claude(holdings, price_data, news, anthropic_key, _log)
+    report = _generate_with_claude(holdings, price_data, news, anthropic_key, _log, market)
     return report, price_data
 
 
-def _generate_with_claude(holdings, price_data, news, api_key, log) -> str:
+def _generate_with_claude(holdings, price_data, news, api_key, log,
+                          market: str = "US", extra_context: str = "") -> str:
     from anthropic import Anthropic
     client = Anthropic(api_key=api_key)
 
@@ -248,11 +322,22 @@ def _generate_with_claude(holdings, price_data, news, api_key, log) -> str:
     web_ctx = ""
     if big_movers:
         log(f"Perplexity 웹서치: {', '.join(big_movers)} 최신 뉴스 수집 중...")
-        query = (
-            f"다음 주식들의 {price_data.get('__date', '전일')} 주가 급등락 원인: "
-            f"{', '.join(big_movers)}. 각 종목 핵심 뉴스 헤드라인과 원인 2~3줄 요약."
-        )
-        web_ctx = _perplexity_search(query)
+        if market == "KR":
+            # 종목 코드(005930.KS)로 물으면 국내 기사가 잘 안 걸린다. 회사명을 쓴다.
+            from backend.services.markets import name_map_for
+            _nm = name_map_for(big_movers, "KR")
+            subjects = ", ".join(_nm.get(t, t) for t in big_movers)
+            query = (
+                f"{price_data.get('__date', '전일')} 한국 증시에서 다음 종목의 주가 급등락 원인: "
+                f"{subjects}. 한국 경제지 기사를 근거로 종목별 핵심 헤드라인과 원인을 "
+                f"2~3줄로 요약. 국내 수급·업황·공시 중심으로."
+            )
+        else:
+            query = (
+                f"다음 주식들의 {price_data.get('__date', '전일')} 주가 급등락 원인: "
+                f"{', '.join(big_movers)}. 각 종목 핵심 뉴스 헤드라인과 원인 2~3줄 요약."
+            )
+        web_ctx = _perplexity_search(query, market)
 
         if not web_ctx:
             log("Perplexity 미설정 — Claude 웹서치로 대체 중...")
@@ -267,16 +352,25 @@ def _generate_with_claude(holdings, price_data, news, api_key, log) -> str:
             except Exception as e:
                 log(f"웹서치 오류 (계속 진행): {e}")
 
-    base_prompt = _build_prompt(holdings, price_data, news)
-    full_prompt = base_prompt + (f"\n\n=== 웹서치 추가 컨텍스트 ===\n{web_ctx}" if web_ctx else "")
+    base_prompt = _build_prompt(holdings, price_data, news, market)
+    full_prompt = base_prompt
+    if extra_context:
+        full_prompt += f"\n\n=== 국내 매체 수집 ===\n{extra_context}"
+    if web_ctx:
+        full_prompt += f"\n\n=== 웹서치 추가 컨텍스트 ===\n{web_ctx}"
 
     resp = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=4000,
         system=(
-            "당신은 월가 헤지펀드의 수석 포트폴리오 애널리스트입니다. "
-            "지정된 마크다운 형식을 정확히 따르고, 미사여구 없이 핵심 수치와 원인만 기술하세요. "
-            "최대 2페이지 분량(약 800~1200 토큰)으로 간결하게 작성하세요."
+            ("당신은 한국 증권사 리서치센터의 수석 포트폴리오 애널리스트입니다. "
+             "코스피·코스닥 수급, 원/달러 환율, 외국인·기관 매매, 국내 업황과 정책을 "
+             "축으로 해석합니다. 해외 이슈는 국내 시장에 전이되는 경로로만 다룹니다. "
+             "금액은 원화(조/억)로 씁니다. "
+             if market == "KR" else
+             "당신은 월가 헤지펀드의 수석 포트폴리오 애널리스트입니다. ")
+            + "지정된 마크다운 형식을 정확히 따르고, 미사여구 없이 핵심 수치와 원인만 기술하세요. "
+              "최대 2페이지 분량(약 800~1200 토큰)으로 간결하게 작성하세요."
         ),
         messages=[{"role": "user", "content": full_prompt}],
     )

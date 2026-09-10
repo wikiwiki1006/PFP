@@ -17,6 +17,8 @@ from typing import Optional
 from backend.services.auth import (ai_feature_user, current_user,
                                    enforce_deep_limit, resolve_model_tier)
 from fastapi import Depends, APIRouter, Header, HTTPException
+
+from backend.services.markets import market_param
 from pydantic import BaseModel
 
 from backend.models.macro import MacroAnalysisRequest
@@ -60,12 +62,12 @@ _DB_FILE  = _DATA_DIR / "holdings.json"
 _LOG_FILE = _DATA_DIR / "trade_log.json"
 
 
-def _load_holdings(uid: str) -> dict:
+def _load_holdings(uid: str, market: str = "US") -> dict:
     """호출자 본인의 보유 종목. uid 는 검증된 토큰에서만 나온다."""
     from backend.db.portfolio_repo import get_holdings as _db_get_holdings
     from backend.db import is_available as _db_ok
     if _db_ok():
-        holdings = _db_get_holdings(uid)
+        holdings = _db_get_holdings(uid, market=market)
         if holdings:
             return holdings
     if not _DB_FILE.exists():
@@ -88,6 +90,7 @@ def _load_trade_log() -> list:
 def analyze_macro(
     req: MacroAnalysisRequest,
     _auth: dict = Depends(ai_feature_user),
+    market: str = Depends(market_param),
 ):
     """
     9-에이전트 거시경제 이벤트 분석 (백그라운드 잡).
@@ -121,7 +124,7 @@ def analyze_macro(
 
     def _run() -> None:
         try:
-            portfolio = req_port or _load_holdings(uid)
+            portfolio = req_port or _load_holdings(uid, market=market)
             agent_results = run_macro_agents(
                 event=ev,
                 portfolio=portfolio,
@@ -129,6 +132,7 @@ def analyze_macro(
                 mode=req_mode,
                 provider=req_provider,
                 should_cancel=should_cancel,
+                market=market,
             )
 
             verdict_cards = None
@@ -176,7 +180,7 @@ def analyze_macro(
 
 
 @router.get("/job/{job_id}")
-def get_job_status(job_id: str, _auth: dict = Depends(current_user)):
+def get_job_status(job_id: str, _auth: dict = Depends(current_user), market: str = Depends(market_param)):
     """분석 잡 상태 조회 (본인 잡만). status: pending | done | error | cancelled"""
     job = _job_get(job_id, owner=_auth["uid"])
     if job is None:
@@ -185,7 +189,7 @@ def get_job_status(job_id: str, _auth: dict = Depends(current_user)):
 
 
 @router.delete("/job/{job_id}")
-def cancel_job(job_id: str, _auth: dict = Depends(current_user)):
+def cancel_job(job_id: str, _auth: dict = Depends(current_user), market: str = Depends(market_param)):
     """실행 중인 분석 잡 취소 (본인 잡만).
 
     _store.cancel() 이 상태 변경과 취소 신호를 함께 처리한다 — 신호가 없으면
@@ -198,7 +202,7 @@ def cancel_job(job_id: str, _auth: dict = Depends(current_user)):
 
 
 @router.get("/reports")
-def list_macro_reports(_auth: dict = Depends(current_user)):
+def list_macro_reports(_auth: dict = Depends(current_user), market: str = Depends(market_param)):
     """저장된 시나리오 레포트 목록 반환."""
     uid = _auth["uid"]
     rows = list_reports(uid, report_type="macro_scenario", limit=30)
@@ -214,7 +218,7 @@ def list_macro_reports(_auth: dict = Depends(current_user)):
 
 
 @router.get("/reports/{filename}")
-def get_macro_report(filename: str, _auth: dict = Depends(current_user)):
+def get_macro_report(filename: str, _auth: dict = Depends(current_user), market: str = Depends(market_param)):
     """특정 시나리오 레포트 내용 반환 (본인 또는 공용 리포트만)."""
     if not filename.startswith("macro_"):
         raise HTTPException(status_code=400, detail="잘못된 파일명")
@@ -248,6 +252,7 @@ class LiveMetrics(BaseModel):
 def analyst_feedback_auto(
     live: LiveMetrics = LiveMetrics(),
     _auth: dict = Depends(ai_feature_user),
+    market: str = Depends(market_param),
 ):
     """포트폴리오 섹터 기반 AI 피드백 생성.
 
@@ -259,11 +264,20 @@ def analyst_feedback_auto(
     uid = _auth["uid"]
 
     from backend.db.reports_repo import get_analysis, save_analysis
-    from backend.services.market_calendar import is_us_market_open, next_session_open
+    from backend.services.market_calendar import (
+        is_us_market_open, is_kr_market_open, next_session_open,
+        last_completed_kr_session,
+    )
 
-    market_open = is_us_market_open()
+    # 장중 판단은 그 시장 기준이어야 한다. 미국 기준으로 고정하면 한국장이
+    # 열려 있는 동안 '마감'으로 보고 낡은 캐시를 계속 돌려준다.
+    market_open = is_kr_market_open() if market == "KR" else is_us_market_open()
     # 장 마감 후 저녁과 다음 날 아침이 같은 키를 갖도록 '다음 개장일'로 묶는다.
-    cache_key = f"until_{next_session_open().isoformat()}"
+    # 캐시 키에도 시장을 넣는다 — 안 넣으면 미국 피드백이 한국 화면에 나온다.
+    if market == "KR":
+        cache_key = f"KR_after_{last_completed_kr_session().isoformat()}"
+    else:
+        cache_key = f"until_{next_session_open().isoformat()}"
 
     if not market_open:
         cached = get_analysis("analyst_feedback", cache_key, user_id=uid)
@@ -276,10 +290,10 @@ def analyst_feedback_auto(
     from backend.db import is_available as _db_ok
 
     if _db_ok():
-        holdings  = _db_get_holdings(uid)
-        trade_log = _db_get_trade_log(uid)
+        holdings  = _db_get_holdings(uid, market=market)
+        trade_log = _db_get_trade_log(uid, market=market)
     else:
-        holdings  = _load_holdings(uid)
+        holdings  = _load_holdings(uid, market=market)
         trade_log = _load_trade_log()
 
     if not holdings:
@@ -288,14 +302,14 @@ def analyst_feedback_auto(
     tickers  = [t for t in holdings if t != "CASH"]
     close_df = get_close_df(tickers, period="5d", ttl=60)
 
-    equity_curve = build_equity_curve(holdings, trade_log, close_df)
+    equity_curve = build_equity_curve(holdings, trade_log, close_df, market=market)
     # raw_df(fill=False): 일변동률을 '마지막 두 실제 관측치'로 계산하도록 전달.
     # 넘기지 않으면 에쿼티 커브 위치 차분으로 폴백해 유령 행에서 0%가 나온다.
     raw_df = (
         get_close_df(tickers, period="1mo", ttl=1800, include_market=False, fill=False)
         if tickers else None
     )
-    metrics = calculate_metrics(holdings, close_df, equity_curve, raw_df=raw_df)
+    metrics = calculate_metrics(holdings, close_df, equity_curve, raw_df=raw_df, market=market)
 
     # 포트폴리오 보유 종목 섹터 비중 계산
     sector_weights: dict[str, float] = {}
@@ -312,9 +326,11 @@ def analyst_feedback_auto(
             sector_weights[sec] = sector_weights.get(sec, 0) + cost / total_cost
 
     # 보유 종목 섹터별 ETF 1일 변동률 조회
-    sector_chgs = get_sector_changes()
-    _etf_to_label = {etf: label for label, etf in GICS_SECTOR_ETFS}
-    _label_to_etf = {label: etf for label, etf in GICS_SECTOR_ETFS}
+    sector_chgs = get_sector_changes(market)
+    from backend.services.market_data import sector_etfs_for
+    _sector_list = sector_etfs_for(market)
+    _etf_to_label = {etf: label for label, etf in _sector_list}
+    _label_to_etf = {label: etf for label, etf in _sector_list}
 
     # 보유 섹터를 비중 내림차순 정렬
     held_sectors = sorted(sector_weights.items(), key=lambda x: x[1], reverse=True)
@@ -324,7 +340,7 @@ def analyst_feedback_auto(
     for sec, wt in held_sectors[:4]:
         # GICS label → ETF lookup (대소문자 무시)
         etf_chg = None
-        for label, etf in GICS_SECTOR_ETFS:
+        for label, etf in _sector_list:
             if label.lower() in sec.lower() or sec.lower() in label.lower():
                 etf_chg = sector_chgs.get(etf)
                 break
@@ -335,7 +351,10 @@ def analyst_feedback_auto(
 
     text = get_ai_analyst_feedback(
         vix=live.vix if live.vix is not None else metrics.get("vix", 20.0),
-        portfolio_beta=live.portfolio_beta if live.portfolio_beta is not None else metrics.get("portfolio_beta", 1.0),
+        # metrics 의 베타는 5일치 프레임에서 나와 신뢰할 수 없다(관측치 부족).
+        # 클라이언트가 보낸 값이 없으면 None 을 넘겨 '산출 불가'로 처리한다.
+        portfolio_beta=(live.portfolio_beta if live.portfolio_beta is not None
+                        else metrics.get("portfolio_beta")),
         today_chg_pct=live.today_chg_pct if live.today_chg_pct is not None else metrics.get("today_change_pct", 0.0),
         sector_summary=portfolio_sector_summary,
         is_portfolio_sectors=True,
@@ -353,9 +372,10 @@ def analyst_feedback_auto(
 def daily_brief(
     portfolio: Optional[dict] = None,
     _auth: dict = Depends(ai_feature_user),
+    market: str = Depends(market_param),
 ):
     """오늘의 포트폴리오 브리프 마크다운 생성 (Claude Sonnet)."""
-    holdings  = portfolio or _load_holdings(_auth["uid"])
+    holdings  = portfolio or _load_holdings(_auth["uid"], market=market)
     trade_log = _load_trade_log()
 
     if not holdings:

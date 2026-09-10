@@ -11,6 +11,7 @@ from typing import Optional
 
 import pandas as pd
 from backend.services.auth import current_user
+from backend.services.markets import market_param
 from fastapi import Depends, APIRouter, HTTPException, Header
 from pydantic import BaseModel
 
@@ -110,8 +111,21 @@ def _period_covering_first_trade(trade_log: list, minimum: str = "2y") -> str:
 # ── Holdings ───────────────────────────────────────────────────────────────────
 
 @router.get("/holdings")
-def get_holdings_endpoint(_auth: dict = Depends(current_user)):
-    return get_holdings(_auth["uid"])
+def get_holdings_endpoint(_auth: dict = Depends(current_user), market: str = Depends(market_param)):
+    """보유 종목. 각 항목에 화면용 이름(name)을 함께 담는다.
+
+    한국 종목은 '034020.KS' 처럼 숫자 코드라 목록에서 어느 회사인지 알 수 없다.
+    이름을 프론트가 따로 조회하게 하면 종목 수만큼 왕복이 생기므로 여기서 채운다.
+    """
+    from backend.services.markets import name_map_for
+
+    holdings = get_holdings(_auth["uid"], market=market)
+    tickers = [t for t in holdings if t != "CASH"]
+    names = name_map_for(tickers, market) if tickers else {}
+    for t, row in holdings.items():
+        if t != "CASH" and isinstance(row, dict):
+            row["name"] = names.get(t, t)
+    return holdings
 
 
 @router.put("/holdings/{ticker}")
@@ -119,10 +133,11 @@ def update_holding(
     ticker: str,
     body: UpdateHoldingRequest,
     _auth: dict = Depends(current_user),
+    market: str = Depends(market_param),
 ):
     uid = _auth["uid"]
     ticker = ticker.upper()
-    holdings = get_holdings(uid)
+    holdings = get_holdings(uid, market=market)
     if ticker not in holdings:
         raise HTTPException(status_code=404, detail=f"{ticker} 미보유")
 
@@ -140,10 +155,10 @@ def update_holding(
                 "q":      abs(delta),
                 "price":  1.0,
                 "memo":   None,
-            }, uid)
+            }, uid, market=market)
 
     sector = body.sector or holdings[ticker].get("sector", "Other")
-    save_holding(ticker, body.q, body.avg, sector, uid)
+    save_holding(ticker, body.q, body.avg, sector, uid, market=market)
     return {"ok": True, "ticker": ticker}
 
 
@@ -152,10 +167,11 @@ def add_holding(
     ticker: str,
     item: HoldingItem,
     _auth: dict = Depends(current_user),
+    market: str = Depends(market_param),
 ):
     uid = _auth["uid"]
     ticker = ticker.upper()
-    holdings = get_holdings(uid)
+    holdings = get_holdings(uid, market=market)
     if ticker in holdings:
         raise HTTPException(status_code=409, detail=f"{ticker} 이미 존재. PUT으로 수정하세요.")
 
@@ -169,9 +185,9 @@ def add_holding(
             "q":      float(item.q),
             "price":  1.0,
             "memo":   None,
-        }, uid)
+        }, uid, market=market)
 
-    save_holding(ticker, item.q, item.avg, item.sector or "Other", uid)
+    save_holding(ticker, item.q, item.avg, item.sector or "Other", uid, market=market)
     return {"ok": True, "ticker": ticker}
 
 
@@ -179,14 +195,15 @@ def add_holding(
 def delete_holding_endpoint(
     ticker: str,
     _auth: dict = Depends(current_user),
+    market: str = Depends(market_param),
 ):
     uid = _auth["uid"]
     with user_write_lock(uid):
-        return _delete_holding_locked(ticker.upper(), uid)
+        return _delete_holding_locked(ticker.upper(), uid, market)
 
 
-def _delete_holding_locked(ticker: str, uid: str):
-    holdings = get_holdings(uid)
+def _delete_holding_locked(ticker: str, uid: str, market: str):
+    holdings = get_holdings(uid, market=market)
     if ticker not in holdings:
         raise HTTPException(status_code=404, detail=f"{ticker} 미보유")
 
@@ -194,16 +211,16 @@ def _delete_holding_locked(ticker: str, uid: str):
     # (매수로 차감된 현금이 그대로 사라져 총자산이 줄고, 에쿼티 곡선에서도
     #  해당 종목 구간이 통째로 없어진다.) 삭제 전에 순 현금 델타를 되돌린다.
     net_delta = 0.0
-    for tr in get_trade_log(uid):
+    for tr in get_trade_log(uid, market=market):
         if str(tr.get("ticker", "")).upper() != ticker:
             continue
         net_delta += _cash_delta(
             tr.get("type", ""), float(tr.get("q", 0)), float(tr.get("price") or 0)
         )
 
-    delete_holding(ticker, uid, with_trades=True)
+    delete_holding(ticker, uid, with_trades=True, market=market)
     if abs(net_delta) >= 0.001:
-        _adjust_cash(uid, -net_delta)
+        _adjust_cash(uid, -net_delta, market=market)
     return {"ok": True, "ticker": ticker, "cash_restored": round(-net_delta, 2)}
 
 
@@ -212,24 +229,25 @@ def _delete_holding_locked(ticker: str, uid: str):
 # ── Trade Log ──────────────────────────────────────────────────────────────────
 
 @router.get("/trades")
-def get_trades(_auth: dict = Depends(current_user)):
-    return get_trade_log(_auth["uid"])
+def get_trades(_auth: dict = Depends(current_user), market: str = Depends(market_param)):
+    return get_trade_log(_auth["uid"], market=market)
 
 
 @router.post("/trades")
 def add_trade_endpoint(
     body: AddTradeRequest,
     _auth: dict = Depends(current_user),
+    market: str = Depends(market_param),
 ):
     uid = _auth["uid"]
     # 사용자별 쓰기 직렬화 — 동시 매매의 read-modify-write 경쟁 방지
     with user_write_lock(uid):
-        return _add_trade_locked(body, uid)
+        return _add_trade_locked(body, uid, market)
 
 
-def _add_trade_locked(body: AddTradeRequest, uid: str):
+def _add_trade_locked(body: AddTradeRequest, uid: str, market: str):
     import threading
-    holdings = get_holdings(uid)
+    holdings = get_holdings(uid, market=market)
     ticker = body.ticker.upper()
 
     _type_map = {"BUY": "ADD", "SELL": "SOLD"}
@@ -279,14 +297,14 @@ def _add_trade_locked(body: AddTradeRequest, uid: str):
         )
 
     if ticker not in holdings and trade_type == "ADD":
-        save_holding(ticker, 0.0, float(body.price or 0), "Other", uid)
-        holdings = get_holdings(uid)
+        save_holding(ticker, 0.0, float(body.price or 0), "Other", uid, market=market)
+        holdings = get_holdings(uid, market=market)
         # 백그라운드에서 섹터 자동 조회 후 업데이트
         def _bg_sector():
             sector = _fetch_sector(ticker)
             if sector and sector != "Other":
                 # 섹터만 UPDATE — 조회를 기다리는 사이 체결된 매매를 되돌리지 않는다
-                update_holding_sector(ticker, sector, uid)
+                update_holding_sector(ticker, sector, uid, market=market)
         threading.Thread(target=_bg_sector, daemon=True).start()
 
     trade_date = (body.date or "").strip() or datetime.now().strftime("%Y-%m-%d")
@@ -298,7 +316,7 @@ def _add_trade_locked(body: AddTradeRequest, uid: str):
         "price":  body.price,
         "memo":   body.memo,
     }
-    add_trade(record, uid)
+    add_trade(record, uid, market=market)
 
     # holdings 자동 업데이트
     if ticker in holdings:
@@ -309,19 +327,28 @@ def _add_trade_locked(body: AddTradeRequest, uid: str):
             prev_q, prev_avg = cur["q"], cur.get("avg", price)
             new_q   = prev_q + q
             new_avg = round((prev_avg * prev_q + price * q) / new_q, 4) if new_q > 0 else price
-            save_holding(ticker, round(new_q, 6), new_avg, cur.get("sector", "Other"), uid)
+            save_holding(ticker, round(new_q, 6), new_avg, cur.get("sector", "Other"), uid,
+                         market=market)
         elif trade_type == "SOLD":
             new_qty = max(0.0, round(cur["q"] - q, 6))
             if new_qty == 0.0:
-                delete_holding(ticker, uid)
+                delete_holding(ticker, uid, market=market)
             else:
-                save_holding(ticker, new_qty, cur["avg"], cur.get("sector", "Other"), uid)
+                save_holding(ticker, new_qty, cur["avg"], cur.get("sector", "Other"), uid,
+                             market=market)
         elif trade_type == "UPDATE":
-            save_holding(ticker, q, cur["avg"], cur.get("sector", "Other"), uid)
+            save_holding(ticker, q, cur["avg"], cur.get("sector", "Other"), uid,
+                         market=market)
 
-    # CASH 잔고 델타 조정 — BUY 시 차감, SELL 시 증가
-    if ticker != "CASH":
-        _adjust_cash(uid, _cash_delta(trade_type, float(body.q), float(body.price or 0)))
+    # 현금 잔고 반영.
+    # 종목 매매는 대금만큼 가감하고, CASH 입출금은 그 금액 자체를 가감한다.
+    # 예전에는 CASH 입출금이 거래 이력에만 남고 잔고를 건드리지 않아,
+    # 입금해도 잔고가 그대로인 채 성공 응답만 돌아갔다.
+    if ticker == "CASH":
+        _adjust_cash(uid, _cash_event_delta(trade_type, float(body.q)), market=market)
+    else:
+        _adjust_cash(uid, _cash_delta(trade_type, float(body.q), float(body.price or 0)),
+                     market=market)
 
     return {"ok": True, "record": record}
 
@@ -340,15 +367,16 @@ def update_trade_endpoint(
     trade_id: int,
     body: UpdateTradeRequest,
     _auth: dict = Depends(current_user),
+    market: str = Depends(market_param),
 ):
     uid = _auth["uid"]
     with user_write_lock(uid):
-        return _update_trade_locked(trade_id, body, uid)
+        return _update_trade_locked(trade_id, body, uid, market)
 
 
-def _update_trade_locked(trade_id: int, body: "UpdateTradeRequest", uid: str):
+def _update_trade_locked(trade_id: int, body: "UpdateTradeRequest", uid: str, market: str):
     # 수정 전에 기존 티커 파악 (ticker가 변경될 수 있으므로 old/new 모두 재계산)
-    all_trades = get_trade_log(uid)
+    all_trades = get_trade_log(uid, market=market)
     old_trade  = next((t for t in all_trades if t.get("id") == trade_id), None)
     old_ticker = old_trade["ticker"] if old_trade else None
 
@@ -361,14 +389,14 @@ def _update_trade_locked(trade_id: int, body: "UpdateTradeRequest", uid: str):
         str(body.type).upper(), str(body.type).upper()
     )
 
-    ok = update_trade_by_id(trade_id, payload, uid)
+    ok = update_trade_by_id(trade_id, payload, uid, market=market)
     if not ok:
         raise HTTPException(status_code=404, detail="거래 내역 없음")
 
     # 거래 수정 후 보유수량 재계산
-    _recalculate_holding_from_trades(body.ticker.upper(), uid)
+    _recalculate_holding_from_trades(body.ticker.upper(), uid, market=market)
     if old_ticker and old_ticker.upper() != body.ticker.upper():
-        _recalculate_holding_from_trades(old_ticker.upper(), uid)
+        _recalculate_holding_from_trades(old_ticker.upper(), uid, market=market)
 
     # CASH 잔고: 기존 거래 델타와 새 거래 델타의 차이만큼 조정
     if body.ticker.upper() != "CASH" and old_trade:
@@ -378,12 +406,12 @@ def _update_trade_locked(trade_id: int, body: "UpdateTradeRequest", uid: str):
             float(old_trade.get("price") or 0),
         )
         new_delta = _cash_delta(body.type, float(body.q), float(body.price or 0))
-        _adjust_cash(uid, new_delta - old_delta)
+        _adjust_cash(uid, new_delta - old_delta, market=market)
     elif body.ticker.upper() == "CASH" and old_trade:
         # DEPOSIT/WITHDRAW 수정도 잔고에 반영해야 한다 (_cash_delta 는 0 을 반환하므로 별도 처리)
         old_delta = _cash_event_delta(old_trade.get("type", ""), float(old_trade.get("q", 0)))
         new_delta = _cash_event_delta(body.type, float(body.q))
-        _adjust_cash(uid, new_delta - old_delta)
+        _adjust_cash(uid, new_delta - old_delta, market=market)
     return {"ok": True}
 
 
@@ -391,19 +419,20 @@ def _update_trade_locked(trade_id: int, body: "UpdateTradeRequest", uid: str):
 def delete_trade_endpoint(
     trade_id: int,
     _auth: dict = Depends(current_user),
+    market: str = Depends(market_param),
 ):
     uid = _auth["uid"]
     with user_write_lock(uid):
-        return _delete_trade_locked(trade_id, uid)
+        return _delete_trade_locked(trade_id, uid, market)
 
 
-def _delete_trade_locked(trade_id: int, uid: str):
-    all_trades = get_trade_log(uid)
+def _delete_trade_locked(trade_id: int, uid: str, market: str):
+    all_trades = get_trade_log(uid, market=market)
     trade = next((t for t in all_trades if t.get("id") == trade_id), None)
     if not trade:
         raise HTTPException(status_code=404, detail="거래 내역 없음")
 
-    ok = delete_trade_by_id(trade_id, uid)
+    ok = delete_trade_by_id(trade_id, uid, market=market)
     if not ok:
         raise HTTPException(status_code=404, detail="거래 내역 없음")
 
@@ -414,7 +443,10 @@ def _delete_trade_locked(trade_id: int, uid: str):
     # 남은 BUY 가 그 SELL 들을 충분히 커버하는 경우까지 지워버려 사용자 거래
     # 이력이 소실됐으므로 제거했다. 재생(_recalculate_holding_from_trades)이
     # 수량을 0 이하로 클램프하므로 보유 수량은 어차피 정합성을 유지한다.
-    _recalculate_holding_from_trades(ticker, uid)
+    # 이 종목의 거래를 방금 지웠다. 남은 거래가 0건이면 보유도 함께 지운다 —
+    # 매수 이력을 지웠는데 보유 종목이 그대로 남아 있으면 근거 없는 자산이 된다.
+    _recalculate_holding_from_trades(ticker, uid, market=market,
+                                     drop_when_no_trades=True)
 
     # CASH 잔고: 삭제된 거래 델타를 역방향으로 복원
     if ticker != "CASH":
@@ -422,10 +454,10 @@ def _delete_trade_locked(trade_id: int, uid: str):
             trade.get("type", ""),
             float(trade.get("q", 0)),
             float(trade.get("price") or 0),
-        ))
+        ), market=market)
     else:
         # CASH DEPOSIT/WITHDRAW 삭제 시 잔고를 되돌린다 (_cash_delta 는 0 을 반환)
-        _revert_cash_event(uid, ttype, float(trade.get("q", 0)))
+        _revert_cash_event(uid, ttype, float(trade.get("q", 0)), market=market)
     return {"ok": True}
 
 
@@ -598,13 +630,18 @@ _US_TICKERS: list[tuple[str, str]] = [
 
 
 @router.get("/ticker-search")
-def ticker_search(q: str = "", limit: int = 5):
-    """상장 티커 검색. ticker_universe(NASDAQ+NYSE 전 종목)를 우선 조회한다.
+def ticker_search(q: str = "", limit: int = 5, market: str = Depends(market_param)):
+    """상장 티커 검색. 시장에 따라 찾는 목록이 다르다.
 
-    DB가 없거나 결과가 없으면 내장 시총 상위 목록으로 폴백한다.
+    미국은 ticker_universe(NASDAQ+NYSE 전 종목)를, 한국은 KRX 상장목록을 본다.
+    한 목록에서 둘 다 찾으면 안 된다 — 한국 화면에서 'LG' 를 쳤을 때 미국
+    종목이 섞여 나오면 그대로 등록되어 시장 구분이 깨진다.
     """
     if not q:
         return []
+    if market == "KR":
+        from backend.services.korea_universe import search_listed
+        return search_listed(q, limit)
     q = q.upper().strip()
 
     try:
@@ -640,7 +677,7 @@ def ticker_search(q: str = "", limit: int = 5):
 
 
 @router.get("/ticker-exists")
-def ticker_exists(ticker: str = ""):
+def ticker_exists(ticker: str = "", market: str = Depends(market_param)):
     """티커가 실제 시장에 존재하는지 확인. 로그인 불필요 — 포트폴리오 최적화처럼
     비로그인에서도 종목을 입력받는 화면이 저장 전에 검증할 수 있어야 한다.
 
@@ -649,14 +686,25 @@ def ticker_exists(ticker: str = ""):
     결과는 1시간 캐시한다 — 오탈자를 여러 번 시도해도 같은 티커에 yfinance 를
     반복 호출하지 않는다.
     """
-    from backend.services.ticker_universe import lookup as universe_lookup
+    from backend.services.markets import universe_lookup
     from backend.services.market_data import _cached
 
     sym = ticker.upper().strip()
     if not sym:
         return {"ticker": sym, "exists": False, "name": None}
 
-    known = universe_lookup(sym)
+    if market == "KR":
+        # 한국은 KRX 상장목록에서 바로 확인한다. 코드만 입력해도(005930)
+        # 접미사를 붙여 준다 — 사용자가 '.KS' 를 알 이유가 없다.
+        from backend.services.korea_universe import get_listed_all
+        code = sym.split(".")[0]
+        for row in get_listed_all():
+            if row["ticker"].split(".")[0] == code:
+                return {"ticker": row["ticker"], "exists": True,
+                        "name": row.get("name", "")}
+        return {"ticker": sym, "exists": False, "name": None}
+
+    known = universe_lookup(sym, market)
     if known is not None:
         return {"ticker": sym, "exists": True, "name": known.get("name", "")}
 
@@ -676,7 +724,7 @@ def ticker_exists(ticker: str = ""):
 
 
 @router.get("/ticker-price")
-def get_ticker_price(ticker: str, _auth: dict = Depends(current_user)):
+def get_ticker_price(ticker: str, _auth: dict = Depends(current_user), market: str = Depends(market_param)):
     """티커 현재가 조회 — 거래 입력 폼의 가격 자동 채움용.
 
     **속도가 핵심인 경로다.** 사용자가 티커를 입력하고 값이 채워질 때까지
@@ -693,17 +741,22 @@ def get_ticker_price(ticker: str, _auth: dict = Depends(current_user)):
          상장 목록에 있다.
     """
     from backend.services.live_quotes import get_quote, DEFAULT_MAX_AGE
-    from backend.services.ticker_universe import lookup as universe_lookup
+    from backend.services.markets import universe_lookup, get_market
 
     sym = ticker.upper().strip()
     if not sym:
         raise HTTPException(status_code=400, detail="티커를 입력하세요")
+    # 통화는 시장이 정한다. 한국 종목에 USD 를 붙이면 25만원짜리 주식이
+    # 25만 달러로 읽힌다.
+    currency = get_market(market).currency
 
     # ① 상장 목록 조회 (DB, 약 1ms). 목록에 없으면 여기서 끝낸다 —
     #    타이핑 중간값 같은 없는 심볼을 yfinance 에 물어보면 수 초가 그냥 날아간다.
-    known = universe_lookup(sym)
+    known = universe_lookup(sym, market)
     if known is None:
         raise HTTPException(status_code=404, detail=f"티커 {sym}를 찾을 수 없습니다")
+    # 사용자가 '005930' 만 입력했어도 시세 조회에는 정식 심볼('005930.KS')이 필요하다.
+    sym = known.get("ticker") or sym
 
     try:
         # interval="5m": 화면에 값 하나 채우는 용도라 1분봉까지 받을 이유가 없다.
@@ -717,7 +770,7 @@ def get_ticker_price(ticker: str, _auth: dict = Depends(current_user)):
             "ticker":        sym,
             "price":         round(float(q["price"]), 4),
             "name":          (known or {}).get("name", ""),
-            "currency":      "USD",
+            "currency":      currency,
             "change_pct":    q.get("change_1d_pct"),
             "volume":        q.get("volume"),
             "as_of_session": q.get("session"),
@@ -734,7 +787,7 @@ def get_ticker_price(ticker: str, _auth: dict = Depends(current_user)):
             "ticker":   sym,
             "price":    round(float(hist["Close"].iloc[-1]), 4),
             "name":     known.get("name", ""),
-            "currency": "USD",
+            "currency": currency,
         }
     except HTTPException:
         raise
@@ -743,10 +796,10 @@ def get_ticker_price(ticker: str, _auth: dict = Depends(current_user)):
 
 
 @router.post("/auto-sector")
-def auto_sector(_auth: dict = Depends(current_user)):
+def auto_sector(_auth: dict = Depends(current_user), market: str = Depends(market_param)):
     """보유 종목 중 sector='Other'인 종목의 섹터를 yfinance로 자동 분류."""
     uid      = _auth["uid"]
-    holdings = get_holdings(uid)
+    holdings = get_holdings(uid, market=market)
     updated  = []
     for ticker, info in holdings.items():
         if ticker == "CASH":
@@ -758,7 +811,7 @@ def auto_sector(_auth: dict = Depends(current_user)):
         if sector and sector != "Other":
             # 섹터만 UPDATE — save_holding 으로 스냅샷을 되쓰면, yfinance 응답을
             # 기다리는 수 초 사이에 사용자가 체결한 매매가 되돌아간다.
-            if update_holding_sector(ticker, sector, uid):
+            if update_holding_sector(ticker, sector, uid, market=market):
                 updated.append({"ticker": ticker, "sector": sector})
     return {"updated": updated, "count": len(updated)}
 
@@ -766,10 +819,10 @@ def auto_sector(_auth: dict = Depends(current_user)):
 # ── 분석 데이터 ─────────────────────────────────────────────────────────────────
 
 @router.get("/metrics")
-def get_metrics(_auth: dict = Depends(current_user)):
+def get_metrics(_auth: dict = Depends(current_user), market: str = Depends(market_param)):
     uid = _auth["uid"]
-    holdings  = get_holdings(uid)
-    trade_log = get_trade_log(uid)
+    holdings  = get_holdings(uid, market=market)
+    trade_log = get_trade_log(uid, market=market)
     if not holdings and not trade_log:
         raise HTTPException(status_code=400, detail="보유 종목 없음")
     # 과거 매도 종목 포함 → 전량 매도 이후에도 수익률 계산 가능
@@ -782,7 +835,7 @@ def get_metrics(_auth: dict = Depends(current_user)):
     close_df = _portfolio_close_df(holdings, period=_period, ttl=300, extra_tickers=traded_tickers)
     if close_df.empty:
         raise HTTPException(status_code=400, detail="가격 데이터 없음")
-    equity_curve = build_equity_curve(holdings, trade_log, close_df)
+    equity_curve = build_equity_curve(holdings, trade_log, close_df, market=market)
 
     # 1일 변동은 곡선의 위치 기반 차분(iloc[-1]-iloc[-2])이 아니라
     # 종목별 '마지막 두 실제 관측치'의 합으로 계산한다 →
@@ -798,12 +851,13 @@ def get_metrics(_auth: dict = Depends(current_user)):
     if _1d_tickers and not raw_df.empty:
         raw_df = _ensure_prev_close(raw_df, _1d_tickers)
     live = _get_live_prices(_1d_tickers) if (_1d_tickers and _is_market_open()) else {}
-    metrics = calculate_metrics(holdings, close_df, equity_curve, raw_df=raw_df, live=live)
+    metrics = calculate_metrics(holdings, close_df, equity_curve, raw_df=raw_df,
+                                live=live, market=market)
 
     # total_return_pct: TWRR(날짜 보정 없는 시간가중수익률)의 마지막 값으로 덮어쓰기
     # calculate_metrics는 equity_curve(날짜 보정 포함)를 쓰므로 추가 입금 시 왜곡 가능
     try:
-        twrr, _, _, _, _ = build_return_pct_curve(holdings, trade_log, close_df)
+        twrr, _, _, _, _ = build_return_pct_curve(holdings, trade_log, close_df, market=market)
         if not twrr.empty:
             metrics["total_return_pct"] = round(float(twrr.dropna().iloc[-1]), 4)
     except Exception:
@@ -815,10 +869,11 @@ def get_metrics(_auth: dict = Depends(current_user)):
 def get_equity_curve(
     benchmark: Optional[str] = "sp500",
     _auth: dict = Depends(current_user),
+    market: str = Depends(market_param),
 ):
     uid = _auth["uid"]
-    holdings  = get_holdings(uid)
-    trade_log = get_trade_log(uid)
+    holdings  = get_holdings(uid, market=market)
+    trade_log = get_trade_log(uid, market=market)
     if not holdings and not trade_log:
         raise HTTPException(status_code=400, detail="보유 종목 없음")
 
@@ -831,7 +886,8 @@ def get_equity_curve(
     _period = _period_covering_first_trade(trade_log)
     close_df = _portfolio_close_df(holdings, period=_period, ttl=300, extra_tickers=traded_tickers)
 
-    return_pct, holdings_by_date, initial_equity, cash_events, equity = build_return_pct_curve(holdings, trade_log, close_df)
+    return_pct, holdings_by_date, initial_equity, cash_events, equity = build_return_pct_curve(
+        holdings, trade_log, close_df, market=market)
 
     # 주식 매매 포인트 마커 (매수/매도 날짜에 점 표시용)
     trade_markers = [
@@ -845,9 +901,9 @@ def get_equity_curve(
 
 
 @router.get("/holdings-detail")
-def get_holdings_detail_endpoint(_auth: dict = Depends(current_user)):
+def get_holdings_detail_endpoint(_auth: dict = Depends(current_user), market: str = Depends(market_param)):
     uid = _auth["uid"]
-    holdings = get_holdings(uid)
+    holdings = get_holdings(uid, market=market)
     if not holdings:
         return []
     tickers = [t for t in holdings if t != "CASH"]
@@ -871,13 +927,23 @@ def get_holdings_detail_endpoint(_auth: dict = Depends(current_user)):
     # 장중에만 실시간 가격 사용. 장 외에는 마지막 확정 종가 기준으로 계산된다.
     live = _get_live_prices(tickers) if _is_market_open() else {}
 
-    return get_holdings_detail(holdings, raw_df, live=live)
+    rows = get_holdings_detail(holdings, raw_df, live=live)
+
+    # 화면용 이름을 붙인다. 한국 종목은 '034020.KS' 처럼 숫자 코드라
+    # 목록만 보고는 어느 회사인지 알 수 없다.
+    from backend.services.markets import name_map_for
+    names = name_map_for([r["ticker"] for r in rows if r.get("ticker") != "CASH"], market)
+    for r in rows:
+        t = r.get("ticker")
+        if t and t != "CASH":
+            r["name"] = names.get(t, t)
+    return rows
 
 
 @router.get("/sector-weights")
-def get_sector_weights(_auth: dict = Depends(current_user)):
+def get_sector_weights(_auth: dict = Depends(current_user), market: str = Depends(market_param)):
     uid = _auth["uid"]
-    holdings = get_holdings(uid)
+    holdings = get_holdings(uid, market=market)
     if not holdings:
         return {}
     tickers = [t for t in holdings if t != "CASH"]
@@ -901,7 +967,7 @@ def get_sector_weights(_auth: dict = Depends(current_user)):
 # ── 포트폴리오 최초 등록 ───────────────────────────────────────────────────────
 
 @router.post("/setup")
-def setup_portfolio(body: PortfolioSetupRequest, _auth: dict = Depends(current_user)):
+def setup_portfolio(body: PortfolioSetupRequest, _auth: dict = Depends(current_user), market: str = Depends(market_param)):
     """포트폴리오 최초 등록 / 새로 등록.
 
     사용자는 "지금 이만큼 갖고 있다"를 입력하는 것이지 거래를 하는 게 아니다.
@@ -942,7 +1008,7 @@ def setup_portfolio(body: PortfolioSetupRequest, _auth: dict = Depends(current_u
         raise HTTPException(status_code=400, detail="보유 종목이나 현금 중 하나는 입력해 주세요")
 
     with user_write_lock(uid):
-        existing = get_holdings(uid)
+        existing = get_holdings(uid, market=market)
         has_data = bool([k for k in existing if k != "CASH"]) or \
                    float(existing.get("CASH", {}).get("q", 0) or 0) != 0
         if has_data and not body.replace:
@@ -951,7 +1017,7 @@ def setup_portfolio(body: PortfolioSetupRequest, _auth: dict = Depends(current_u
                 detail="이미 등록된 포트폴리오가 있습니다. 새로 등록하려면 기존 정보를 삭제해야 합니다.",
             )
         if body.replace:
-            wipe_portfolio(uid)
+            wipe_portfolio(uid, market=market)
 
         invested = sum(r["q"] * r["price"] for r in rows)
         first_date = min((r["date"] for r in rows), default=None) or \
@@ -960,17 +1026,18 @@ def setup_portfolio(body: PortfolioSetupRequest, _auth: dict = Depends(current_u
         # ① 시드 입금 — 매수금 전액 + 남은 현금
         add_trade({"date": first_date, "ticker": "CASH", "type": "DEPOSIT",
                    "q": round(invested + cash, 2), "price": 1.0,
-                   "memo": "포트폴리오 등록"}, uid)
-        save_holding("CASH", round(invested + cash, 2), 1.0, "Cash", uid)
+                   "memo": "포트폴리오 등록"}, uid, market=market)
+        save_holding("CASH", round(invested + cash, 2), 1.0, "Cash", uid, market=market)
 
         # ② 종목 매수 — 매수일 순서대로 기록해 이력이 시간순으로 읽히게 한다
         for r in sorted(rows, key=lambda x: x["date"]):
             add_trade({"date": r["date"], "ticker": r["ticker"], "type": "ADD",
-                       "q": r["q"], "price": r["price"], "memo": "포트폴리오 등록"}, uid)
-            save_holding(r["ticker"], r["q"], r["price"], "Other", uid)
+                       "q": r["q"], "price": r["price"], "memo": "포트폴리오 등록"}, uid,
+                      market=market)
+            save_holding(r["ticker"], r["q"], r["price"], "Other", uid, market=market)
 
         # ③ 현금은 입력값 그대로
-        save_holding("CASH", round(cash, 2), 1.0, "Cash", uid)
+        save_holding("CASH", round(cash, 2), 1.0, "Cash", uid, market=market)
 
     # 섹터는 백그라운드로 채운다 — 등록 응답을 그만큼 기다리게 할 이유가 없다.
     import threading
@@ -980,7 +1047,7 @@ def setup_portfolio(body: PortfolioSetupRequest, _auth: dict = Depends(current_u
             try:
                 sec = _fetch_sector(r["ticker"])
                 if sec and sec != "Other":
-                    update_holding_sector(r["ticker"], sec, uid)
+                    update_holding_sector(r["ticker"], sec, uid, market=market)
             except Exception:
                 pass
     threading.Thread(target=_bg_sectors, daemon=True).start()
@@ -1005,13 +1072,13 @@ def setup_portfolio(body: PortfolioSetupRequest, _auth: dict = Depends(current_u
 # ── 개인 데이터 새로고침 ────────────────────────────────────────────────────────
 
 @router.post("/refresh")
-def refresh_portfolio(_auth: dict = Depends(current_user)):
+def refresh_portfolio(_auth: dict = Depends(current_user), market: str = Depends(market_param)):
     """
     사용자 포트폴리오 종목의 최신 가격 강제 수집.
     새로고침 버튼 클릭 시 프론트엔드에서 호출.
     """
     uid = _auth["uid"]
-    holdings = get_holdings(uid)
+    holdings = get_holdings(uid, market=market)
     tickers = [t for t in holdings if t != "CASH"]
     if not tickers:
         return {"ok": True, "tickers": [], "message": "보유 종목 없음"}

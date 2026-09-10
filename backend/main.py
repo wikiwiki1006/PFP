@@ -48,7 +48,7 @@ class SafeJSONResponse(JSONResponse):
             separators=(",", ":"),
         ).encode("utf-8")
 
-from backend.routers import admin, portfolio, market, macro, signals, optimizer, reports, ticker, auth
+from backend.routers import internal, admin, portfolio, market, macro, signals, optimizer, reports, ticker, auth
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -67,7 +67,7 @@ except Exception as _e:
     logger.warning(f"fd 한도 상향 실패: {_e}")
 
 app = FastAPI(
-    title="Personal Financial Platform API",
+    title="ZOOPZOOP API",
     description="포트폴리오 관리 · 시장 데이터 · AI 거시경제 분석 · 매매 신호",
     version="2.0.0",
     # 프로덕션에서는 API 문서 비공개
@@ -95,7 +95,25 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "X-User-ID"],
 )
 
+# ── API 응답 캐시 금지 ────────────────────────────────────────────────────────
+#
+# Firebase Hosting 이 /api/** 응답을 기본값으로 10분 캐시한다. 그래서 코드를
+# 고쳐 배포해도 옛 응답이 그대로 나갔고, 실제로 삼성전자 조회가 고쳐진 뒤에도
+# 404 가 계속 반환됐다(x-cache: HIT). 더 나쁜 것은 사용자별 데이터가 섞일 수
+# 있다는 점이다 — 포트폴리오 응답이 캐시되면 다른 사람에게 갈 수 있다.
+#
+# firebase.json 에도 같은 규칙을 뒀지만, 앞단 설정이 바뀌어도 새지 않도록
+# 서버가 직접 붙인다.
+@app.middleware("http")
+async def _no_cache_api(request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+    return response
+
+
 # ── 라우터 등록 ────────────────────────────────────────────────────────────────
+app.include_router(internal.router)
 app.include_router(admin.router)
 app.include_router(admin.public_router)
 app.include_router(auth.router)

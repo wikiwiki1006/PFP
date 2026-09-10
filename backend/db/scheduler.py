@@ -27,8 +27,9 @@ logger = logging.getLogger(__name__)
 _stop_event = threading.Event()
 _thread: threading.Thread | None = None
 
-# SP500 일일 수집 중복 실행 방지 플래그
+# SP500 / 한국 일일 수집 중복 실행 방지 플래그
 _sp500_updating = threading.Event()
+_kr_updating = threading.Event()
 
 # 주기 (초)
 _SNAPSHOT_INTERVAL      = 60        # 1분
@@ -48,11 +49,44 @@ _CLOSE_SEED_INTERVAL    = 900       # 15분 (장 마감 후 확정 종가 반영
 # 보므로(>=), 아직 확정되지 않은 당일 봉을 공식 종가로 저장하게 된다.
 _DAILY_COLLECT_ET_HOUR = 17
 
+# 한국 일일 수집 시각 — **KST 기준** 16:00 (KRX 마감 15:30 KST 30분 후).
+# 미국과 같은 이유로 시장 자체 시간대를 기준으로 삼는다 — ET 로 환산한 고정
+# 시각을 쓰면 서머타임 전환 때 KST 기준 수집 시각이 매번 흔들린다.
+_DAILY_COLLECT_KST_HOUR = 16
+
 # pairs 사전 계산 대상 인기 종목 (기본 파라미터 threshold=5%, top_n=5)
 _PAIRS_PRECOMPUTE_TICKERS = [
     "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "JPM", "JNJ", "V",
     "XOM", "UNH", "PG", "MA", "HD", "CVX", "MRK", "ABBV", "LLY", "PEP",
 ]
+
+
+def _universe_for(market: str) -> list[str]:
+    """수집·스캔 대상 종목. 미국은 S&P500, 한국은 시총 상위(KOSPI200·KOSDAQ150).
+
+    한국 유니버스는 캐시에 있으면 읽고, 비어 있으면 즉석에서 만든다.
+    네이버 시총 순위는 7 요청 · 2초면 끝나 요청 경로에서 만들어도 부담이 없다.
+    이게 없으면 새 환경은 누군가 수동으로 채워 줄 때까지 한국 화면이 계속 빈다.
+    """
+    if market == "KR":
+        from backend.services.korea_universe import get_scan_universe, rebuild_scan_universe
+        u = get_scan_universe()
+        if not u:
+            logger.info("한국 유니버스 없음 — 즉석 생성")
+            rebuild_scan_universe()
+            u = get_scan_universe()
+        return u
+    from backend.services.trading_signals import get_sp500_universe
+    return get_sp500_universe()
+
+
+def _pairs_targets(market: str, universe: list[str]) -> list[str]:
+    """페어트레이딩을 미리 계산해 둘 종목.
+
+    미국은 대형주 20개를 고정해 뒀지만 한국은 그런 목록이 없다. 유니버스가
+    이미 시총 내림차순이므로 앞 20개가 곧 대형주다.
+    """
+    return universe[:20] if market == "KR" else _PAIRS_PRECOMPUTE_TICKERS
 
 
 def start():
@@ -231,7 +265,7 @@ def _run_sp500_with_guard():
     """SP500 수집을 _sp500_updating 플래그로 감싸 동시 실행 방지."""
     _sp500_updating.set()
     try:
-        _run_safe("sp500_daily", _update_sp500_prices)
+        _run_safe("sp500_daily", _update_daily_prices)
     finally:
         _sp500_updating.clear()
 
@@ -300,7 +334,7 @@ def _loop():
 
         # ⑤ Timing Engine: S&P500 매매신호 스캔 재계산(순수 DB 읽기), 6시간마다.
         #    일별 거래량 수집을 놓쳐도 캐시가 갱신되도록 하는 폴백 — 정상 경로는
-        #    _update_sp500_prices 완료 직후 연쇄 실행이다.
+        #    _update_daily_prices 완료 직후 연쇄 실행이다.
         if now - last_signal_scan >= _SIGNAL_SCAN_INTERVAL:
             _run_safe("signal_scan", _update_signal_scan)
             last_signal_scan = now
@@ -318,10 +352,10 @@ def _loop():
         _stop_event.wait(_SNAPSHOT_INTERVAL)
 
 
-def _run_safe(name: str, fn):
+def _run_safe(name: str, fn, *args):
     """작업 실행 후 반환값 전달. 실패 시 False (호출자가 재시도 여부 판단)."""
     try:
-        return fn()
+        return fn(*args)
     except Exception as e:
         logger.warning(f"스케줄러 작업 '{name}' 실패: {e}")
         return False
@@ -419,9 +453,15 @@ def _update_history():
     logger.info("가격 이력 갱신 완료")
 
 
-def _update_sp500_prices():
+def _update_daily_prices(max_tickers: int | None = None, market: str = "US") -> dict:
     """
-    S&P 500 전 종목(~500개) 2년치 종가 + 거래량을 market_prices DB에 저장.
+    해당 시장 전 종목의 2년치 종가 + 거래량을 market_prices DB에 저장.
+    미국은 S&P 500(~500개), 한국은 시총 상위(KOSPI200 + KOSDAQ150 = 350개).
+
+    max_tickers 를 주면 이번 호출에서 그만큼만 처리한다. Cloud Run 은 요청이
+    끝나면 CPU 를 회수하므로 한 번에 500 종목을 받다가 타임아웃되면 아무것도
+    저장되지 않는다. 나눠 받으면 매 호출이 진척을 남기고, 남은 종목은 다음
+    호출이 이어받는다 (stale 목록이 줄어들기 때문에).
 
     - 배치 50개, 배치 사이 2초 슬립 → _yf_sem 슬롯을 놓는 구간에 사용자 요청 처리 가능
     - 종가 stale(max_age 20h) ∪ 거래량 stale 티커만 수집 → 신선한 티커는 yfinance 미호출
@@ -430,29 +470,42 @@ def _update_sp500_prices():
     - 완료 후 매매신호 스캔(_update_signal_scan) + pairs 사전 계산(_precompute_pairs) 연속 실행
     """
     import logging as _logging
-    from backend.services.trading_signals import get_sp500_universe
     from backend.db.market_cache import (
         get_stale_tickers, get_volume_stale_tickers,
         _yf_download_ohlcv_batched, save_prices_to_db, save_common,
     )
 
-    universe = get_sp500_universe()
+    # 미국 키는 예전 이름을 유지한다. 이미 쌓인 값이 있어 이름을 바꾸면
+    # 수집이 한 번 더 처음부터 도는 것처럼 보인다.
+    stamp_key = "sp500_price_update_last" if market == "US" else f"price_update_last:{market}"
+
+    universe = _universe_for(market)
+    if not universe:
+        logger.warning(f"[{market}] 유니버스가 비어 있어 가격 수집을 건너뛴다")
+        return {"stale": 0, "processed": 0, "remaining": 0, "scan_refreshed": False}
+
     stale = sorted(
         set(get_stale_tickers(universe, max_age_hours=20))
         | set(get_volume_stale_tickers(universe))
     )
     if not stale:
         save_common(
-            "sp500_price_update_last",
+            stamp_key,
             datetime.now(tz=timezone.utc).isoformat(),
             ttl_seconds=86400 * 2,
         )
-        logger.info("SP500 전체 신선 — DB 스킵, 타임스탬프 갱신")
-        _run_safe("signal_scan", _update_signal_scan)
-        _run_safe("precompute_pairs", _precompute_pairs)
-        return
+        logger.info(f"[{market}] 전체 신선 — DB 스킵, 타임스탬프 갱신")
+        _run_safe("signal_scan", _update_signal_scan, market)
+        _run_safe("precompute_pairs", _precompute_pairs, market)
+        return {"stale": 0, "processed": 0, "remaining": 0, "scan_refreshed": True}
 
-    logger.info(f"SP500 가격+거래량 수집 시작: {len(stale)}/{len(universe)}개 stale 티커")
+    total_stale = len(stale)
+    if max_tickers is not None and max_tickers > 0:
+        stale = stale[:max_tickers]
+    logger.info(
+        f"[{market}] 가격+거래량 수집 시작: {len(stale)}/{total_stale}개 처리 "
+        f"(전체 유니버스 {len(universe)})"
+    )
     _yf_log = _logging.getLogger("yfinance")
     _prev = _yf_log.level
     _yf_log.setLevel(_logging.CRITICAL)
@@ -464,39 +517,52 @@ def _update_sp500_prices():
         _yf_log.setLevel(_prev)
 
     if close_df.empty:
-        logger.warning("SP500 가격 수집: yfinance 빈 응답")
-        return
+        logger.warning(f"[{market}] 가격 수집: yfinance 빈 응답")
+        return {"stale": total_stale, "processed": 0,
+                "remaining": total_stale, "scan_refreshed": False}
 
     save_prices_to_db(close_df.dropna(axis=1, how="all"), volume_df)
     save_common(
-        "sp500_price_update_last",
+        stamp_key,
         datetime.now(tz=timezone.utc).isoformat(),
         ttl_seconds=86400 * 2,
     )
-    logger.info(f"SP500 가격+거래량 수집 완료: {close_df.shape[1]}개 저장")
+    processed = close_df.shape[1]
+    remaining = max(0, total_stale - len(stale))
+    logger.info(f"[{market}] 가격+거래량 수집 완료: {processed}개 저장 (남은 stale {remaining})")
 
-    # 데이터 수집 완료 직후 매매신호 스캔 갱신 → pairs 사전 계산
-    _run_safe("signal_scan", _update_signal_scan)
-    _run_safe("precompute_pairs", _precompute_pairs)
+    # 아직 받을 종목이 남았으면 스캔은 미룬다 — 반쪽 데이터로 갱신하면
+    # 그 결과가 6시간 캐시에 박혀 다음 수집분이 반영되지 않는다.
+    scan_refreshed = remaining == 0
+    if scan_refreshed:
+        _run_safe("signal_scan", _update_signal_scan, market)
+        _run_safe("precompute_pairs", _precompute_pairs, market)
+
+    return {"stale": total_stale, "processed": processed,
+            "remaining": remaining, "scan_refreshed": scan_refreshed}
 
 
-def _precompute_pairs():
+def _precompute_pairs(market: str = "US"):
     """
     인기 종목 20개의 페어트레이딩 결과를 common_cache에 사전 저장 (TTL 25h).
     이미 캐시가 있는 종목은 스킵. pairs-auto 엔드포인트가 이 캐시를 우선 반환.
     """
-    from backend.services.trading_signals import get_sp500_universe, pairs_auto_detail
+    from backend.services.trading_signals import pairs_auto_detail
     from backend.services.market_data import get_close_df
     from backend.db.market_cache import get_common, save_common
 
-    universe = get_sp500_universe()
+    universe = _universe_for(market)
+    if not universe:
+        logger.warning(f"precompute_pairs[{market}]: 유니버스 비어 있음 — 스킵")
+        return
+    targets  = _pairs_targets(market, universe)
     close_df = get_close_df(universe, period="2y", include_market=False)
     if close_df is None or close_df.empty:
-        logger.warning("precompute_pairs: 가격 데이터 없음 — 스킵")
+        logger.warning(f"precompute_pairs[{market}]: 가격 데이터 없음 — 스킵")
         return
 
     computed = 0
-    for ticker in _PAIRS_PRECOMPUTE_TICKERS:
+    for ticker in targets:
         if ticker not in close_df.columns:
             continue
         cache_key = f"pairs_precomputed::{ticker}::5.0::5"
@@ -510,27 +576,33 @@ def _precompute_pairs():
         except Exception as e:
             logger.warning(f"precompute_pairs {ticker} 실패: {e}")
 
-    logger.info(f"pairs 사전계산 완료: {computed}/{len(_PAIRS_PRECOMPUTE_TICKERS)}개")
+    logger.info(f"pairs 사전계산[{market}] 완료: {computed}/{len(targets)}개")
 
 
-def _update_signal_scan():
-    """Timing Engine: S&P500 SMA 1차 필터 + MACD/RSI 스코어링 → common_cache 저장.
+def _update_signal_scan(market: str = "US"):
+    """Timing Engine: SMA 1차 필터 + MACD/RSI 스코어링 → common_cache 저장.
 
     DB(market_prices)의 종가·거래량만 읽어 계산한다 — yfinance 호출이 전혀 없다.
-    (거래량 적재는 _update_sp500_prices 가 담당하므로 이중 수집하지 않는다.)
+    (거래량 적재는 _update_daily_prices 가 담당하므로 이중 수집하지 않는다.)
     """
     from backend.db.market_cache import get_prices_from_db, get_volume_from_db, save_common
-    from backend.services.trading_signals import get_sp500_universe, sma_macd_rsi_scan
+    from backend.services.trading_signals import sma_macd_rsi_scan
 
-    universe  = get_sp500_universe()
+    universe  = _universe_for(market)
+    if not universe:
+        logger.warning(f"signal_scan[{market}]: 유니버스 비어 있음, 스킵")
+        return
     close_df  = get_prices_from_db(universe, "1y", fill=True)
     if close_df is None or close_df.empty:
-        logger.warning("signal_scan: 종가 데이터 없음, 스킵")
+        logger.warning(f"signal_scan[{market}]: 종가 데이터 없음, 스킵")
         return
     volume_df = get_volume_from_db(universe, "1y")
     valid = [c for c in universe if c in close_df.columns]
     result = sma_macd_rsi_scan(close_df[valid], volume_df, top_n=10)
-    save_common("signal_scan_sp500", result, ttl_seconds=_SIGNAL_SCAN_INTERVAL * 5)
+    # 라우터가 읽는 키와 같아야 한다. 예전에는 'signal_scan_sp500' 로 저장하고
+    # 라우터는 'signal_scan:US' 를 읽어, 미리 계산해 둔 결과가 한 번도 쓰이지
+    # 않고 매 요청이 즉석 계산을 다시 하고 있었다.
+    save_common(f"signal_scan:{market}", result, ttl_seconds=_SIGNAL_SCAN_INTERVAL * 5)
     # 완화 단계가 적용됐으면(level > 0) 로그에 남긴다 — '진짜 통과 종목이 없는 시장
     # 상황'인지 '수집 타이밍 등으로 인한 일시적 결핍'인지 나중에 원인을 추적할 때 쓴다.
     long_lv, short_lv = result.get("long_filter_level", 0), result.get("short_filter_level", 0)
@@ -538,7 +610,7 @@ def _update_signal_scan():
     if long_lv or short_lv:
         relax_note = f" [완화 적용: 매수 L{long_lv}({result.get('long_filter_note')}) / 매도 L{short_lv}({result.get('short_filter_note')})]"
     logger.info(
-        f"신호 스캔 갱신 완료: {result.get('scanned', 0)}개 스캔 · "
+        f"신호 스캔[{market}] 갱신 완료: {result.get('scanned', 0)}개 스캔 · "
         f"매수 {len(result.get('long_picks', []))} / 매도 {len(result.get('short_picks', []))}{relax_note}"
     )
 

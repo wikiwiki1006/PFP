@@ -14,6 +14,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
+from backend.services.markets import market_param
 from backend.services.auth import (ai_feature_user, current_user,
                                    enforce_deep_limit, resolve_model_tier)
 from fastapi import Depends, APIRouter, HTTPException, Header
@@ -25,7 +26,8 @@ from backend.db.reports_repo import (
     save_report, list_reports, get_report_content,
     find_fresh_shared_report, SHARED_TTL_HOURS,
 )
-from backend.services.report_writer import INDUSTRIES, write_equity_report, write_industry_report
+from backend.services.report_writer import (industries_for, industry_meta,
+                                            write_equity_report, write_industry_report)
 from backend.services.daily_report import generate_daily_report
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
@@ -41,6 +43,7 @@ _store = JobStore(kind="reports", max_jobs=50)
 
 def _cached_shared_result(
     report_type: str, subject_key: str, model_tier: str = "basic",
+    market: str = "US",
 ) -> dict | None:
     """유효시간 내 공용 리포트가 있으면 잡 결과 형태로 복원해 반환.
 
@@ -49,7 +52,7 @@ def _cached_shared_result(
     유효시간: 종목 24h / 산업 72h (reports_repo.SHARED_TTL_HOURS).
     분석 등급(basic/deep)이 일치하는 리포트만 재사용한다.
     """
-    hit = find_fresh_shared_report(report_type, subject_key, model_tier)
+    hit = find_fresh_shared_report(report_type, subject_key, model_tier, market=market)
     if not hit:
         return None
     meta = hit.get("metadata") or {}
@@ -110,16 +113,16 @@ def _job_get(job_id: str, owner: str | None = None) -> dict | None:
 # ── 데일리 브리프 ─────────────────────────────────────────────────────────────────
 
 @router.post("/daily-brief")
-async def daily_brief(_auth: dict = Depends(ai_feature_user)):
+async def daily_brief(_auth: dict = Depends(ai_feature_user), market: str = Depends(market_param)):
     uid = _auth["uid"]
-    holdings = get_holdings(uid)
+    holdings = get_holdings(uid, market=market)
     if not holdings:
         raise HTTPException(status_code=400, detail="보유 종목 없음")
 
     logs: list[str] = []
     try:
         report, price_data = await asyncio.to_thread(
-            generate_daily_report, holdings, logs.append
+            generate_daily_report, holdings, logs.append, market
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -127,7 +130,7 @@ async def daily_brief(_auth: dict = Depends(ai_feature_user)):
     date_str = datetime.now().strftime("%Y%m%d_%H%M")
     filename = f"daily_brief_{date_str}.md"
     save_report(filename, report, report_type="daily_brief",
-                metadata={"user_id": uid}, user_id=uid)
+                metadata={"user_id": uid}, user_id=uid, market=market)
 
     return {
         "report":     report,
@@ -138,14 +141,14 @@ async def daily_brief(_auth: dict = Depends(ai_feature_user)):
 
 
 @router.get("/daily-brief/history")
-def daily_brief_history(_auth: dict = Depends(current_user)):
+def daily_brief_history(_auth: dict = Depends(current_user), market: str = Depends(market_param)):
     uid = _auth["uid"]
-    rows = list_reports(uid, report_type="daily_brief", limit=20)
+    rows = list_reports(uid, report_type="daily_brief", limit=20, market=market)
     return [{"name": r["name"], "path": r["name"], "size": r.get("size", 0)} for r in rows]
 
 
 @router.get("/daily-brief/file/{filename}")
-def get_daily_brief_file(filename: str, _auth: dict = Depends(current_user)):
+def get_daily_brief_file(filename: str, _auth: dict = Depends(current_user), market: str = Depends(market_param)):
     if not filename.startswith("daily_brief_"):
         raise HTTPException(status_code=400, detail="잘못된 파일명")
     content = get_report_content(filename, _auth["uid"])
@@ -165,11 +168,12 @@ class EquityReportRequest(BaseModel):
 async def equity_research(
     req: EquityReportRequest,
     _auth: dict = Depends(ai_feature_user),
+    market: str = Depends(market_param),
 ):
     uid = _auth["uid"]
     ticker = req.ticker.upper()
     try:
-        write_result = await asyncio.to_thread(write_equity_report, ticker)
+        write_result = await asyncio.to_thread(write_equity_report, ticker, "basic", None, market)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -182,7 +186,7 @@ async def equity_research(
     save_report(filename, raw, report_type="equity_research",
                 metadata={"ticker": ticker, "company": company_name,
                           "sections": sections, "model_tier": "basic"},
-                user_id=uid, scope="shared", subject_key=ticker)
+                user_id=uid, scope="shared", subject_key=ticker, market=market)
 
     return {
         "ticker":        ticker,
@@ -200,7 +204,9 @@ class IndustryReportRequest(BaseModel):
 
 
 @router.get("/industries")
-def list_industries():
+def list_industries(market: str = Depends(market_param)):
+    """시장에 맞는 산업 목록. 한국은 조선·엔터처럼 국내 증시의 축이 되는
+    산업군을, 미국은 기존 목록을 돌려준다."""
     return [
         {
             "id":        k,
@@ -211,7 +217,7 @@ def list_industries():
             "coverage":  v["coverage"],
             "icon":      v["icon"],
         }
-        for k, v in INDUSTRIES.items()
+        for k, v in industries_for(market).items()
     ]
 
 
@@ -219,13 +225,14 @@ def list_industries():
 async def industry_research(
     req: IndustryReportRequest,
     _auth: dict = Depends(ai_feature_user),
+    market: str = Depends(market_param),
 ):
     uid = _auth["uid"]
-    if req.industry_id not in INDUSTRIES:
+    if industry_meta(req.industry_id) is None:
         raise HTTPException(status_code=400, detail=f"지원하지 않는 산업: {req.industry_id}")
 
     try:
-        write_result = await asyncio.to_thread(write_industry_report, req.industry_id)
+        write_result = await asyncio.to_thread(write_industry_report, req.industry_id, "basic", None, market)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -233,12 +240,12 @@ async def industry_research(
     sections = write_result.get("sections", {})
 
     date_str = datetime.now().strftime("%Y%m%d_%H%M")
-    ind_name = INDUSTRIES[req.industry_id]["name_en"].replace(" ", "_")
+    ind_name = industry_meta(req.industry_id)["name_en"].replace(" ", "_")
     filename = f"lens_industry_{ind_name}_{date_str}.md"
     save_report(filename, raw, report_type="industry_research",
                 metadata={"industry_id": req.industry_id, "sections": sections,
                           "model_tier": "basic"},
-                user_id=uid, scope="shared", subject_key=req.industry_id)
+                user_id=uid, scope="shared", subject_key=req.industry_id, market=market)
 
     return {
         "industry_id":   req.industry_id,
@@ -259,6 +266,7 @@ class EquityResearchStartRequest(BaseModel):
 def equity_research_start(
     req: EquityResearchStartRequest,
     _auth: dict = Depends(ai_feature_user),
+    market: str = Depends(market_param),
 ):
     """종목 레포트 백그라운드 잡 시작. 즉시 {job_id} 반환."""
     if not req.ticker.strip():
@@ -273,7 +281,7 @@ def equity_research_start(
 
     # 공용 캐시 확인 — 다른 사용자가 24시간 내에 같은 종목을 이미 분석했으면 재사용.
     # 같은 종목이면 결과가 동일하므로 중복 생성(비용·시간)을 피한다.
-    cached = _cached_shared_result("equity_research", ticker, model_tier)
+    cached = _cached_shared_result("equity_research", ticker, model_tier, market=market)
     if cached is not None:
         _job_set(job_id, {"status": "done", "result": cached}, owner=uid)
         return {"job_id": job_id, "cached": True}
@@ -286,7 +294,7 @@ def equity_research_start(
 
     def _run() -> None:
         try:
-            write_result = write_equity_report(ticker, model_tier=model_tier,
+            write_result = write_equity_report(ticker, model_tier=model_tier, market=market,
                                                should_cancel=should_cancel)
             company_name = write_result.get("company_name", ticker)
             raw          = write_result.get("raw", "")
@@ -309,8 +317,7 @@ def equity_research_start(
                 },
                 user_id=uid,
                 scope="shared",
-                subject_key=ticker,
-            )
+                subject_key=ticker, market=market,)
 
 
             result = {**write_result, "report_type": "equity", "file_path": filename}
@@ -337,11 +344,12 @@ class IndustryResearchStartRequest(BaseModel):
 def industry_research_start(
     req: IndustryResearchStartRequest,
     _auth: dict = Depends(ai_feature_user),
+    market: str = Depends(market_param),
 ):
     """산업 레포트 백그라운드 잡 시작. 즉시 {job_id} 반환."""
     if not req.industry_id.strip():
         raise HTTPException(status_code=400, detail="산업 ID를 입력하세요.")
-    if req.industry_id not in INDUSTRIES:
+    if industry_meta(req.industry_id) is None:
         raise HTTPException(status_code=400, detail=f"지원하지 않는 산업: {req.industry_id}")
 
     industry_id   = req.industry_id
@@ -352,7 +360,7 @@ def industry_research_start(
     job_id        = str(uuid.uuid4())
 
     # 공용 캐시 확인 — 산업은 변화 속도가 느려 72시간까지 재사용
-    cached = _cached_shared_result("industry_research", industry_id, model_tier)
+    cached = _cached_shared_result("industry_research", industry_id, model_tier, market=market)
     if cached is not None:
         _job_set(job_id, {"status": "done", "result": cached}, owner=uid)
         return {"job_id": job_id, "cached": True}
@@ -364,10 +372,10 @@ def industry_research_start(
 
     def _run() -> None:
         try:
-            write_result = write_industry_report(industry_id, model_tier=model_tier,
+            write_result = write_industry_report(industry_id, model_tier=model_tier, market=market,
                                                  should_cancel=should_cancel)
             raw          = write_result.get("raw", "")
-            meta         = INDUSTRIES[industry_id]
+            meta         = industry_meta(industry_id)
 
             date_str = datetime.now().strftime("%Y%m%d_%H%M")
             ind_name = meta["name_en"].replace(" ", "_")
@@ -385,8 +393,7 @@ def industry_research_start(
                 },
                 user_id=uid,
                 scope="shared",
-                subject_key=industry_id,
-            )
+                subject_key=industry_id, market=market,)
 
 
             result = {**write_result, "report_type": "industry", "file_path": filename}
@@ -404,7 +411,7 @@ def industry_research_start(
 # ── 잡 상태 조회 / 취소 ──────────────────────────────────────────────────────────
 
 @router.get("/job/{job_id}")
-def get_report_job_status(job_id: str, _auth: dict = Depends(current_user)):
+def get_report_job_status(job_id: str, _auth: dict = Depends(current_user), market: str = Depends(market_param)):
     """레포트 잡 상태 조회 (본인 잡만). status: pending | done | error | cancelled"""
     job = _job_get(job_id, owner=_auth["uid"])
     if job is None:
@@ -413,7 +420,7 @@ def get_report_job_status(job_id: str, _auth: dict = Depends(current_user)):
 
 
 @router.delete("/job/{job_id}")
-def cancel_report_job(job_id: str, _auth: dict = Depends(current_user)):
+def cancel_report_job(job_id: str, _auth: dict = Depends(current_user), market: str = Depends(market_param)):
     """실행 중인 레포트 잡 취소 (본인 잡만).
 
     _store.cancel() 은 상태를 바꾸는 동시에 취소 신호를 올린다. 작업 스레드는
@@ -429,9 +436,9 @@ def cancel_report_job(job_id: str, _auth: dict = Depends(current_user)):
 # ── 레포트 이력 (전체) ───────────────────────────────────────────────────────────
 
 @router.get("/history")
-def report_history(_auth: dict = Depends(current_user)):
+def report_history(_auth: dict = Depends(current_user), market: str = Depends(market_param)):
     uid = _auth["uid"]
-    rows = list_reports(uid, limit=30)
+    rows = list_reports(uid, limit=30, market=market)
     return [
         {
             "name":       r["name"],
@@ -451,7 +458,7 @@ def report_history(_auth: dict = Depends(current_user)):
 
 
 @router.get("/file/{filename}")
-def get_report_file(filename: str, _auth: dict = Depends(current_user)):
+def get_report_file(filename: str, _auth: dict = Depends(current_user), market: str = Depends(market_param)):
     content = get_report_content(filename, _auth["uid"])
     if content is None:
         raise HTTPException(status_code=404, detail="파일 없음")

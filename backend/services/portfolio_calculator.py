@@ -21,8 +21,8 @@ def _safe(v, default: float = 0.0) -> float:
         return default
 
 
-def _trim_to_us_session(close_df: pd.DataFrame) -> pd.DataFrame:
-    """가격 프레임을 **미국 거래일 기준**으로 정리한다.
+def _trim_to_session(close_df: pd.DataFrame, market: str = "US") -> pd.DataFrame:
+    """가격 프레임을 **그 시장의 거래일 기준**으로 정리한다.
 
     예전에는 서버 로컬(KST) 의 오늘 날짜로 인덱스를 연장했다.
     KST 오전은 미국 기준 전날 밤이라, 한국 시각 8/5 오전에 8/5 행이 생기고
@@ -30,20 +30,28 @@ def _trim_to_us_session(close_df: pd.DataFrame) -> pd.DataFrame:
     가짜 보합 구간으로 보인다 (사용자가 본 '하루씩 밀린' 증상).
 
     규칙
-      · 장중(09:30~16:00 ET) → 오늘(ET)까지 인정. 실시간 가격이 주입돼 있다.
-      · 그 외              → 마지막으로 종가가 확정된 거래일까지만.
+      · 장중 → 오늘까지 인정. 실시간 가격이 주입돼 있다.
+      · 그 외 → 마지막으로 종가가 확정된 거래일까지만.
       · 목표 날짜를 넘는 행은 잘라낸다. 목표 날짜가 비어 있어도 새로 만들지 않는다
         (없는 거래일을 ffill 로 채우면 가짜 보합이 다시 생긴다).
+
+    **시장마다 기준이 다르다.** 예전에는 미국 캘린더로만 잘라서, 한국 포트폴리오의
+    가장 최근 거래일이 통째로 사라졌다 — KST 오전은 미국 기준 전날 밤이고,
+    미국 공휴일(노동절 등)에 한국이 열린 날도 잘려 나갔다.
     """
     if close_df.empty:
         return close_df
     try:
-        from backend.services.market_calendar import (
-            is_us_market_open, last_completed_session, now_et,
-        )
-        target = pd.Timestamp(
-            now_et().date() if is_us_market_open() else last_completed_session()
-        )
+        if market == "KR":
+            from backend.services.market_calendar import kr_price_cutoff
+            target = pd.Timestamp(kr_price_cutoff())
+        else:
+            from backend.services.market_calendar import (
+                is_us_market_open, last_completed_session, now_et,
+            )
+            target = pd.Timestamp(
+                now_et().date() if is_us_market_open() else last_completed_session()
+            )
     except Exception:
         return close_df
 
@@ -72,6 +80,7 @@ def build_equity_curve(
     holdings: dict,
     trade_log: list,
     close_df: pd.DataFrame,
+    market: str = "US",
 ) -> pd.Series:
     """
     매매 이력(trade_log)을 처음부터 순방향으로 재생해 날짜별 포트폴리오 가치 산출.
@@ -83,7 +92,7 @@ def build_equity_curve(
         return pd.Series(dtype=float)
 
     # 미국 거래일 기준으로 정리 (KST 오늘로 연장하면 하루 밀린 가짜 행이 생긴다)
-    close_df = _trim_to_us_session(close_df)
+    close_df = _trim_to_session(close_df, market)
     if close_df.empty:
         return pd.Series(dtype=float)
 
@@ -201,6 +210,41 @@ def build_equity_curve(
         return _fallback()
 
 
+def _trades_by_chart_date(trade_markers, chart_dates: list[str]) -> dict:
+    """거래를 차트에 실제로 존재하는 날짜에 붙인다.
+
+    날짜 문자열이 정확히 같은 점에만 붙이면 거래가 조용히 사라진다. 차트에는
+    거래일만 남기 때문이다 — 주말 행은 제거되고(장이 안 열려 값이 평평하다),
+    자산이 0 이던 앞구간도 잘려 나간다. 그래서 주말·공휴일에 기록한 거래나
+    계좌 초기의 거래가 화면에서 몇 개씩 빠져 보였다.
+
+    없는 날짜는 **그 이후 첫 거래일**로 옮긴다. 마지막 날짜보다 뒤면 마지막
+    날에, 첫 날짜보다 앞이면 첫 날에 붙인다. 위치가 하루 이틀 밀릴 수는 있어도
+    거래가 통째로 없어지는 것보다 낫다.
+    """
+    from bisect import bisect_left
+
+    by_date: dict = {}
+    if not chart_dates:
+        return by_date
+    ordered = sorted(chart_dates)
+
+    for tr in (trade_markers or []):
+        d = str(tr.get("date", ""))
+        if not d:
+            continue
+        if d not in by_date and d not in ordered:
+            i = bisect_left(ordered, d)
+            d = ordered[i] if i < len(ordered) else ordered[-1]
+        by_date.setdefault(d, []).append({
+            "ticker": tr.get("ticker", ""),
+            "type":   tr.get("type",   ""),
+            "q":      tr.get("q",      0),
+            "price":  tr.get("price",  0),
+        })
+    return by_date
+
+
 def equity_curve_to_records(
     curve: pd.Series,
     benchmark_df: pd.DataFrame | None = None,
@@ -238,15 +282,10 @@ def equity_curve_to_records(
     cash_evt: dict = cash_event_amounts or {}
 
     # 날짜별 주식 거래 목록 (포인트 마커용)
-    trade_by_date: dict = {}
-    for tr in (trade_markers or []):
-        d = tr.get("date", "")
-        trade_by_date.setdefault(d, []).append({
-            "ticker": tr.get("ticker", ""),
-            "type":   tr.get("type", ""),
-            "q":      tr.get("q", 0),
-            "price":  tr.get("price", 0),
-        })
+    trade_by_date = _trades_by_chart_date(
+        trade_markers,
+        [d.strftime("%Y-%m-%d") for d in curve.index],
+    )
 
     records = []
     for date, val in curve.items():
@@ -270,23 +309,32 @@ def calculate_portfolio_beta(
     holdings: dict,
     close_df: pd.DataFrame,
     benchmark: str = "^GSPC",
-) -> float:
+) -> "float | None":
+    """포트폴리오 베타. 계산할 수 없으면 None.
+
+    예전에는 어떤 이유로든 못 구하면 1.0 을 돌려줬다. 1.0 은 '시장과 똑같이
+    움직인다'는 뜻이라 '모른다'와 전혀 다른 값인데, 5일치 프레임으로 부른
+    AI 피드백에서 **모든 종목이 관측치 부족(<30)으로 1.0** 이 되어 포트폴리오
+    베타가 항상 1.00 으로 보고됐다. 화면 상단 지표는 긴 구간을 써서 제대로
+    나오는데 피드백만 1.00 이라 서로 어긋났다.
+    """
     try:
         if benchmark not in close_df.columns:
-            return 1.0
+            return None
         mkt_ret = close_df[benchmark].pct_change().dropna()
         mkt_var = mkt_ret.var()
         if mkt_var <= 1e-12:
-            return 1.0
+            return None
 
         stock_tickers = [t for t in holdings if t != "CASH" and t in close_df.columns]
         if not stock_tickers:
-            return 1.0
+            return None
 
         # ffill 후 마지막 행을 쓴다 — 희소 프레임이 넘어오면 마지막 행이 NaN 일 수 있고,
         # NaN 은 `total_val <= 0` 비교를 통과해(비교 결과가 항상 False) 그대로 전파된다.
         latest = close_df.ffill().iloc[-1]
         values, betas = [], []
+        measured = 0          # 실제로 베타를 계산해 낸 종목 수
         for t in stock_tickers:
             s_ret = close_df[t].pct_change().dropna()
             common = s_ret.index.intersection(mkt_ret.index)
@@ -301,6 +349,7 @@ def calculate_portfolio_beta(
                 else:
                     cov = np.cov(s_ret.loc[common], mkt_ret.loc[common])[0, 1]
                     beta_t = cov / mv
+                    measured += 1
             if not math.isfinite(beta_t):
                 beta_t = 1.0
             px = float(latest.get(t, 0) or 0)
@@ -315,15 +364,27 @@ def calculate_portfolio_beta(
             return 1.0
 
         weighted = sum(v * b for v, b in zip(values, betas)) / total_val
+        # 한 종목도 실제로 계산하지 못했으면(구간이 짧아 전부 1.0 폴백)
+        # 그 결과는 데이터가 아니라 기본값의 평균일 뿐이다.
+        if measured == 0:
+            return None
         return float(np.clip(weighted, -2.0, 3.0))
     except Exception:
-        return 1.0
+        return None
 
 
 # ── 핵심 지표 계산 ─────────────────────────────────────────────────────────────
 
-def _market_open_flag() -> bool:
+def _market_open_flag(market: str = "US") -> bool:
+    """이 시장이 지금 장중인지. 화면의 'LIVE' 배지가 이 값을 쓴다.
+
+    미국 기준으로 고정돼 있어, 한국 포트폴리오에서 한국장이 열려 있을 때는
+    배지가 꺼지고 한국이 닫힌 미국장 시간에 켜졌다.
+    """
     try:
+        if market == "KR":
+            from backend.services.market_calendar import is_kr_market_open
+            return is_kr_market_open()
         from backend.services.market_calendar import is_us_market_open
         return is_us_market_open()
     except Exception:
@@ -337,6 +398,7 @@ def calculate_metrics(
     raw_df: pd.DataFrame | None = None,
     live: dict | None = None,
     now=None,
+    market: str = "US",
 ) -> dict:
     """포트폴리오 지표.
 
@@ -466,8 +528,8 @@ def calculate_metrics(
         "today_change_val":  round(today_chg_val, 2),
         "today_change_pct":  round(today_chg_pct, 4),
         "as_of":             as_of_str,
-        "market_open":       _market_open_flag(),
-        "portfolio_beta":    round(beta, 4),
+        "market_open":       _market_open_flag(market),
+        "portfolio_beta":    (round(beta, 4) if beta is not None else None),
         "vix":               round(vix, 2),
         # 계산 불가면 null — round(None) 은 TypeError 이므로 반드시 분기해야 한다
         "perf_1w":           (lambda v: round(v, 4) if v is not None else None)(_perf(5)),
@@ -559,6 +621,7 @@ def build_return_pct_curve(
     holdings: dict,
     trade_log: list,
     close_df: pd.DataFrame,
+    market: str = "US",
 ) -> "tuple[pd.Series, dict[str, list[dict]], float, dict[str, float], pd.Series]":
     """
     시간가중수익률(TWRR) 누적 커브 반환.
@@ -578,7 +641,7 @@ def build_return_pct_curve(
         return pd.Series(dtype=float), {}, 0.0, {}, pd.Series(dtype=float)
 
     # 미국 거래일 기준으로 정리 (KST 오늘로 연장하면 하루 밀린 가짜 행이 생긴다)
-    close_df = _trim_to_us_session(close_df)
+    close_df = _trim_to_session(close_df, market)
     if close_df.empty:
         return pd.Series(dtype=float), {}, 0.0, {}, pd.Series(dtype=float)
 
@@ -807,15 +870,10 @@ def return_pct_to_records(
 
     cash_evts = cash_events or {}
 
-    trade_by_date: dict = {}
-    for tr in (trade_markers or []):
-        d = tr.get("date", "")
-        trade_by_date.setdefault(d, []).append({
-            "ticker": tr.get("ticker", ""),
-            "type":   tr.get("type",   ""),
-            "q":      tr.get("q",      0),
-            "price":  tr.get("price",  0),
-        })
+    trade_by_date = _trades_by_chart_date(
+        trade_markers,
+        [d.strftime("%Y-%m-%d") for d in curve.index],
+    )
 
     records = []
     for date, pct in curve.items():

@@ -20,6 +20,7 @@ Firebase ID 토큰 검증 + 사용자 식별.
 from __future__ import annotations
 
 import logging
+import time
 import os
 from pathlib import Path
 from typing import Optional
@@ -50,6 +51,17 @@ if _IS_MANAGED_RUNTIME and os.getenv("ALLOW_INSECURE_DEV_AUTH", "").lower() in (
         "ALLOW_INSECURE_DEV_AUTH 가 운영 환경에 설정돼 있어 무시했습니다. "
         "이 변수는 로컬 전용입니다 — 배포 설정에서 제거하세요."
     )
+
+
+# 에뮬레이터를 쓰면 인증도 로컬에만 있으므로, 운영 계정을 건드릴 위험이 없다.
+# 그때는 로컬에서도 정리 동작을 그대로 돌린다 — 운영과 같은 흐름을 시험할 수 있다.
+_USING_AUTH_EMULATOR = bool(os.getenv("FIREBASE_AUTH_EMULATOR_HOST"))
+
+# 공유 Firebase 를 쓰면서도 로컬에서 정리를 허용하고 싶을 때의 탈출구.
+# 실제 사용자 계정을 지울 수 있으므로 기본은 꺼 둔다.
+_LOCAL_MAY_DELETE_AUTH = _USING_AUTH_EMULATOR or (
+    os.getenv("LOCAL_ALLOW_AUTH_DELETE", "false").lower() in ("1", "true", "yes")
+)
 
 
 def _cred_path() -> Optional[Path]:
@@ -124,14 +136,16 @@ def _bearer(authorization: Optional[str]) -> Optional[str]:
     return None
 
 
-# 가입이 확인된 uid — 매 요청마다 DB 를 읽지 않기 위한 캐시.
+# 가입이 확인된 uid → 확인한 시각. 매 요청마다 DB 를 읽지 않기 위한 캐시다.
 # 탈퇴 시 비워야 하므로 forget_registration() 을 함께 둔다.
-_registered: set[str] = set()
+# 만료가 없으면 DB 와 어긋난 채 굳어버린다 (is_registered 주석 참고).
+_registered: dict[str, float] = {}
+_REGISTRATION_TTL_SECONDS = 60.0
 
 
 def forget_registration(uid: str) -> None:
     """가입 캐시에서 제거 (탈퇴 처리 후 호출)."""
-    _registered.discard(uid)
+    _registered.pop(uid, None)
 
 
 def is_registered(uid: str) -> bool:
@@ -141,16 +155,31 @@ def is_registered(uid: str) -> bool:
     누르는 순간 Firebase 계정을 자동으로 만들어 주기 때문에, 이것만 믿으면
     가입 절차 없이 아무나 들어오게 된다. 그래서 users 행의 존재를 가입의
     기준으로 삼는다 — 이 행은 명시적인 가입 경로에서만 만들어진다.
+
+    캐시는 **반드시 만료돼야 한다.** 예전에는 한 번 True 가 되면 영원히
+    True 였다. 그래서 users 행이 사라져도(다른 인스턴스에서 탈퇴, 로컬 DB
+    초기화) 그 인스턴스는 계속 가입된 것으로 봤고, 서버가 재시작되면 같은
+    계정이 갑자기 미가입으로 바뀌었다. 그 결과 "가입하면 이미 가입된 계정,
+    로그인하면 가입되지 않은 계정" 이 번갈아 나왔다.
+
+    DB 를 매번 읽지 않는 이유는 이 함수가 거의 모든 요청에서 불리기 때문이다.
+    짧은 만료로 왕복을 줄이면서도 어긋남이 오래 가지 않게 한다.
     """
-    if uid in _registered:
+    now = time.time()
+    seen_at = _registered.get(uid)
+    if seen_at is not None and now - seen_at < _REGISTRATION_TTL_SECONDS:
         return True
     try:
         from backend.db.users_repo import get_user
         if get_user(uid):
-            _registered.add(uid)
+            _registered[uid] = now
             return True
+        # DB 에 없다 — 캐시에 남아 있던 옛 판단을 지운다.
+        _registered.pop(uid, None)
     except Exception as e:                     # DB 미연결 — 인증을 통과시키지 않는다
         logger.warning(f"가입 확인 실패 {uid}: {e}")
+        # DB 를 못 읽었을 뿐이라면 아직 유효한 캐시는 그대로 믿는다.
+        return seen_at is not None
     return False
 
 

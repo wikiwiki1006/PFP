@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 from backend.db import users_repo
 from backend.services.auth import (
     current_user, verified_user, init_firebase, is_registered, forget_registration,
+    _IS_MANAGED_RUNTIME, _LOCAL_MAY_DELETE_AUTH,
 )
 from backend.services.credentials import (
     normalize_username, validate_username, validate_password, validate_email,
@@ -43,7 +44,16 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 # 아이디 로그인에서 비밀번호를 대조할 때 Identity Toolkit 호출에 쓴다.
 FIREBASE_WEB_API_KEY = os.getenv(
     "FIREBASE_WEB_API_KEY", "AIzaSyCSjie4HV_Z8zEnlowZDW33qTRdpstTIVE")
-IDENTITY_TOOLKIT = "https://identitytoolkit.googleapis.com/v1"
+# 인증 에뮬레이터를 쓰면 이 주소도 함께 옮겨야 한다.
+# 가입은 Admin SDK 가 처리해 에뮬레이터를 자동으로 따라가지만, 로그인·비밀번호
+# 재설정은 이 REST 주소를 직접 부르기 때문이다. 한쪽만 옮기면 "가입은 되는데
+# 로그인은 안 되는" 상태가 된다.
+_AUTH_EMU = os.getenv("FIREBASE_AUTH_EMULATOR_HOST", "").strip()
+IDENTITY_TOOLKIT = (
+    f"http://{_AUTH_EMU}/identitytoolkit.googleapis.com/v1"
+    if _AUTH_EMU else
+    "https://identitytoolkit.googleapis.com/v1"
+)
 
 NAVER_CLIENT_ID     = os.getenv("NAVER_CLIENT_ID", "")
 NAVER_CLIENT_SECRET = os.getenv("NAVER_CLIENT_SECRET", "")
@@ -123,11 +133,13 @@ class ProfileUpdate(BaseModel):
     # 범위 검사는 아래에서 한국어로 처리한다 — Field 로 막으면 영문 원시 오류가 나간다.
     age: Optional[int] = None
     clear_age: bool = False
+    # 로그인 후 처음 열릴 시장 ('US' | 'KR')
+    default_market: Optional[str] = None
 
 
 @router.patch("/me")
 def patch_me(body: ProfileUpdate, user: dict = Depends(current_user)):
-    """표시 이름·나이 변경. 이메일은 로그인 식별자라 여기서 바꾸지 않는다."""
+    """표시 이름·나이·기본 시장 변경. 이메일은 로그인 식별자라 여기서 바꾸지 않는다."""
     name = body.name.strip() if body.name is not None else None
     if name is not None:
         if not name:
@@ -137,26 +149,51 @@ def patch_me(body: ProfileUpdate, user: dict = Depends(current_user)):
                                 detail=f"표시 이름은 {DISPLAY_NAME_MAX}자 이하로 입력해 주세요.")
     if body.age is not None and not (1 <= body.age <= 120):
         raise HTTPException(status_code=400, detail="나이는 1~120 사이로 입력해 주세요.")
-    if name is None and body.age is None and not body.clear_age:
+    if body.default_market is not None and body.default_market not in ("US", "KR"):
+        raise HTTPException(status_code=400, detail="시장 값이 올바르지 않습니다.")
+    if (name is None and body.age is None and not body.clear_age
+            and body.default_market is None):
         raise HTTPException(status_code=400, detail="변경할 내용이 없습니다.")
-    if not users_repo.update_profile(user["uid"], name, body.age, body.clear_age):
+    if not users_repo.update_profile(user["uid"], name, body.age, body.clear_age,
+                                     body.default_market):
         raise HTTPException(status_code=400, detail="저장하지 못했습니다.")
     return users_repo.get_user(user["uid"])
 
 
 @router.delete("/me")
 def delete_me(user: dict = Depends(current_user)):
-    """회원 탈퇴 — DB 개인 데이터 + Firebase 계정 모두 삭제."""
-    result = users_repo.delete_user(user["uid"])
-    forget_registration(user["uid"])
+    """회원 탈퇴 — DB 개인 데이터 + Firebase 계정 모두 삭제.
+
+    **인증 계정을 먼저 지운다.** 로그인 가능 여부를 가르는 것은 그쪽이라,
+    거기부터 없애야 중간에 실패해도 "탈퇴했는데 로그인은 되는" 상태가 생기지 않는다.
+    인증 계정을 못 지우면 아무것도 지우지 않고 실패로 끝낸다 — 개인 데이터만
+    날아가고 계정 껍데기가 남는 것이 가장 나쁜 결과이기 때문이다.
+    """
+    uid = user["uid"]
+
+    if not init_firebase():
+        raise HTTPException(status_code=503, detail="인증 서버를 사용할 수 없습니다.")
+    from firebase_admin import auth as fb_auth
+
     try:
-        if init_firebase():
-            from firebase_admin import auth as fb_auth
-            fb_auth.delete_user(user["uid"])
-            result["firebase_deleted"] = True
+        fb_auth.delete_user(uid)
     except Exception as e:
-        logger.warning(f"Firebase 계정 삭제 실패 {user['uid']}: {e}")
-        result["firebase_deleted"] = False
+        # 이미 없는 계정이면 지울 것이 없으니 계속 진행한다.
+        if "USER_NOT_FOUND" not in str(e).upper() and "NOT_FOUND" not in str(e).upper():
+            logger.error(f"Firebase 계정 삭제 실패 {uid}: {e}")
+            raise HTTPException(
+                status_code=503,
+                detail="탈퇴 처리에 실패했습니다. 잠시 후 다시 시도해 주세요.",
+            )
+
+    result = users_repo.delete_user(uid)
+    forget_registration(uid)
+    result["firebase_deleted"] = True
+
+    if not result.get("deleted"):
+        # 인증 계정은 이미 사라져 로그인은 불가능하다. 남은 행은 다음 가입 때
+        # _reconcile_account 가 치우므로 탈퇴 자체는 성공으로 본다.
+        logger.warning(f"탈퇴: 인증 계정은 삭제됐으나 DB 행이 남음 uid={uid}")
     return result
 
 
@@ -369,15 +406,72 @@ def list_providers():
     }
 
 
-@router.post("/naver")
-def naver_login(body: OAuthTokenIn):
-    """Naver 액세스 토큰 → 검증 → Firebase Custom Token."""
+class NaverCodeIn(BaseModel):
+    code: str = Field(min_length=5)
+    state: str = Field(min_length=1)
+    redirect_uri: str = Field(min_length=5)
+    # 가입 화면에서 눌렀는지 여부. 로그인 화면에서는 가입한 적 없는 계정을 막는다.
+    signup: bool = False
+
+
+@router.get("/naver/authorize-url")
+def naver_authorize_url(redirect_uri: str, state: str = ""):
+    """네이버 인가 페이지 URL. 프론트가 이 주소를 팝업으로 연다."""
     if not (NAVER_CLIENT_ID and NAVER_CLIENT_SECRET):
         raise HTTPException(status_code=503, detail="네이버 로그인이 설정되지 않았습니다.")
+    from urllib.parse import urlencode
+    q = urlencode({
+        "client_id": NAVER_CLIENT_ID,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        # 네이버는 state 를 필수로 요구한다(CSRF 방지). 프론트가 만들어 보낸 값을
+        # 그대로 싣고, 콜백에서 되돌아온 값과 대조한다.
+        "state": state,
+        # 네이버에 이미 로그인돼 있으면 계정 선택 화면 없이 통과한다.
+        # reauthenticate 는 매번 로그인 화면을 띄워 다른 계정으로 들어갈 수 있게 한다
+        # (네이버에는 카카오의 select_account 에 해당하는 값이 없다).
+        "auth_type": "reauthenticate",
+    })
+    return {"url": f"https://nid.naver.com/oauth2.0/authorize?{q}"}
+
+
+@router.post("/naver/callback")
+def naver_callback(body: NaverCodeIn):
+    """인가 코드 → 액세스 토큰 교환 → 프로필 검증 → Custom Token."""
+    if not (NAVER_CLIENT_ID and NAVER_CLIENT_SECRET):
+        raise HTTPException(status_code=503, detail="네이버 로그인이 설정되지 않았습니다.")
+
+    try:
+        r = requests.post(
+            "https://nid.naver.com/oauth2.0/token",
+            data={
+                "grant_type": "authorization_code",
+                "client_id": NAVER_CLIENT_ID,
+                "client_secret": NAVER_CLIENT_SECRET,
+                "code": body.code,
+                "state": body.state,
+                "redirect_uri": body.redirect_uri,
+            },
+            timeout=10,
+        )
+        data = r.json()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"네이버 인증 서버 오류: {e}")
+
+    token = data.get("access_token")
+    if r.status_code != 200 or not token:
+        logger.warning(f"네이버 토큰 교환 실패: {data}")
+        raise HTTPException(status_code=401, detail="네이버 로그인에 실패했습니다. 다시 시도해 주세요.")
+
+    return _naver_profile_to_token(token, register=body.signup)
+
+
+def _naver_profile_to_token(access_token: str, register: bool):
+    """네이버 프로필 조회 → Custom Token 발급. 토큰 방식과 코드 방식이 함께 쓴다."""
     try:
         r = requests.get(
             "https://openapi.naver.com/v1/nid/me",
-            headers={"Authorization": f"Bearer {body.access_token}"},
+            headers={"Authorization": f"Bearer {access_token}"},
             timeout=10,
         )
         data = r.json()
@@ -390,11 +484,37 @@ def naver_login(body: OAuthTokenIn):
     p = data.get("response") or {}
     if not p.get("id"):
         raise HTTPException(status_code=401, detail="네이버 프로필을 가져올 수 없습니다.")
+
+    email = (p.get("email") or "").strip().lower() or None
+    if not email:
+        # 이메일은 계정을 식별하고 중복 가입을 막는 근거다. 없으면 진행할 수 없다.
+        raise HTTPException(
+            status_code=400,
+            detail="네이버 계정의 이메일 제공에 동의해야 가입할 수 있습니다.",
+        )
+    if _is_reserved(email):
+        raise HTTPException(status_code=400, detail="사용할 수 없는 이메일입니다.")
+
+    # 표시 이름은 **넘기지 않는다**. 네이버가 주는 것은 실명이라, 그대로 쓰면
+    # 사이트 곳곳에 본명이 노출된다. 이메일 가입과 똑같이 이메일 앞부분을
+    # 기본값으로 삼고(/auth/social/register 가 처리), 가입 완료 화면에서
+    # 사용자가 원하는 닉네임으로 바꿀 수 있게 한다.
     return _issue_custom_token(
-        uid=f"naver:{p['id']}", email=p.get("email"),
-        name=p.get("nickname") or p.get("name"), provider="naver",
-        photo=p.get("profile_image"), register=body.signup,
+        uid=f"naver:{p['id']}", email=email, name=None, provider="naver",
+        photo=p.get("profile_image"), register=register,
     )
+
+
+@router.post("/naver")
+def naver_login(body: OAuthTokenIn):
+    """Naver 액세스 토큰 → 검증 → Firebase Custom Token.
+
+    앱이 직접 토큰을 얻은 경우용. 웹 팝업 흐름은 /naver/callback 을 쓴다.
+    프로필 처리는 두 경로가 같아야 하므로 한 함수에 모아 두었다.
+    """
+    if not (NAVER_CLIENT_ID and NAVER_CLIENT_SECRET):
+        raise HTTPException(status_code=503, detail="네이버 로그인이 설정되지 않았습니다.")
+    return _naver_profile_to_token(body.access_token, register=body.signup)
 
 
 def _kakao_profile_to_token(access_token: str, register: bool = False) -> dict:
@@ -474,6 +594,10 @@ def kakao_authorize_url(redirect_uri: str, state: str = ""):
     # 생략하면 콘솔에 설정된 동의항목이 그대로 적용된다.
     if KAKAO_SCOPE:
         params["scope"] = KAKAO_SCOPE
+    # 카카오에 이미 로그인돼 있으면 계정 선택 없이 그 계정으로 바로 넘어간다.
+    # 한 기기를 여러 사람이 쓰거나 계정이 둘 이상이면 원하는 계정으로 못 들어간다.
+    # select_account 를 주면 매번 어떤 계정으로 진행할지 고르게 한다.
+    params["prompt"] = "select_account"
     q = urlencode(params)
     return {"url": f"https://kauth.kakao.com/oauth/authorize?{q}"}
 
@@ -552,10 +676,22 @@ def _resolve_login_id(raw: str) -> str:
     return ADMIN_EMAIL if v == ADMIN_LOGIN_ID else v
 
 
+# 로컬 개발용 고정 테스트 계정.
+#
+# Firebase 프로젝트는 로컬과 운영이 같아서, 로컬에서 아무 이메일로나 가입하면
+# 실서비스 계정과 같은 공간에 쌓인다. 대신 이 계정 하나만 미리 만들어 두고
+# 로컬 테스트는 항상 이걸로 한다 (backend/scripts/seed_test_user.py).
+#
+# 예약어로 둬서 아무도 이 주소로 가입하지 못하게 한다. 그래야 운영에서
+# 누가 같은 주소로 가입을 시도해도 _reconcile_account 가 이 인증 계정을
+# 지워버리지 않는다 — 지워지면 로컬 로그인이 조용히 망가진다.
+LOCAL_TEST_EMAIL = "test@gmail.com"
+
+
 def _is_reserved(email: str) -> bool:
-    """일반 가입이 쓸 수 없는 주소인지. 관리자 계정을 회원가입으로 만들거나
-    가로채지 못하게 막는다."""
-    return email.strip().lower() in (ADMIN_EMAIL, ADMIN_LOGIN_ID)
+    """일반 가입이 쓸 수 없는 주소인지. 관리자 계정과 로컬 테스트 계정을
+    회원가입으로 만들거나 가로채지 못하게 막는다."""
+    return email.strip().lower() in (ADMIN_EMAIL, ADMIN_LOGIN_ID, LOCAL_TEST_EMAIL)
 
 
 class LoginRequest(BaseModel):
@@ -589,6 +725,77 @@ def email_available(email: str):
     return {"available": True, "reason": ""}
 
 
+def _fb_user_by_email(email: str):
+    """Firebase 에 그 이메일 계정이 있으면 반환, 없으면 None."""
+    if not init_firebase():
+        return None
+    from firebase_admin import auth as fb_auth
+    try:
+        return fb_auth.get_user_by_email(email)
+    except Exception:
+        return None
+
+
+def _reconcile_account(email: str) -> Optional[dict]:
+    """가입 상태가 어긋나 있으면 정리하고, 진짜로 쓰이는 계정이면 그걸 돌려준다.
+
+    계정은 두 곳에 나뉘어 있다 — 인증은 Firebase, 가입 사실은 우리 DB.
+    탈퇴는 두 곳을 모두 지워야 하는데, 한쪽만 지워지면 사용자는 이도 저도
+    못 하는 상태에 빠진다:
+
+      · DB 행만 남음  → 가입하면 "이미 가입된 이메일", 로그인하면 인증 실패
+      · Firebase 만 남음 → 가입하면 "이미 존재", 로그인하면 "가입되지 않은 계정"
+
+    둘 중 한쪽만 있는 계정은 아무도 쓸 수 없는 잔해다. 그대로 두면 그 이메일은
+    영영 막히므로, 여기서 지우고 새로 가입할 수 있게 열어 준다.
+    양쪽 다 있으면 정상적으로 쓰이는 계정이므로 손대지 않고 그대로 알린다.
+    """
+    row = users_repo.find_by_email(email)
+    fb_user = _fb_user_by_email(email)
+
+    if row and fb_user:
+        return row                      # 정상 — 진짜 가입된 계정
+
+    if row and not fb_user:
+        logger.warning(f"인증 계정 없는 DB 행 정리: {email}")
+        users_repo.delete_user(row["uid"])
+        forget_registration(row["uid"])
+        return None
+
+    if fb_user and not row:
+        # 로컬 개발에서는 인증 계정을 지우지 않는다.
+        #
+        # Firebase 프로젝트는 로컬과 운영이 같은데 DB 는 다르다. 그래서 운영에
+        # 가입한 이메일이 로컬 DB 에는 없고, 여기서 '고아'로 보인다. 그대로
+        # 지우면 **실제 사용자의 인증 계정이 로컬 작업 때문에 사라진다.**
+        # 정리는 DB 와 인증이 짝을 이루는 운영에서만 한다.
+        if not _IS_MANAGED_RUNTIME and not _LOCAL_MAY_DELETE_AUTH:
+            logger.warning(
+                f"로컬 실행이라 인증 계정을 지우지 않는다: {email} (운영 계정일 수 있음). "
+                f"이 계정을 정말 지우려면 LOCAL_ALLOW_AUTH_DELETE=true 로 실행하거나, "
+                f"에뮬레이터(FIREBASE_AUTH_EMULATOR_HOST)를 쓰세요."
+            )
+            raise HTTPException(
+                status_code=409,
+                detail="이미 다른 환경에서 사용 중인 이메일입니다. "
+                       "로컬 개발에서는 다른 이메일로 가입하거나 인증 에뮬레이터를 사용해 주세요.",
+            )
+
+        logger.warning(f"가입 기록 없는 인증 계정 정리: {email}")
+        try:
+            from firebase_admin import auth as fb_auth
+            fb_auth.delete_user(fb_user.uid)
+        except Exception as e:
+            logger.error(f"고아 인증 계정 삭제 실패 {email}: {e}")
+            # 지우지 못했으면 가입도 못 한다 — 조용히 넘어가면 원인 모를 실패가 된다.
+            raise HTTPException(
+                status_code=503,
+                detail="이전 계정 정리에 실패했습니다. 잠시 후 다시 시도해 주세요.",
+            )
+        forget_registration(fb_user.uid)
+    return None
+
+
 @router.post("/signup")
 def signup(body: SignupRequest):
     """이메일 + 비밀번호로 가입하고 곧바로 로그인시킨다.
@@ -605,7 +812,8 @@ def signup(body: SignupRequest):
     if _is_reserved(email):
         raise HTTPException(status_code=400, detail="사용할 수 없는 이메일입니다.")
 
-    owner = users_repo.find_by_email(email)
+    # 한쪽에만 남은 잔해는 여기서 정리된다 — 탈퇴 후 같은 이메일로 다시 가입할 수 있다.
+    owner = _reconcile_account(email)
     if owner:
         raise HTTPException(
             status_code=409,
@@ -673,6 +881,20 @@ def login(body: LoginRequest):
         if "TOO_MANY_ATTEMPTS" in msg:
             raise HTTPException(status_code=429,
                                 detail="시도가 너무 많습니다. 잠시 후 다시 시도해 주세요.")
+        # DB 에는 가입 기록이 있는데 인증 계정이 없으면, 탈퇴가 반만 처리된 잔해다.
+        # 그 이메일은 로그인도 가입도 안 되는 상태로 영영 막히므로 여기서 치운다.
+        #
+        # EMAIL_NOT_FOUND 로 판별할 수 없다 — 이 프로젝트는 이메일 열거 방지가
+        # 켜져 있어 Firebase 가 일부러 뭉뚱그린 오류를 준다. 그래서 DB 행이 있는
+        # 경우에 한해 인증 쪽에 실제로 계정이 있는지 직접 확인한다.
+        if _fb_user_by_email(email) is None:
+            logger.warning(f"인증 계정 없는 DB 행 정리(로그인 시도): {email}")
+            users_repo.delete_user(account["uid"])
+            forget_registration(account["uid"])
+            raise HTTPException(
+                status_code=404,
+                detail="가입되지 않은 계정입니다. 회원가입을 진행해 주세요.",
+            )
         raise HTTPException(status_code=401, detail=INVALID)
 
     if not init_firebase():

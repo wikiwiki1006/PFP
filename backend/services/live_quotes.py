@@ -364,18 +364,27 @@ def backfill_last_close(tickers: list[str]) -> int:
 def _can_move(ticker: str) -> bool:
     """지금 이 티커의 가격이 변할 수 있는지.
 
-    · 24시간 자산(암호화폐·환율·선물·해외지수) → 항상 True
-    · 미국 주식 → 프리마켓 04:00 ~ 애프터마켓 20:00 ET 사이에만 True
+    · 미국 주식 → 프리마켓 04:00 ~ 애프터마켓 20:00 ET
       (정규장 마감 후에도 시간외 거래로 가격이 실제로 움직이므로 16:00 이 아니라 20:00)
+    · 한국 주식 → 시간외 포함 08:30 ~ 18:00 KST 평일
+    · 그 외(암호화폐·환율·선물·해외지수) → 항상 True
+
     가격이 변할 수 없는 시간대에는 1분 규칙을 적용하지 않는다 — 값이 고정인데
     매 검색마다 yfinance 를 호출하면 요청만 늘고 차단 위험이 커진다.
+
+    예전에는 '미국이냐 아니냐'로만 갈라, .KS/.KQ 가 24시간 자산과 같은 취급을
+    받았다. 한국 주식은 09:00~15:30 에만 거래되는데도 밤이든 주말이든 60초마다
+    다시 받아 오고 있었다 — 하루 스무 시간 넘게 의미 없는 호출이다.
     """
     from backend.services.market_calendar import (
         is_us_extended_hours, uses_us_session_calendar,
+        is_kr_extended_hours, uses_kr_session_calendar,
     )
-    if not uses_us_session_calendar(ticker):
-        return True
-    return is_us_extended_hours()
+    if uses_us_session_calendar(ticker):
+        return is_us_extended_hours()
+    if uses_kr_session_calendar(ticker):
+        return is_kr_extended_hours()
+    return True
 
 
 def get_quotes(

@@ -36,6 +36,10 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS age           SMALLINT;
 -- 권한을 토큰(Firebase custom claims)이 아니라 DB 에 두는 이유는, 토큰은 갱신 전까지
 -- 옛 값을 들고 있어 권한 회수가 즉시 반영되지 않기 때문이다.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin      BOOLEAN NOT NULL DEFAULT FALSE;
+-- 로그인 후 처음 열릴 시장. 사용자가 프로필에서 고른다.
+-- 기본값을 US 로 둔 이유는 기존 사용자의 보유 종목이 전부 미국 종목이라,
+-- 값이 없던 계정이 갑자기 빈 한국 화면으로 열리면 데이터가 사라진 것처럼 보인다.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS default_market TEXT NOT NULL DEFAULT 'US';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(LOWER(email)) WHERE email IS NOT NULL;
 -- 아이디는 로그인 식별자다. 대소문자를 구분하면 'Foo' 와 'foo' 가 다른 계정이 되어
 -- 사용자가 혼란스럽고 사칭에도 쓰일 수 있으므로, 소문자 기준으로 유일성을 건다.
@@ -87,6 +91,53 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 -- 오래된 잡 청소용
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
+
+-- ── 시장 구분 (US / KR) ──────────────────────────────────────────────────────
+--   미국과 한국 자산을 완전히 분리해 다룬다. 한 포트폴리오에 원화·달러 종목이
+--   섞이면 평가액이 `800,000 + 2,300` 처럼 단위 없이 더해져 수익률·비중·최적화가
+--   전부 무의미해진다. 화면도 시장별로 갈리므로 조회는 항상 market 을 건다.
+--
+--   테이블을 복제하지 않고 컬럼으로 나눈 이유: 복제하면 스키마가 두 벌이 되어
+--   이후 모든 변경을 두 번 해야 한다. 사용자에게는 완전히 별개로 보이면서
+--   유지보수는 한 벌로 끝난다.
+--
+--   기존 데이터는 전부 미국 종목이므로 US 로 채운다(DEFAULT 'US').
+ALTER TABLE holdings  ADD COLUMN IF NOT EXISTS market TEXT NOT NULL DEFAULT 'US';
+ALTER TABLE trade_log ADD COLUMN IF NOT EXISTS market TEXT NOT NULL DEFAULT 'US';
+ALTER TABLE reports   ADD COLUMN IF NOT EXISTS market TEXT NOT NULL DEFAULT 'US';
+
+-- 같은 사용자가 두 시장에서 같은 티커를 가질 수 있어야 한다.
+-- (예: 미국 계좌의 005930 ADR 과 한국 계좌의 005930.KS 는 별개 자산)
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'holdings_pkey') THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_index i
+            JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+            WHERE i.indrelid = 'holdings'::regclass AND i.indisprimary AND a.attname = 'market'
+        ) THEN
+            ALTER TABLE holdings DROP CONSTRAINT holdings_pkey;
+            ALTER TABLE holdings ADD PRIMARY KEY (user_id, market, ticker);
+        END IF;
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_trade_log_user_market_date
+    ON trade_log(user_id, market, trade_date DESC);
+CREATE INDEX IF NOT EXISTS idx_reports_user_market
+    ON reports(user_id, market, created_at DESC);
+
+-- 탈퇴한 사용자가 남긴 공용 리포트의 작성자 자리.
+--   공용 리서치(scope='shared')는 종목·산업 분석이라 특정 개인의 것이 아니고
+--   다른 사용자들이 캐시로 재사용한다. 그래서 탈퇴 시 지우지 않고 작성자만
+--   이 행으로 옮긴다.
+--   reports.user_id 는 NOT NULL 이고 users 를 참조하므로, 이 행이 실제로
+--   있어야 한다. 없으면 익명화가 FK 위반으로 실패하고 **탈퇴 전체가 롤백된다** —
+--   실제로 그래서 탈퇴가 계속 실패하고 DB 행만 남는 계정이 쌓였다.
+--   이메일이 없으므로 로그인·가입 경로에 걸리지 않는다.
+INSERT INTO users (id, name, email)
+VALUES ('__deleted__', '(탈퇴한 사용자)', NULL)
+ON CONFLICT (id) DO NOTHING;
 
 -- 개인 데이터는 사용자 삭제 시 함께 지워져야 한다 (탈퇴 요구 대응).
 -- 기존 테이블에 FK 가 없으므로 소급 적용한다.

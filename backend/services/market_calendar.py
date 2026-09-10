@@ -225,3 +225,165 @@ def next_session_open(now: Optional[datetime] = None) -> date:
         if is_us_trading_day(d):
             return d
     return d
+
+
+# ── 한국 증시 (KRX) ──────────────────────────────────────────────────────────
+#
+# 미국은 공휴일이 규칙으로 정의돼 계산할 수 있지만, 한국은 설·추석이 음력이라
+# 규칙만으로는 구할 수 없다. 대체공휴일·임시공휴일도 해마다 바뀐다.
+#
+# 그래서 규칙을 짜는 대신 **실제 거래가 있었던 날**을 KOSPI 지수 시세에서
+# 읽는다. 지수가 존재하는 날이 곧 개장일이고, 음력 명절도 자동으로 반영된다.
+# 결과는 DB 에 캐시해 두고 하루 한 번만 갱신한다.
+
+_KRX_OPEN  = _dtime(9, 0)
+_KRX_CLOSE = _dtime(15, 30)
+
+
+def _krx_trading_days() -> frozenset:
+    """최근 2년간 KRX 실제 개장일. DB 캐시 우선.
+
+    TTL 은 24시간이 아니라 2시간이다. 짧게 잡는 이유는 캐시 시점 race 때문이다:
+    이 캐시가 마감(15:30 KST) 직전—오늘 종가가 아직 NaN 인 순간—에 한 번
+    갱신되면, 그 스냅샷은 "오늘은 개장일 아님"으로 굳어 24시간 동안 유지된다.
+    그동안 save_prices_to_db 의 캘린더 가드가 오늘 종가 행을 계속 거부하고,
+    화면에는 실제로는 마감된 날의 종가가 통째로 빠진 채 그 전날이 최신으로
+    보인다. get_stale_tickers 의 날짜 비교도 "기대치"를 같은 캐시로 계산하므로
+    같이 틀려 재수집조차 트리거되지 않을 수 있다.
+    (실제로 있었던 사고: 09-07 마감 직후 캐시된 값이 09-08 오전까지 남아
+    포트폴리오 화면에 09-04 종가가 최신으로 표시됐다.)
+    TTL 을 짧게 두면 늦어도 몇 시간 안에 스스로 고쳐진다. ^KS11 단일 티커
+    조회라 2시간마다 다시 불러도 비용은 무시할 만하다.
+    """
+    from backend.db.market_cache import get_common, save_common
+
+    cached = get_common("krx_trading_days")
+    if cached:
+        return frozenset(date.fromisoformat(d) for d in cached)
+
+    try:
+        import yfinance as yf
+        hist = yf.Ticker("^KS11").history(period="2y")
+        # 종가가 있는 날만 개장일로 센다.
+        #
+        # 인덱스 행이 있다고 개장일인 것이 아니다. 야후는 당일 장이 끝난 뒤에도
+        # 종가가 확정되기 전까지 거래량만 채운 NaN 행을 내려 준다. 그 행을 개장일로
+        # 세면 last_completed_kr_session 이 '종가를 받을 수 없는 날'을 가리키게 되고,
+        # 수집기는 그 날짜에 영원히 도달하지 못해 같은 종목을 무한히 다시 받는다.
+        days = sorted({d.date() for d in hist.index[hist["Close"].notna()]})
+    except Exception as e:
+        logger.warning(f"KRX 개장일 수집 실패: {e}")
+        return frozenset()
+
+    if days:
+        save_common("krx_trading_days", [d.isoformat() for d in days],
+                    ttl_seconds=7200)
+    return frozenset(days)
+
+
+def is_kr_trading_day(d: date) -> bool:
+    """KRX 개장일인지.
+
+    캘린더를 못 받았을 때는 '평일이면 개장'으로 본다. 데이터를 못 읽었다는
+    이유로 멀쩡한 거래일을 휴장으로 처리하면 그날 시세가 통째로 버려진다.
+    """
+    if hasattr(d, "date") and not isinstance(d, date):
+        d = d.date()  # type: ignore[assignment]
+    days = _krx_trading_days()
+    if not days:
+        return d.weekday() < 5
+    if d < min(days):
+        return d.weekday() < 5     # 캐시 범위 밖의 과거
+    return d in days
+
+
+def kr_market_status(now: Optional[datetime] = None) -> Literal["pre", "open", "post", "closed"]:
+    """현재 한국 증시 상태 (정규장 09:00~15:30 KST).
+
+    거래일 판정에 _krx_trading_days() 를 쓰지 않는다 — 그 캘린더는 종가가 확정된
+    날만 담아 **오늘이 항상 빠져 있다.** 그걸로 판단하면 장이 열려 있는 지금도
+    'closed' 가 나와, 화면의 LIVE 배지가 한국장 중에 꺼진다.
+
+    평일 여부만 본다. 한국 공휴일에는 'open' 으로 오판하지만(연 십수 일),
+    장중에 '마감'이라고 하는 것보다 낫다. is_kr_extended_hours 와 같은 규칙이다.
+    과거 날짜의 개장 여부가 필요한 곳(시세 저장 가드·stale 판정)은 그대로
+    is_kr_trading_day / last_completed_kr_session 을 쓴다.
+    """
+    n = now or now_kst()
+    if n.weekday() >= 5:
+        return "closed"
+    t = n.time()
+    if t < _KRX_OPEN:
+        return "pre"
+    if t < _KRX_CLOSE:
+        return "open"
+    return "post"
+
+
+def is_kr_market_open(now: Optional[datetime] = None) -> bool:
+    return kr_market_status(now) == "open"
+
+
+_KRX_EXT_OPEN  = _dtime(8, 30)    # 장전 시간외
+_KRX_EXT_CLOSE = _dtime(18, 0)    # 장후 시간외 종료
+
+
+def is_kr_extended_hours(now: Optional[datetime] = None) -> bool:
+    """한국 주식 가격이 **변할 수 있는** 시간대인지 (시간외 포함 08:30~18:00 KST).
+
+    거래일 판정에 _krx_trading_days() 를 쓰지 않는다. 그 캘린더는 종가가 확정된
+    날만 담기 때문에 **오늘이 항상 빠져 있다** — 장이 열려 있는 지금 물어보면
+    '거래일 아님'이 나온다. 그걸로 실시간 수집을 막으면 정작 장중에 시세가 멈춘다.
+
+    그래서 평일 여부만 본다. 공휴일에 불필요한 조회가 조금 생기지만(연 십수 일),
+    장중에 시세가 멈추는 것보다 훨씬 낫다. is_kr_trading_day 도 캘린더가 없을 때
+    같은 판단(평일=개장)으로 내려간다.
+    """
+    n = now or now_kst()
+    if n.weekday() >= 5:
+        return False
+    return _KRX_EXT_OPEN <= n.time() < _KRX_EXT_CLOSE
+
+
+def kr_price_cutoff(now: Optional[datetime] = None) -> date:
+    """한국 주식 가격 시계열에서 **허용되는 가장 늦은 날짜**.
+
+    09:00 KST 이후(장중·장후)에는 오늘 봉이 유효하므로 오늘. 그 이전이나
+    주말이면 직전 평일까지만.
+
+    last_completed_kr_session 을 쓰지 않는 이유는 그 함수가 캘린더 기반이라
+    **오늘을 절대 돌려주지 않기 때문이다.** 자산곡선을 그걸로 자르면 한국
+    포트폴리오의 가장 최근 거래일이 매번 사라진다.
+    """
+    n = now or now_kst()
+    d = n.date()
+    if n.weekday() < 5 and n.time() >= _KRX_OPEN:
+        return d
+    d -= timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
+def last_completed_kr_session(now: Optional[datetime] = None) -> date:
+    """마지막으로 **종가가 확정된** KRX 거래일.
+
+    오늘이 개장일이고 15:30 KST 를 지났으면 오늘, 아니면 직전 개장일.
+    미국의 last_completed_session 과 같은 역할이다.
+    """
+    n = now or now_kst()
+    d = n.date()
+    if is_kr_trading_day(d) and n.time() >= _KRX_CLOSE:
+        return d
+    d -= timedelta(days=1)
+    for _ in range(15):   # 설·추석 연휴도 15일을 넘지 않는다
+        if is_kr_trading_day(d):
+            return d
+        d -= timedelta(days=1)
+    return d
+
+
+def uses_kr_session_calendar(ticker: str) -> bool:
+    """KRX 거래일 캘린더를 따르는 티커인지 (.KS / .KQ 와 코스피·코스닥 지수)."""
+    t = str(ticker).upper().strip()
+    return t.endswith((".KS", ".KQ")) or t in {"^KS11", "^KQ11", "^KS200"}

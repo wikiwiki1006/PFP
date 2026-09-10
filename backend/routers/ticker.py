@@ -14,6 +14,7 @@ import yfinance as yf
 from fastapi import Depends, APIRouter, Header, HTTPException, Query
 
 from backend.services.auth import optional_user
+from backend.services.markets import market_param
 
 router = APIRouter(prefix="/api/ticker", tags=["ticker"])
 
@@ -63,7 +64,7 @@ _PERIOD_MAP = {
 # ── 엔드포인트 ────────────────────────────────────────────────────────────────
 
 
-def _build_optimizer_block(sym: str, uid: str, closes=None) -> dict:
+def _build_optimizer_block(sym: str, uid: str, closes=None, market: str = "US") -> dict:
     """포트폴리오 맥락 — 사용자 보유 종목에 의존하므로 공용 캐시에 넣지 않는다.
 
     네트워크 호출은 get_close_df(대부분 캐시 적중) 뿐이라 매 요청 계산해도 가볍다.
@@ -86,7 +87,7 @@ def _build_optimizer_block(sym: str, uid: str, closes=None) -> dict:
         from backend.services.quant_metrics import compute_optimizer_context
         from backend.db.portfolio_repo import get_holdings
         from backend.services.market_data import get_close_df
-        holdings = get_holdings(uid)
+        holdings = get_holdings(uid, market=market)
         stock = [t for t in holdings if t != "CASH"]
         if not stock:
             optimizer["note"] = "보유 종목이 없어 포트폴리오 맥락을 계산할 수 없습니다"
@@ -159,6 +160,7 @@ def get_ticker_detail(
     ticker: str,
     period: str = Query("1y", regex="^(1m|3m|6m|1y|2y|5y)$"),
     _auth: Optional[dict] = Depends(optional_user),
+    market: str = Depends(market_param),
 ):
     """종목 상세: OHLCV + 이평선/BB/스토케스틱 + 펀더멘털 + 성과 + 리스크 + VaR
 
@@ -191,7 +193,7 @@ def get_ticker_detail(
     if shared is not None:
         out = dict(shared)
         out["quant"] = {**out.get("quant", {}),
-                        "optimizer": _build_optimizer_block(sym, uid, None)}
+                        "optimizer": _build_optimizer_block(sym, uid, None, market)}
         return out
 
     try:
@@ -340,5 +342,5 @@ def get_ticker_detail(
     # 사용자별 optimizer 는 캐시에 넣지 않고 응답에만 덧붙인다
     out = dict(result)
     out["quant"] = {**out.get("quant", {}),
-                    "optimizer": _build_optimizer_block(sym, uid, closes)}
+                    "optimizer": _build_optimizer_block(sym, uid, closes, market)}
     return out

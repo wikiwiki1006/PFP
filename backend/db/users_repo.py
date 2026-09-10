@@ -16,6 +16,9 @@ from backend.db import get_conn, is_available
 
 logger = logging.getLogger(__name__)
 
+# 탈퇴자가 남긴 공용 리포트의 작성자 자리 (schema.py 가 이 행을 만들어 둔다).
+ANONYMIZED_UID = "__deleted__"
+
 
 def upsert_user(
     uid: str,
@@ -83,7 +86,7 @@ def get_user(uid: str) -> Optional[dict]:
                 cur.execute(
                     """SELECT id, email, name, provider, email_verified, photo_url,
                               created_at, last_login_at, disabled, username, age,
-                              COALESCE(is_admin, FALSE)
+                              COALESCE(is_admin, FALSE), COALESCE(default_market, 'US')
                        FROM users WHERE id = %s""",
                     (uid,),
                 )
@@ -99,6 +102,7 @@ def get_user(uid: str) -> Optional[dict]:
             "username": r[9],
             "age": r[10],
             "is_admin": bool(r[11]),
+            "default_market": r[12],
         }
     except Exception as e:
         logger.error(f"get_user({uid}) 실패: {e}")
@@ -106,7 +110,8 @@ def get_user(uid: str) -> Optional[dict]:
 
 
 def update_profile(uid: str, name: Optional[str] = None,
-                   age: Optional[int] = None, clear_age: bool = False) -> bool:
+                   age: Optional[int] = None, clear_age: bool = False,
+                   default_market: Optional[str] = None) -> bool:
     """표시이름·나이 변경. 이메일은 Firebase Auth 쪽이 원본이라 여기서 바꾸지 않는다.
 
     나이는 선택 항목이라 "안 보냄"(그대로 두기)과 "비움"(NULL 로 지우기)을
@@ -121,6 +126,11 @@ def update_profile(uid: str, name: Optional[str] = None,
         sets.append("age=NULL")
     elif age is not None:
         sets.append("age=%s"); args.append(int(age))
+    if default_market is not None:
+        # 아는 시장만 저장한다. 임의 문자열이 들어가면 조회가 전부 빗나가
+        # 화면이 조용히 빈 채로 열린다.
+        from backend.services.markets import normalize
+        sets.append("default_market=%s"); args.append(normalize(default_market))
     if not sets:
         return False
     try:
@@ -141,12 +151,16 @@ def delete_user(uid: str) -> dict:
     """
     if not is_available() or not uid:
         return {"deleted": False}
+    if uid == ANONYMIZED_UID:
+        # 탈퇴자들의 공용 리포트가 매달린 자리다. 지우면 그 리포트들이
+        # CASCADE 로 함께 사라진다.
+        return {"deleted": False, "error": "익명 사용자 행은 삭제할 수 없습니다."}
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE reports SET user_id='__deleted__' "
-                    "WHERE user_id=%s AND scope='shared'", (uid,),
+                    "UPDATE reports SET user_id=%s "
+                    "WHERE user_id=%s AND scope='shared'", (ANONYMIZED_UID, uid),
                 )
                 anonymized = cur.rowcount
                 cur.execute("DELETE FROM users WHERE id=%s", (uid,))

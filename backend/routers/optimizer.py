@@ -14,6 +14,8 @@ import pandas as pd
 from backend.services.auth import current_user, optional_user
 from backend.services.job_store import JobStore
 from fastapi import Depends, APIRouter, Header, HTTPException
+
+from backend.services.markets import market_param
 from pydantic import BaseModel
 
 from backend.db.portfolio_repo import get_holdings as db_get_holdings
@@ -37,7 +39,8 @@ _store = JobStore(kind="optimizer", max_jobs=50)
 
 
 
-def _resolve_tickers(explicit: Optional[list[str]], auth: Optional[dict]) -> list[str]:
+def _resolve_tickers(explicit: Optional[list[str]], auth: Optional[dict],
+                     market: str = "US") -> list[str]:
     """최적화 대상 종목 결정.
 
     티커를 직접 넘겼다면 개인 데이터가 필요 없으므로 로그인 없이도 계산해 준다
@@ -53,7 +56,7 @@ def _resolve_tickers(explicit: Optional[list[str]], auth: Optional[dict]) -> lis
             detail="내 포트폴리오로 최적화하려면 로그인이 필요합니다. "
                    "또는 종목을 직접 입력해 주세요.",
         )
-    tickers = [t for t in db_get_holdings(auth["uid"]) if t != "CASH"]
+    tickers = [t for t in db_get_holdings(auth["uid"], market=market) if t != "CASH"]
     if not tickers:
         raise HTTPException(status_code=400, detail="보유 종목이 없습니다. 종목을 입력해 주세요.")
     return tickers
@@ -100,9 +103,9 @@ class FactorAnalysisRequest(BaseModel):
 # ══════════════════════════════════════════════════════════════════════════════
 
 @router.post("/max-sharpe")
-def max_sharpe(req: MaxSharpeRequest, _auth: Optional[dict] = Depends(optional_user)):
+def max_sharpe(req: MaxSharpeRequest, _auth: Optional[dict] = Depends(optional_user), market: str = Depends(market_param)):
     """과거 데이터 기반 Max Sharpe Ratio 포트폴리오 최적화."""
-    tickers = _resolve_tickers(req.tickers, _auth)
+    tickers = _resolve_tickers(req.tickers, _auth, market)
 
     daily_returns = _fetch_returns(tickers, req.period)
     return optimize_max_sharpe(
@@ -113,11 +116,11 @@ def max_sharpe(req: MaxSharpeRequest, _auth: Optional[dict] = Depends(optional_u
 
 
 @router.post("/black-litterman")
-def black_litterman(req: BlackLittermanRequest, _auth: Optional[dict] = Depends(optional_user)):
+def black_litterman(req: BlackLittermanRequest, _auth: Optional[dict] = Depends(optional_user), market: str = Depends(market_param)):
     """Black-Litterman + 시장 국면 시그널 결합 최적화."""
-    tickers  = _resolve_tickers(req.tickers, _auth)
+    tickers  = _resolve_tickers(req.tickers, _auth, market)
     # 시가총액 대용 비중에만 쓰인다. 비로그인이면 균등 비중으로 대체된다.
-    holdings = db_get_holdings(_auth["uid"]) if _auth else {}
+    holdings = db_get_holdings(_auth["uid"], market=market) if _auth else {}
 
     daily_returns = _fetch_returns(tickers, req.period)
 
@@ -141,9 +144,9 @@ def black_litterman(req: BlackLittermanRequest, _auth: Optional[dict] = Depends(
 
 
 @router.post("/factor-analysis")
-def run_factor_analysis(req: FactorAnalysisRequest, _auth: Optional[dict] = Depends(optional_user)):
+def run_factor_analysis(req: FactorAnalysisRequest, _auth: Optional[dict] = Depends(optional_user), market: str = Depends(market_param)):
     """Fama-French 스타일 4팩터 분석 (대용 팩터 자동 생성)."""
-    tickers = _resolve_tickers(req.tickers, _auth)
+    tickers = _resolve_tickers(req.tickers, _auth, market)
 
     daily_returns = _fetch_returns(tickers, req.period)
 
@@ -177,15 +180,16 @@ class AIOptimizeRequest(BaseModel):
 
 
 @router.post("/ai-optimize")
-def ai_optimize(req: AIOptimizeRequest, _auth: Optional[dict] = Depends(optional_user)):
+def ai_optimize(req: AIOptimizeRequest, _auth: Optional[dict] = Depends(optional_user), market: str = Depends(market_param)):
     """동기 최적화 (하위 호환 유지)."""
-    tickers = _resolve_tickers(req.tickers, _auth)
+    tickers = _resolve_tickers(req.tickers, _auth, market)
     wb = tuple(req.weight_bounds) if len(req.weight_bounds) == 2 else (0.0, 1.0)
     try:
         return run_ai_optimization(
             tickers=tickers, period=req.period,
             target_return=req.target_return, risk_free_rate=req.risk_free_rate,
             holding_period_years=req.holding_period_years, weight_bounds=wb,
+            market=market,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -199,9 +203,10 @@ def ai_optimize(req: AIOptimizeRequest, _auth: Optional[dict] = Depends(optional
 def start_ai_optimize_job(
     req: AIOptimizeRequest,
     _auth: Optional[dict] = Depends(optional_user),
+    market: str = Depends(market_param),
 ):
     """비동기 최적화 잡 시작 → job_id 반환. 완료 여부는 GET으로 폴링."""
-    tickers = _resolve_tickers(req.tickers, _auth)
+    tickers = _resolve_tickers(req.tickers, _auth, market)
     wb = tuple(req.weight_bounds) if len(req.weight_bounds) == 2 else (0.0, 1.0)
 
     job_id = str(uuid.uuid4())
@@ -221,7 +226,7 @@ def start_ai_optimize_job(
                 tickers=tickers, period=req.period,
                 target_return=req.target_return, risk_free_rate=req.risk_free_rate,
                 holding_period_years=req.holding_period_years, weight_bounds=wb,
-                on_stage=_on_stage,
+                on_stage=_on_stage, market=market,
             )
             _store.update_if(job_id, "running",
                              {"status": "done", "stage": 3, "stage_text": "완료", "result": result})
@@ -238,7 +243,7 @@ def start_ai_optimize_job(
 
 
 @router.get("/ai-optimize-job/{job_id}")
-def get_ai_optimize_job(job_id: str, _auth: Optional[dict] = Depends(optional_user)):
+def get_ai_optimize_job(job_id: str, _auth: Optional[dict] = Depends(optional_user), market: str = Depends(market_param)):
     """잡 상태 조회 (본인 잡 또는 비로그인 잡)."""
     # 남의 잡이면 존재 여부조차 알리지 않는다 (get 이 None 을 돌려준다).
     job = _store.get(job_id, owner=(_auth or {}).get("uid"))
@@ -248,7 +253,7 @@ def get_ai_optimize_job(job_id: str, _auth: Optional[dict] = Depends(optional_us
 
 
 @router.delete("/ai-optimize-job/{job_id}")
-def cancel_ai_optimize_job(job_id: str, _auth: Optional[dict] = Depends(optional_user)):
+def cancel_ai_optimize_job(job_id: str, _auth: Optional[dict] = Depends(optional_user), market: str = Depends(market_param)):
     """잡 취소 (본인 잡 또는 비로그인 잡)."""
     _store.cancel(job_id, owner=(_auth or {}).get("uid"))
     return {"ok": True}

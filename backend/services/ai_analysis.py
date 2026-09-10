@@ -61,7 +61,7 @@ _AGENT_MODEL_TIER: dict[int, str] = {
 
 # ── yfinance + FRED: 시장 지표 수집 ──────────────────────────────────────────
 
-def gather_yfinance_market_data() -> str:
+def gather_yfinance_market_data(market: str = "US") -> str:
     """DB 캐시 우선, 핵심 지수 누락 시 직접 yfinance 다운로드로 시장 지표 수집.
     배경 스레드에서 실행되므로 블로킹 다운로드 가능."""
     try:
@@ -93,6 +93,27 @@ def gather_yfinance_market_data() -> str:
             ("XLI", "산업재(XLI)"),
             ("XLU", "유틸리티(XLU)"),
         ]
+
+        # 시장에 맞게 재구성한다.
+        #
+        # 프롬프트로 "한국 관점에서 쓰라"고 해도, 건네주는 데이터가 S&P500 을
+        # 맨 위에 두고 섹터가 전부 미국 ETF 면 모델은 그 숫자를 근거로 답한다.
+        # 실제로 한국 시나리오 결과에 KOSPI 는 0회, S&P·NVDA 만 나왔다.
+        # 근거 데이터부터 그 시장 것으로 바꿔야 한다.
+        from backend.services.markets import get_market as _gm, normalize as _nz
+        if _nz(market) == "KR":
+            _spec = _gm("KR")
+            _kr_first = [
+                ("^KS11",    "KOSPI",            ",.0f", ""),
+                ("^KQ11",    "KOSDAQ",           ",.2f", ""),
+                ("USDKRW=X", "원/달러 환율",       ",.0f", "원"),
+                ("^KS200",   "KOSPI200",         ",.2f", ""),
+            ]
+            # 해외 지표는 참고용으로 뒤에 남긴다 — 한국 증시는 미국장·환율에
+            # 크게 연동되므로 아예 빼면 인과를 설명할 수 없다.
+            _kept = {"^GSPC", "^IXIC", "^VIX", "^TNX", "CL=F", "USDJPY=X"}
+            PRICE_TICKERS = _kr_first + [r for r in PRICE_TICKERS if r[0] in _kept]
+            SECTOR_TICKERS = [(etf, f"{label}({etf})") for label, etf in _spec.sector_etfs[:6]]
         all_price_tickers  = [t for t, *_ in PRICE_TICKERS]
         all_sector_tickers = [t for t, _ in SECTOR_TICKERS]
         all_tickers = all_price_tickers + all_sector_tickers
@@ -187,18 +208,27 @@ def gather_yfinance_market_data() -> str:
                 except Exception:
                     pass
 
-        # FRED 거시 지표
+        # 거시 지표 — 시장에 맞는 것을 넣는다.
+        # 한국 시나리오에 Fed 금리·미국 실업률을 넣으면 모델이 그걸 근거로
+        # 한국 시장을 논하게 된다.
         try:
-            fred = get_fred_macro(ttl=3600)
-            if fred.get("source") != "fallback":
-                lines.append("")
-                lines.append("[FRED macro indicators]")
-                lines.append(f"  Fed funds: {fred['fed_rate']:.2f}%")
-                lines.append(f"  Unemployment: {fred['unemployment']:.1f}%")
-                lines.append(f"  CPI YoY: {fred['cpi']:.1f}%")
-                lines.append(f"  GDP growth (latest qtr): {fred['gdp']:.1f}%")
-                lines.append(f"  10Y-2Y spread: {fred['t10y2y']:+.3f}pp")
-                lines.append(f"  HY spread: {fred['bamlh0a0hym2']:.0f}bp")
+            if market == "KR":
+                from backend.services.korea_macro import get_korea_macro, format_for_prompt
+                block = format_for_prompt(get_korea_macro(ttl=3600))
+                if block:
+                    lines.append("")
+                    lines.append(block)
+            else:
+                fred = get_fred_macro(ttl=3600)
+                if fred.get("source") != "fallback":
+                    lines.append("")
+                    lines.append("[FRED macro indicators]")
+                    lines.append(f"  Fed funds: {fred['fed_rate']:.2f}%")
+                    lines.append(f"  Unemployment: {fred['unemployment']:.1f}%")
+                    lines.append(f"  CPI YoY: {fred['cpi']:.1f}%")
+                    lines.append(f"  GDP growth (latest qtr): {fred['gdp']:.1f}%")
+                    lines.append(f"  10Y-2Y spread: {fred['t10y2y']:+.3f}pp")
+                    lines.append(f"  HY spread: {fred['bamlh0a0hym2']:.0f}bp")
         except Exception:
             pass
 
@@ -210,11 +240,16 @@ def gather_yfinance_market_data() -> str:
 
 # ── Perplexity: 뉴스·서사 수집 전담 ─────────────────────────────────────────
 
-def _call_perplexity(prompt: str, max_tokens: int = 1200) -> str:
-    """Perplexity sonar로 실시간 웹 검색. 실패 시 빈 문자열 반환."""
+def _call_perplexity(prompt: str, max_tokens: int = 1200, market: str = "US") -> str:
+    """Perplexity sonar로 실시간 웹 검색. 실패 시 빈 문자열 반환.
+
+    한국이면 검색 범위를 국내 경제지로 좁힌다 — 출처가 미국 매체뿐이면
+    프롬프트로 관점만 바꿔 봐야 한국 이야기가 나오지 않는다.
+    """
     if not PERPLEXITY_API_KEY:
         return ""
     try:
+        from backend.services.news_sources import perplexity_extra
         resp = requests.post(
             "https://api.perplexity.ai/chat/completions",
             headers={
@@ -226,6 +261,7 @@ def _call_perplexity(prompt: str, max_tokens: int = 1200) -> str:
                 "messages": [{"role": "user", "content": prompt}],
                 "max_tokens": max_tokens,
                 "temperature": 0.0,
+                **perplexity_extra(market),
             },
             timeout=30,
         )
@@ -235,28 +271,49 @@ def _call_perplexity(prompt: str, max_tokens: int = 1200) -> str:
         return ""
 
 
-def gather_perplexity_context(ev: str) -> str:
+def gather_perplexity_context(ev: str, market: str = "US") -> str:
     """Perplexity로 이벤트 관련 최신 뉴스·전문가 코멘트만 수집.
-    시장 수치는 yfinance에서 별도로 가져오므로 여기서는 서사·뉴스만 요청한다."""
+    시장 수치는 yfinance에서 별도로 가져오므로 여기서는 서사·뉴스만 요청한다.
+
+    검색 방향도 시장을 따른다. 그러지 않으면 로이터·골드만 같은 미국 매체
+    기사만 모이고, 모델은 그 재료로 답을 쓴다 — 프롬프트에 "한국 관점으로
+    쓰라"고 해도 근거가 미국뿐이면 한국 이야기가 나올 수 없다.
+    """
+    from backend.services.markets import normalize
+    is_kr = normalize(market) == "KR"
+
     # 영어로 수집 — 이 텍스트는 그대로 Claude 입력이 되며, 같은 내용도
     # 한국어는 영어의 약 3배 토큰을 쓴다 (실측 2,308 → 791).
+    focus = (
+        """
+[Focus: SOUTH KOREA]
+- Prioritise Korean market impact: KOSPI/KOSDAQ, KRW/USD, exports, foreign investor flows
+- Name **Korea-listed companies** affected (Samsung Electronics, SK Hynix, Hyundai Motor, etc.)
+- Include Korean press and analyst views (Korea Economic Daily, Maeil Business, local brokerages)
+- Mention US/global items only where they transmit into the Korean market"""
+        if is_kr else
+        """
+[Focus: UNITED STATES]
+- Prioritise US market impact and US-listed companies"""
+    )
     prompt = f"""Today: {TODAY}
 Event to analyze: {ev}
 
 Collect the following **in English**, concise bullet points.
 Do NOT quote index levels or rates — narrative and commentary only.
+{focus}
 
 [Latest news on this event, last 48 hours]
 - 3-5 major press items (title, source, date, one-sentence summary each)
-- Sell-side commentary (Goldman, Morgan Stanley, etc.) if available
+- Sell-side commentary if available
 - Assets, countries and companies directly affected (market narrative)"""
-    return _call_perplexity(prompt, max_tokens=1200)
+    return _call_perplexity(prompt, max_tokens=1200, market=market)
 
 
-def gather_context(ev: str) -> str:
+def gather_context(ev: str, market: str = "US") -> str:
     """yfinance(시장 지표) + Perplexity(뉴스)를 합쳐 에이전트 컨텍스트 반환."""
-    market_data = gather_yfinance_market_data()
-    news_data   = gather_perplexity_context(ev)
+    market_data = gather_yfinance_market_data(market)
+    news_data   = gather_perplexity_context(ev, market)
 
     parts = [market_data]
     if news_data.strip():
@@ -420,13 +477,31 @@ def _build_agents(
     portfolio_str: str,
     prev_results: list[str] | None = None,
     context_limit: int = CONTEXT_CHAR_LIMIT,
+    market: str = "US",
 ) -> list[dict]:
     prev = "\n\n---\n\n".join([r for r in (prev_results or []) if r])[-context_limit:]
     ev = f"[가상 시나리오] {ev}"  # 사용자 입력은 가상 시나리오임을 명시
+
+    # 시장 관점. 프롬프트에 S&P500 을 박아 두면 한국 시나리오인데도 모델이
+    # 미국 지수를 기준으로 답하고, 종목 예시도 미국 기업을 든다.
+    from backend.services.markets import get_market
+    spec = get_market(market)
+    is_kr = spec.code == "KR"
+    idx_main   = "KOSPI" if is_kr else "S&P500"
+    idx_list   = "KOSPI·KOSDAQ·원/달러 환율·국고채 금리" if is_kr else "S&P500·NASDAQ·VIX·미 국채 금리"
+    stance = (
+        "**분석 관점: 한국 주식시장.** 지수는 KOSPI/KOSDAQ 기준으로 말하고, "
+        "금액은 원화로 씁니다. 종목을 예로 들 때는 **국내 상장 종목만** 사용하세요 "
+        "(삼성전자·SK하이닉스·현대차 등). 미국 종목이나 달러 금액을 예시로 들지 마세요. "
+        "환율·수출·외국인 수급처럼 한국 시장에 실제로 작동하는 경로를 우선 다루세요."
+        if is_kr else
+        "**분석 관점: 미국 주식시장.** 지수는 S&P500/NASDAQ 기준으로, 금액은 달러로 씁니다. "
+        "종목 예시는 미국 상장 종목을 사용하세요."
+    )
     return [
         {
             "id": 1, "label": "이벤트 분석", "max_tokens": 1200, "inject_perplexity": True,
-            "prompt": f"""당신은 거시경제 분석 전문가입니다. 오늘 날짜: {TODAY}
+            "prompt": f"""{stance}\n\n당신은 거시경제 분석 전문가입니다. 오늘 날짜: {TODAY}
 
 분석할 이벤트: {ev}
 
@@ -437,7 +512,7 @@ def _build_agents(
 어떤 종류의 충격인지 한 줄로 설명 (예: 중앙은행 정책 변화, 지정학적 위기, 원자재 공급 충격 등)
 
 ## 📊 현재 시장 상황
-제공된 시장 지표(S&P500·KOSPI·VIX·금리·환율 등)의 현재 레벨 정리
+제공된 시장 지표({idx_list} 등)의 현재 레벨 정리
 
 ## 🌐 영향을 받는 나라/지역
 어느 나라와 산업이 가장 먼저 타격을 받는지
@@ -453,7 +528,7 @@ def _build_agents(
         },
         {
             "id": 2, "label": "역사적 유사 사례", "max_tokens": 1150, "inject_perplexity": False,
-            "prompt": f"""당신은 금융 역사 전문가입니다. 오늘: {TODAY}
+            "prompt": f"""{stance}\n\n당신은 금융 역사 전문가입니다. 오늘: {TODAY}
 이벤트: {ev}
 앞선 분석: {prev}
 
@@ -468,7 +543,7 @@ def _build_agents(
 **당시 상황:** 1~2문장으로 쉽게 설명
 
 **시장 반응:**
-- 주식시장(S&P500): 얼마나 떨어졌고 회복까지 얼마나 걸렸는지
+- 주식시장({idx_main}): 얼마나 떨어졌고 회복까지 얼마나 걸렸는지
 - 유가/금리: 어떻게 변했는지
 
 **이때 배운 교훈:** 한 줄
@@ -480,14 +555,14 @@ def _build_agents(
         },
         {
             "id": 3, "label": "시장 반응 전망", "max_tokens": 1500, "inject_perplexity": True,
-            "prompt": f"""당신은 거시경제 리서치 전문가입니다. 오늘: {TODAY}
+            "prompt": f"""{stance}\n\n당신은 거시경제 리서치 전문가입니다. 오늘: {TODAY}
 이벤트: {ev}
 앞선 분석: {prev}
 
 제공된 시장 지표와 뉴스 데이터를 참고해, 이 시나리오가 발생할 경우 시장에 어떤 영향을 줄 수 있는지 한국어로 분석하세요.
 
 ## 📈 현재 시장 출발점
-제공된 데이터 기준 S&P500, KOSPI, VIX, 금리, 환율 현황 정리
+제공된 데이터 기준 {idx_list} 현황 정리
 
 ## ⏱️ 단기 영향 분석 (이벤트 후 4주)
 - 주식시장에 미칠 수 있는 영향 및 리스크 요인
@@ -505,7 +580,7 @@ def _build_agents(
         },
         {
             "id": 4, "label": "섹터 영향 분석", "max_tokens": 1150, "inject_perplexity": False,
-            "prompt": f"""당신은 산업 분석가입니다. 오늘: {TODAY}
+            "prompt": f"""{stance}\n\n당신은 산업 분석가입니다. 오늘: {TODAY}
 이벤트: {ev}
 앞선 분석: {prev}
 
@@ -532,7 +607,7 @@ def _build_agents(
         },
         {
             "id": 5, "label": "현재 vs 과거 비교", "max_tokens": 950, "inject_perplexity": False,
-            "prompt": f"""당신은 거시경제 전략가입니다. 오늘: {TODAY}
+            "prompt": f"""{stance}\n\n당신은 거시경제 전략가입니다. 오늘: {TODAY}
 이벤트: {ev}
 앞선 분석: {prev}
 
@@ -557,7 +632,7 @@ AI와 반도체가 새로운 변수로 등장한 점이 어떻게 다른지
         },
         {
             "id": 6, "label": "투자 전략", "max_tokens": 2000, "inject_perplexity": False,
-            "prompt": f"""당신은 헤지펀드 최고투자책임자(CIO)입니다. 오늘: {TODAY}
+            "prompt": f"""{stance}\n\n당신은 헤지펀드 최고투자책임자(CIO)입니다. 오늘: {TODAY}
 이벤트: {ev}
 앞선 분석: {prev}
 
@@ -585,7 +660,7 @@ AI와 반도체가 새로운 변수로 등장한 점이 어떻게 다른지
         },
         {
             "id": 7, "label": "리스크 관리", "max_tokens": 1150, "inject_perplexity": False,
-            "prompt": f"""당신은 최고리스크관리책임자(CRO)입니다. 오늘: {TODAY}
+            "prompt": f"""{stance}\n\n당신은 최고리스크관리책임자(CRO)입니다. 오늘: {TODAY}
 이벤트: {ev}
 앞선 전략 분석: {prev}
 
@@ -598,9 +673,9 @@ AI와 반도체가 새로운 변수로 등장한 점이 어떻게 다른지
 
 | 시나리오 | 확률 | 조건 | 6개월 후 주식시장 | 대응 방법 |
 |---------|------|------|-----------------|---------|
-| 낙관 (상승) | ?% | 어떤 조건이 갖춰지면 | S&P +?% 예상 | 어떻게 포지션 |
-| 기본 (중립) | ?% | 현재 흐름 지속 시 | S&P ±?% 예상 | 현재 유지 |
-| 비관 (하락) | ?% | 악재가 겹치면 | S&P -?% 예상 | 방어 전략 |
+| 낙관 (상승) | ?% | 어떤 조건이 갖춰지면 | {idx_main} +?% 예상 | 어떻게 포지션 |
+| 기본 (중립) | ?% | 현재 흐름 지속 시 | {idx_main} ±?% 예상 | 현재 유지 |
+| 비관 (하락) | ?% | 악재가 겹치면 | {idx_main} -?% 예상 | 방어 전략 |
 
 ## 손절 기준
 구체적인 가격이나 지표 수준을 명시
@@ -610,7 +685,7 @@ AI와 반도체가 새로운 변수로 등장한 점이 어떻게 다른지
         },
         {
             "id": 8, "label": "포트폴리오 액션", "max_tokens": 1500, "inject_perplexity": False,
-            "prompt": f"""당신은 개인 투자 자문가입니다. 오늘: {TODAY}
+            "prompt": f"""{stance}\n\n당신은 개인 투자 자문가입니다. 오늘: {TODAY}
 매크로 이벤트: {ev}
 전체 분석 내용: {prev}
 
@@ -636,7 +711,7 @@ reason: 한국어 1문장.
         },
         {
             "id": 9, "label": "최종 판정", "max_tokens": 2100, "inject_perplexity": False,
-            "prompt": f"""당신은 거시경제 종합 분석 전문가입니다. 오늘: {TODAY}
+            "prompt": f"""{stance}\n\n당신은 거시경제 종합 분석 전문가입니다. 오늘: {TODAY}
 분석 이벤트: {ev}
 전체 분석 요약: {prev}
 
@@ -700,13 +775,14 @@ def _run_parallel_agents(
     perplexity_ctx: str,
     provider: str = "claude",
     should_cancel: Optional[Callable[[], bool]] = None,
+    market: str = "US",
 ) -> dict[int, tuple[str, float]]:
     """Phase 1: 선택된 에이전트를 컨텍스트 없이 병렬 실행.
 
     취소되면 아직 시작하지 않은 에이전트는 건너뛰고, 진행 중인 것은
     스트리밍 도중 스스로 멈춘다.
     """
-    all_agents = _build_agents(ev, portfolio_str, prev_results=[])
+    all_agents = _build_agents(ev, portfolio_str, prev_results=[], market=market)
     agent_map = {a["id"]: a for a in all_agents if a["id"] in selected_ids}
 
     results: dict[int, tuple[str, float]] = {}
@@ -754,10 +830,11 @@ def _run_contextual_agents(
     perplexity_ctx: str,
     provider: str = "claude",
     should_cancel: Optional[Callable[[], bool]] = None,
+    market: str = "US",
 ) -> dict[int, tuple[str, float]]:
     """Phase 2: Phase 1 결과를 컨텍스트로 받아 순차 실행 (agents 8, 9)."""
     all_agents = _build_agents(ev, portfolio_str, prev_results=context_texts,
-                               context_limit=PHASE2_CONTEXT_LIMIT)
+                               context_limit=PHASE2_CONTEXT_LIMIT, market=market)
     agent_map = {a["id"]: a for a in all_agents if a["id"] in selected_ids}
 
     results: dict[int, tuple[str, float]] = {}
@@ -794,6 +871,7 @@ def run_macro_agents(
     mode: str = "fast",
     provider: str = "claude",  # 무시됨 — 항상 Claude 사용
     should_cancel: Optional[Callable[[], bool]] = None,
+    market: str = "US",
 ) -> list[dict]:
     """
     기본 분석(model_key=haiku): Claude Haiku (전체 에이전트)
@@ -813,7 +891,7 @@ def run_macro_agents(
 
     # Pre-phase: yfinance로 시장 지표 + Perplexity로 뉴스 수집
     _check()
-    perplexity_ctx = gather_context(event)
+    perplexity_ctx = gather_context(event, market)
     _check()
 
     phase1_ids = [i for i in selected_ids if i <= 7]
@@ -823,7 +901,7 @@ def run_macro_agents(
     if phase1_ids:
         all_results.update(
             _run_parallel_agents(phase1_ids, event, portfolio_str, effective_model_key,
-                                 perplexity_ctx, effective_provider, should_cancel)
+                                 perplexity_ctx, effective_provider, should_cancel, market)
         )
     _check()
 
@@ -834,11 +912,11 @@ def run_macro_agents(
         ]
         all_results.update(
             _run_contextual_agents(phase2_ids, event, portfolio_str, effective_model_key,
-                                   p1_texts, perplexity_ctx, effective_provider, should_cancel)
+                                   p1_texts, perplexity_ctx, effective_provider, should_cancel, market)
         )
     _check()
 
-    all_agents = _build_agents(event, portfolio_str)
+    all_agents = _build_agents(event, portfolio_str, market=market)
     return [
         {
             "id":      ag["id"],
@@ -917,7 +995,7 @@ def parse_portfolio_actions(raw_text: str) -> list[dict] | None:
 
 def get_ai_analyst_feedback(
     vix: float,
-    portfolio_beta: float,
+    portfolio_beta: "float | None",
     today_chg_pct: float,
     sector_summary: str,
     is_portfolio_sectors: bool = False,
@@ -926,13 +1004,19 @@ def get_ai_analyst_feedback(
         return "ANTHROPIC_API_KEY 미설정"
 
     vix_state = "위험" if vix >= 30 else ("주의" if vix >= 20 else "정상")
+    # 베타를 못 구했으면 '1.00' 이라고 단정하지 않는다. 1.0 은 '시장과 동일하게
+    # 움직인다'는 판단이라, 모르는 것을 아는 것처럼 적으면 모델이 그 전제로
+    # 리스크를 서술한다.
+    beta_line = (f"- 포트폴리오 베타: {portfolio_beta:.2f}"
+                 if portfolio_beta is not None else
+                 "- 포트폴리오 베타: 산출 불가 (베타는 언급하지 말 것)")
 
     if is_portfolio_sectors:
         prompt = f"""다음 데이터를 바탕으로 투자자에게 3~4문장(120자 이내)의 포트폴리오 섹터 분석 피드백을 한국어로 작성해줘.
 보유 섹터의 오늘 흐름과 리스크를 관찰 기반 코멘트 톤으로, 구체적 수치를 인용해서 작성해.
 
 - VIX 지수: {vix:.1f} ({vix_state})
-- 포트폴리오 베타: {portfolio_beta:.2f}
+{beta_line}
 - 오늘 포트폴리오 변동률: {today_chg_pct:+.2f}%
 - 보유 섹터 비중 및 오늘 변동: {sector_summary}
 
@@ -942,7 +1026,7 @@ def get_ai_analyst_feedback(
 조언이 아닌 관찰 기반 코멘트 톤으로, 구체적 수치를 인용해서 작성해.
 
 - VIX 지수: {vix:.1f} ({vix_state})
-- 포트폴리오 베타: {portfolio_beta:.2f}
+{beta_line}
 - 오늘 포트폴리오 변동률: {today_chg_pct:+.2f}%
 - 주도 섹터(1일): {sector_summary}
 

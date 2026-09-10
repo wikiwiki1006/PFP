@@ -73,6 +73,48 @@ INDUSTRIES: dict[str, dict] = {
     "healthcare_tech":     {"name_kr": "헬스케어 테크 & AI 진단", "name_en": "Healthcare Technology & AI Diagnostics", "tagline": "AI 진단과 디지털 치료가 의료 효율성 혁명을 주도한다", "benchmark": "IHF ETF", "coverage": "UNH, HCA, ISRG, VEEV, DOCS", "icon": "🏥"},
 }
 
+# ── 한국 산업 목록 ───────────────────────────────────────────────────────────────
+#
+# 미국 산업군을 그대로 쓰면 한국 시장 리포트인데 대표 종목이 NVDA·TSLA 가 된다.
+# 산업 구성도 시장마다 다르다 — 조선·엔터처럼 한국 증시의 큰 축이 미국 목록에는
+# 아예 없고, 반대로 데이터센터 REIT 은 한국에 사실상 없다.
+#
+# coverage 의 티커는 실제 상장 목록에서 존재를 확인한 것만 넣었다.
+KR_INDUSTRIES: dict[str, dict] = {
+    "kr_semiconductor":  {"name_kr": "반도체 & HBM", "name_en": "Semiconductor & HBM", "tagline": "HBM 공급이 AI 서버 증설 속도를 좌우한다", "benchmark": "KOSPI 반도체", "coverage": "005930.KS, 000660.KS, 042700.KS, 039030.KQ, 036930.KQ", "icon": "💾"},
+    "kr_battery":        {"name_kr": "2차전지 & 소재", "name_en": "Secondary Battery & Materials", "tagline": "북미 증설과 캐즘 사이에서 갈리는 수익성", "benchmark": "KRX 2차전지", "coverage": "373220.KS, 006400.KS, 247540.KQ, 066970.KS, 005490.KS", "icon": "🔋"},
+    "kr_defense":        {"name_kr": "방산 & 항공우주", "name_en": "Defense & Aerospace", "tagline": "수출 수주가 실적의 기울기를 바꾼다", "benchmark": "KRX 방산", "coverage": "012450.KS, 064350.KS, 047810.KS, 272210.KS", "icon": "🛡️"},
+    "kr_shipbuilding":   {"name_kr": "조선 & 기계", "name_en": "Shipbuilding & Machinery", "tagline": "고선가 수주잔고가 몇 년치 실적을 미리 정한다", "benchmark": "KRX 조선", "coverage": "009540.KS, 042660.KS, 010140.KS, 267260.KS, 034020.KS", "icon": "🚢"},
+    "kr_auto":           {"name_kr": "자동차 & 부품", "name_en": "Auto & Components", "tagline": "환율과 믹스가 마진을 가른다", "benchmark": "KRX 자동차", "coverage": "000270.KS, 012330.KS, 018880.KS, 204320.KS", "icon": "🚗"},
+    "kr_bio":            {"name_kr": "바이오 & 제약", "name_en": "Biotech & Pharma", "tagline": "위탁생산 증설과 신약 파이프라인의 두 축", "benchmark": "KRX 헬스케어", "coverage": "207940.KS, 068270.KS, 000100.KS, 128940.KS", "icon": "🧬"},
+    "kr_internet":       {"name_kr": "인터넷 & 게임", "name_en": "Internet & Gaming", "tagline": "광고 회복과 신작 성과가 실적을 좌우한다", "benchmark": "KRX 미디어", "coverage": "035420.KS, 035720.KS, 259960.KS, 251270.KS", "icon": "🌐"},
+    "kr_finance":        {"name_kr": "은행 & 금융지주", "name_en": "Banks & Financial Holdings", "tagline": "금리 방향과 주주환원 정책이 밸류를 정한다", "benchmark": "KRX 은행", "coverage": "105560.KS, 055550.KS, 086790.KS, 138040.KS", "icon": "🏦"},
+    "kr_chemical":       {"name_kr": "화학 & 소재", "name_en": "Chemicals & Materials", "tagline": "중국 증설과 스프레드 회복 시점이 관건", "benchmark": "KRX 화학", "coverage": "051910.KS, 011170.KS, 014680.KS, 010060.KS", "icon": "⚗️"},
+    "kr_steel":          {"name_kr": "철강 & 비철금속", "name_en": "Steel & Non-ferrous Metals", "tagline": "중국 감산과 전방 수요가 가격을 결정한다", "benchmark": "KRX 철강", "coverage": "005490.KS, 004020.KS, 010130.KS, 103140.KS", "icon": "🏗️"},
+    "kr_power":          {"name_kr": "전력기기 & 원자력", "name_en": "Power Equipment & Nuclear", "tagline": "글로벌 전력망 교체 수요가 구조적 성장을 만든다", "benchmark": "KRX 유틸리티", "coverage": "267260.KS, 034020.KS, 052690.KS, 032820.KQ", "icon": "⚡"},
+    "kr_consumer":       {"name_kr": "유통 & 소비재", "name_en": "Retail & Consumer", "tagline": "내수 소비와 해외 진출 성과가 갈린다", "benchmark": "KRX 필수소비재", "coverage": "097950.KS, 271560.KS, 090430.KS, 051900.KS, 282330.KS", "icon": "🛒"},
+    "kr_entertainment":  {"name_kr": "엔터테인먼트 & K-콘텐츠", "name_en": "Entertainment & K-Content", "tagline": "아티스트 활동 주기가 실적 변동을 만든다", "benchmark": "KRX 미디어", "coverage": "352820.KS, 035900.KQ, 041510.KQ, 037270.KS", "icon": "🎤"},
+    "kr_construction":   {"name_kr": "건설 & 부동산", "name_en": "Construction & Real Estate", "tagline": "분양 경기와 해외 수주가 실적을 나눈다", "benchmark": "KRX 건설", "coverage": "000720.KS, 006360.KS, 047040.KS, 375500.KS", "icon": "🏢"},
+    "kr_telecom":        {"name_kr": "통신 & 인프라", "name_en": "Telecom & Infrastructure", "tagline": "배당 매력과 신사업 전환의 균형", "benchmark": "KRX 통신", "coverage": "017670.KS, 032640.KS", "icon": "📡"},
+}
+
+
+def industries_for(market: str = "US") -> dict[str, dict]:
+    """시장에 맞는 산업 목록.
+
+    산업 구성은 시장마다 다르다. 조선·엔터는 한국 증시의 큰 축이지만 미국
+    목록에는 없고, 데이터센터 REIT 은 한국에 사실상 없다. 목록을 공유하면
+    한국 리포트인데 대표 종목이 미국 기업이 된다.
+    """
+    from backend.services.markets import normalize
+    return KR_INDUSTRIES if normalize(market) == "KR" else INDUSTRIES
+
+
+def industry_meta(industry_id: str) -> Optional[dict]:
+    """산업 id 로 정의를 찾는다 (시장 구분 없이)."""
+    return INDUSTRIES.get(industry_id) or KR_INDUSTRIES.get(industry_id)
+
+
 # ── ETF 벤치마크 매핑 ─────────────────────────────────────────────────────────────
 
 _BENCHMARK_ETF_MAP: dict[str, str] = {
@@ -174,15 +216,80 @@ def _call_sonnet(prompt: str, system: str = "", max_tokens: int = 4096,
 
 # ── yfinance 데이터 수집 ──────────────────────────────────────────────────────────
 
-def gather_equity_yfinance(ticker: str) -> tuple[str, str, dict]:
+def _fmt_amount(value, currency: str) -> str:
+    """금액을 그 통화의 단위 체계로 적는다.
+
+    LLM 에게 넘기는 텍스트라 **단위를 틀리면 그대로 리포트에 실린다.** 실제로
+    한국 종목의 연간 실적을 '$333605.94B' 로 적어 보내고 있었다 — 삼성전자
+    매출 333조원(KRW)을 10억으로 나눈 뒤 달러를 붙인 값이다. 받아 본 모델은
+    이걸 달러로 해석해 기업 규모를 1,300배 부풀려 서술한다.
+
+    원화는 조·억으로 끊는다. 'B'(십억)는 원화에 쓰지 않는 단위라, 숫자가
+    맞더라도 모델이 달러로 오해하기 쉽다.
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    sign = "-" if v < 0 else ""
+    a = abs(v)
+
+    if currency == "KRW":
+        if a >= 1e12:
+            return f"{sign}₩{a / 1e12:,.1f}조"
+        if a >= 1e8:
+            return f"{sign}₩{a / 1e8:,.0f}억"
+        return f"{sign}₩{a:,.0f}"
+    if a >= 1e12:
+        return f"{sign}${a / 1e12:,.2f}T"
+    if a >= 1e9:
+        return f"{sign}${a / 1e9:,.2f}B"
+    if a >= 1e6:
+        return f"{sign}${a / 1e6:,.2f}M"
+    return f"{sign}${a:,.2f}"
+
+
+def _fmt_price(value, currency: str) -> str:
+    """주가·EPS 처럼 단위를 줄이지 않고 그대로 적는 금액."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    # 원화는 호가 단위가 1원이라 소수점이 없다. ₩71,900.00 은 없는 정밀도다.
+    return f"₩{v:,.0f}" if currency == "KRW" else f"${v:,.2f}"
+
+
+def gather_equity_yfinance(ticker: str, market: str = "US") -> tuple[str, str, dict]:
     """yfinance로 종목 데이터 수집.
     Returns (company_name, formatted_text, raw_dict).
     """
+    from backend.services.markets import get_market as _get_market
+    # 통화는 시장이 정한다. 한국 종목에 $ 를 붙이면 25만원짜리 주식이
+    # 25만 달러로 읽히고, LLM 도 그 숫자를 달러로 해석해 리포트를 쓴다.
+    spec = _get_market(market)
+    cur = spec.currency
+
     try:
         t = yf.Ticker(ticker)
         info = t.info
 
+        # 시세와 재무제표의 통화는 다를 수 있다(해외 상장·ADR). yfinance 가
+        # 알려 주면 그 값을 쓰고, 없을 때만 시장 기본 통화로 돌아간다.
+        cur = info.get("currency") or cur
+        fin_cur = info.get("financialCurrency") or cur
+
         company_name = info.get("longName") or info.get("shortName") or ticker
+        # 한국 종목은 yfinance 가 영문명을 준다("Samsung Electronics Co., Ltd.").
+        # 한국어 리포트에 영문 상호가 섞이면 읽기 불편하고, LLM 도 그 이름으로
+        # 해외 기사를 찾아 국내 맥락을 놓친다.
+        if ticker.upper().endswith((".KS", ".KQ")):
+            try:
+                from backend.services.korea_universe import lookup as _kr
+                kr_row = _kr(ticker)
+                if kr_row and kr_row.get("name"):
+                    company_name = kr_row["name"]
+            except Exception:
+                pass
 
         raw_dict: dict = {
             "company_name":             company_name,
@@ -238,20 +345,20 @@ def gather_equity_yfinance(ticker: str) -> tuple[str, str, dict]:
 
         price = raw_dict["currentPrice"]
         if price:
-            lines.append(f"현재주가: ${float(price):,.2f} [A]")
+            lines.append(f"현재주가: {_fmt_price(price, cur)} [A]")
 
         mktcap = raw_dict["marketCap"]
         if mktcap:
-            lines.append(f"시가총액: ${float(mktcap)/1e9:.1f}B [A]")
+            lines.append(f"시가총액: {_fmt_amount(mktcap, cur)} [A]")
 
         if raw_dict["trailingPE"]:
             lines.append(f"Trailing P/E: {float(raw_dict['trailingPE']):.1f}x [A]")
         if raw_dict["forwardPE"]:
             lines.append(f"Forward P/E: {float(raw_dict['forwardPE']):.1f}x [E]")
         if raw_dict["trailingEps"]:
-            lines.append(f"EPS (TTM): ${float(raw_dict['trailingEps']):.2f} [A]")
+            lines.append(f"EPS (TTM): {_fmt_price(raw_dict['trailingEps'], cur)} [A]")
         if raw_dict["totalRevenue"]:
-            lines.append(f"연매출: ${float(raw_dict['totalRevenue'])/1e9:.2f}B [A]")
+            lines.append(f"연매출: {_fmt_amount(raw_dict['totalRevenue'], cur)} [A]")
         if raw_dict["revenueGrowth"] is not None:
             lines.append(f"매출성장률 (YoY): {float(raw_dict['revenueGrowth'])*100:.1f}% [A]")
         if raw_dict["grossMargins"] is not None:
@@ -263,9 +370,9 @@ def gather_equity_yfinance(ticker: str) -> tuple[str, str, dict]:
         if raw_dict["beta"] is not None:
             lines.append(f"베타: {float(raw_dict['beta']):.2f}")
         if raw_dict["fiftyTwoWeekHigh"]:
-            lines.append(f"52주 최고: ${float(raw_dict['fiftyTwoWeekHigh']):,.2f}")
+            lines.append(f"52주 최고: {_fmt_price(raw_dict['fiftyTwoWeekHigh'], cur)}")
         if raw_dict["fiftyTwoWeekLow"]:
-            lines.append(f"52주 최저: ${float(raw_dict['fiftyTwoWeekLow']):,.2f}")
+            lines.append(f"52주 최저: {_fmt_price(raw_dict['fiftyTwoWeekLow'], cur)}")
         if raw_dict["dividendYield"] is not None:
             lines.append(f"배당수익률: {float(raw_dict['dividendYield'])*100:.2f}%")
         if raw_dict["sector"]:
@@ -277,11 +384,11 @@ def gather_equity_yfinance(ticker: str) -> tuple[str, str, dict]:
         if raw_dict["fullTimeEmployees"]:
             lines.append(f"직원수: {int(raw_dict['fullTimeEmployees']):,}명")
         if raw_dict["targetMeanPrice"]:
-            lines.append(f"애널리스트 평균목표주가: ${float(raw_dict['targetMeanPrice']):,.2f} [E]")
+            lines.append(f"애널리스트 평균목표주가: {_fmt_price(raw_dict['targetMeanPrice'], cur)} [E]")
         if raw_dict["targetHighPrice"]:
-            lines.append(f"애널리스트 최고목표주가: ${float(raw_dict['targetHighPrice']):,.2f} [E]")
+            lines.append(f"애널리스트 최고목표주가: {_fmt_price(raw_dict['targetHighPrice'], cur)} [E]")
         if raw_dict["targetLowPrice"]:
-            lines.append(f"애널리스트 최저목표주가: ${float(raw_dict['targetLowPrice']):,.2f} [E]")
+            lines.append(f"애널리스트 최저목표주가: {_fmt_price(raw_dict['targetLowPrice'], cur)} [E]")
         if raw_dict["numberOfAnalystOpinions"]:
             lines.append(f"커버리지 애널리스트: {raw_dict['numberOfAnalystOpinions']}명")
         if raw_dict["recommendationKey"]:
@@ -289,17 +396,17 @@ def gather_equity_yfinance(ticker: str) -> tuple[str, str, dict]:
 
         if annual_data:
             lines.append("")
-            lines.append("【연간 실적 (최근 3개년, yfinance)】")
+            lines.append(f"【연간 실적 (최근 3개년, yfinance) · 표기 통화 {fin_cur}】")
             for year, data in sorted(annual_data.items(), reverse=True):
                 parts = [f"  {year}년:"]
                 if data.get("total_revenue"):
-                    parts.append(f"매출 ${float(data['total_revenue'])/1e9:.2f}B")
+                    parts.append(f"매출 {_fmt_amount(data['total_revenue'], fin_cur)}")
                 if data.get("gross_profit"):
-                    parts.append(f"매출총이익 ${float(data['gross_profit'])/1e9:.2f}B")
+                    parts.append(f"매출총이익 {_fmt_amount(data['gross_profit'], fin_cur)}")
                 if data.get("operating_income"):
-                    parts.append(f"영업이익 ${float(data['operating_income'])/1e9:.2f}B")
+                    parts.append(f"영업이익 {_fmt_amount(data['operating_income'], fin_cur)}")
                 if data.get("net_income"):
-                    parts.append(f"순이익 ${float(data['net_income'])/1e9:.2f}B")
+                    parts.append(f"순이익 {_fmt_amount(data['net_income'], fin_cur)}")
                 lines.append(" | ".join(parts))
 
         raw_dict["annual_data"] = annual_data
@@ -309,7 +416,7 @@ def gather_equity_yfinance(ticker: str) -> tuple[str, str, dict]:
         return ticker, f"(yfinance 데이터 수집 오류: {exc})", {}
 
 
-def gather_industry_yfinance(meta: dict) -> tuple[str, dict]:
+def gather_industry_yfinance(meta: dict, market: str = "US") -> tuple[str, dict]:
     """산업 ETF + 커버리지 종목 yfinance 데이터 수집.
     Returns (formatted_text, raw_dict).
     """
@@ -320,7 +427,10 @@ def gather_industry_yfinance(meta: dict) -> tuple[str, dict]:
     benchmark_str = meta.get("benchmark", "")
     words = re.findall(r"\b[A-Z]{2,6}\b", benchmark_str.upper())
     etf_tickers: list[str] = []
-    skip_words = {"ETF", "AND", "THE", "BVP"}
+    # KRX·KOSPI 는 거래소 이름이지 조회 가능한 티커가 아니다. 한국 벤치마크는
+    # "KRX 조선"처럼 한글이 섞여 있어 여기서 'KRX' 만 뽑히는데, 그걸 그대로
+    # 조회하면 상장폐지 경고만 남고 벤치마크가 빈칸이 된다.
+    skip_words = {"ETF", "AND", "THE", "BVP", "KRX", "KOSPI", "KOSDAQ"}
     for w in words:
         if w in skip_words:
             continue
@@ -331,7 +441,9 @@ def gather_industry_yfinance(meta: dict) -> tuple[str, dict]:
             etf_tickers.append(w)
 
     if not etf_tickers:
-        etf_tickers = ["SPY"]
+        # 벤치마크가 없으면 그 시장의 대표 지수를 쓴다.
+        # 한국 종목에 SPY 를 붙이면 통화·시장이 다른 것과 비교하게 된다.
+        etf_tickers = ["SPY"] if market == "US" else ["^KS11"]
 
     lines.append("")
     lines.append("【벤치마크 ETF 1년 수익률】")
@@ -350,6 +462,10 @@ def gather_industry_yfinance(meta: dict) -> tuple[str, dict]:
     # 커버리지 종목
     coverage_str = meta.get("coverage", "")
     coverage_tickers = [t.strip() for t in coverage_str.split(",") if t.strip()]
+    # 통화 기호는 시장이 정한다. 한국 종목에 $ 를 붙이면 34만원짜리 주식이
+    # 34만 달러로 읽히고, LLM 도 그 숫자를 달러로 해석해 리포트를 쓴다.
+    from backend.services.markets import get_market as _get_market
+    cur = _get_market(market).currency
 
     lines.append("")
     lines.append("【커버리지 종목 핵심 지표】")
@@ -362,12 +478,23 @@ def gather_industry_yfinance(meta: dict) -> tuple[str, dict]:
             pe         = info.get("trailingPE")
             rev_growth = info.get("revenueGrowth")
             name       = info.get("shortName") or ct
+            # 한국 종목은 코드만 보면 어느 회사인지 알 수 없다. yfinance 가
+            # 한글 이름을 주지 않는 경우가 많아 상장 목록에서 보완한다 —
+            # 이름이 없으면 LLM 도 '009540' 을 그대로 쓴 리포트를 낸다.
+            if ct.endswith((".KS", ".KQ")):
+                try:
+                    from backend.services.korea_universe import lookup as _kr
+                    kr_row = _kr(ct)
+                    if kr_row and kr_row.get("name"):
+                        name = kr_row["name"]
+                except Exception:
+                    pass
 
-            parts = [f"  {ct}"]
+            parts = [f"  {ct} ({name})" if name and name != ct else f"  {ct}"]
             if price:
-                parts.append(f"주가 ${float(price):,.2f}")
+                parts.append(f"주가 {_fmt_price(price, cur)}")
             if mktcap:
-                parts.append(f"시총 ${float(mktcap)/1e9:.1f}B")
+                parts.append(f"시총 {_fmt_amount(mktcap, cur)}")
             if pe:
                 parts.append(f"P/E {float(pe):.1f}x")
             if rev_growth is not None:
@@ -390,8 +517,13 @@ def gather_industry_yfinance(meta: dict) -> tuple[str, dict]:
 
 # ── Perplexity 뉴스 수집 ──────────────────────────────────────────────────────────
 
-def gather_equity_perplexity(ticker: str, company_name: str) -> str:
-    """Perplexity sonar로 종목 최신 뉴스·애널리스트 동향 수집."""
+def gather_equity_perplexity(ticker: str, company_name: str, market: str = "US") -> str:
+    """Perplexity sonar로 종목 최신 뉴스·애널리스트 동향 수집.
+
+    한국 종목이면 국내 경제지에서, 한국 투자자 관점으로 모은다. 예전에는
+    시장 구분이 없어 삼성전자 리포트도 미국 매체 기사로 썼다.
+    """
+    from backend.services.news_sources import focus_block, perplexity_extra
     if not PERPLEXITY_API_KEY:
         return ""
     try:
@@ -414,7 +546,8 @@ Collect the following **in English**, concise bullet points. Favor news and narr
 - 1-2 recent issues at key competitors
 
 [Industry trends]
-- 1-2 current trends relevant to {company_name}"""
+- 1-2 current trends relevant to {company_name}
+{focus_block(market, company_name)}"""
 
         resp = requests.post(
             "https://api.perplexity.ai/chat/completions",
@@ -427,6 +560,7 @@ Collect the following **in English**, concise bullet points. Favor news and narr
                 "messages": [{"role": "user", "content": prompt}],
                 "max_tokens": 1500,
                 "temperature": 0.0,
+                **perplexity_extra(market),
             },
             timeout=30,
         )
@@ -436,8 +570,9 @@ Collect the following **in English**, concise bullet points. Favor news and narr
         return ""
 
 
-def gather_industry_perplexity(meta: dict) -> str:
+def gather_industry_perplexity(meta: dict, market: str = "US") -> str:
     """Perplexity sonar로 산업 최신 뉴스·트렌드·규제 동향 수집."""
+    from backend.services.news_sources import focus_block, perplexity_extra
     if not PERPLEXITY_API_KEY:
         return ""
     try:
@@ -455,7 +590,8 @@ Collect the following **in English**, concise bullet points.
 - Recent policy shifts, regulatory issues, technology moves
 
 [KPI updates]
-- Recently reported market size, growth rate, demand indicators"""
+- Recently reported market size, growth rate, demand indicators
+{focus_block(market, meta['name_en'])}"""
 
         resp = requests.post(
             "https://api.perplexity.ai/chat/completions",
@@ -468,6 +604,7 @@ Collect the following **in English**, concise bullet points.
                 "messages": [{"role": "user", "content": prompt}],
                 "max_tokens": 1500,
                 "temperature": 0.0,
+                **perplexity_extra(market),
             },
             timeout=30,
         )
@@ -479,33 +616,43 @@ Collect the following **in English**, concise bullet points.
 
 # ── 프롬프트 빌더 ─────────────────────────────────────────────────────────────────
 
-def _equity_prompt(ticker: str, company_name: str) -> str:
+def _equity_prompt(ticker: str, company_name: str, market: str = "US") -> str:
     """Sonnet 단일 호출용 (8000 토큰)."""
+    from backend.services.markets import get_market
+    spec = get_market(market)
+    exchange_hint = "NYSE/NASDAQ" if market == "US" else "KOSPI/KOSDAQ"
+    cur = spec.currency_symbol
+    # 금액 예시도 시장의 표기 관습을 따라야 한다. '₩XXXB' 라고 적어 두면
+    # 모델이 원화를 10억 단위로 쓰거나 아예 달러로 바꿔 적는다. 주가도
+    # 원화는 소수점이 없다(호가 단위 1원).
+    cap_ex   = "₩XXX조" if cur == "₩" else "$XXXB"
+    price_ex = "₩XXX,XXX" if cur == "₩" else "$XXX.XX"
     today = datetime.now().strftime("%Y년 %m월 %d일")
-    return f"""오늘은 {today}입니다. {company_name} ({ticker}) 종목 리서치 레포트를 아래 10개 섹션 순서대로 빠짐없이 작성하세요.
+    return f"""{_market_stance(market)}
+오늘은 {today}입니다. {company_name} ({ticker}) 종목 리서치 레포트를 아래 10개 섹션 순서대로 빠짐없이 작성하세요.
 yfinance 수치는 그대로 인용[A], 추정치는 [E] 표시. 마지막 섹션(X)까지 반드시 완성하세요.
 
 ## HEADER
 투자의견: [BUY/HOLD/SELL]
-현재주가: $XXX.XX [A]
-시가총액: $XXXB [A]
-Bull 목표주가: $XXX
-Bear 목표주가: $XXX
+현재주가: {price_ex} [A]
+시가총액: {cap_ex} [A]
+Bull 목표주가: {price_ex}
+Bear 목표주가: {price_ex}
 슬로건: [핵심 투자포인트 한 줄 — 수치 포함]
 KEY_HIGHLIGHT_1: [수치 포함 핵심 지표 1]
 KEY_HIGHLIGHT_2: [수치 포함 핵심 지표 2]
 KEY_HIGHLIGHT_3: [수치 포함 핵심 지표 3]
 KEY_HIGHLIGHT_4: [수치 포함 핵심 지표 4]
 KEY_HIGHLIGHT_5: [수치 포함 핵심 지표 5]
-거래소: [NYSE/NASDAQ]
+거래소: [{exchange_hint}]
 업종: [업종명]
 
 ## II. 투자의견 요약 (Executive Summary)
 | 구분 | 🐂 Bull Case | 🐻 Bear Case |
 | --- | --- | --- |
 | 투자의견 | BUY | HOLD |
-| 목표주가 | $XXX | $XXX |
-| 현재주가 | $XXX.XX [A] | $XXX.XX [A] |
+| 목표주가 | {price_ex} | {price_ex} |
+| 현재주가 | {price_ex} [A] | {price_ex} [A] |
 
 **핵심 요약**
 • [핵심 지표 1]
@@ -539,37 +686,47 @@ KEY_HIGHLIGHT_5: [수치 포함 핵심 지표 5]
 
 ## X. 종합 결론 (Conclusion)
 [결론 3~4문장]
-**최종 투자의견: [BUY/HOLD/SELL] | 목표주가: $XXX (Bull) / $XXX (Bear)**
+**최종 투자의견: [BUY/HOLD/SELL] | 목표주가: {price_ex} (Bull) / {price_ex} (Bear)**
 """
 
 
-def _equity_prompt_part1(ticker: str, company_name: str) -> str:
+def _equity_prompt_part1(ticker: str, company_name: str, market: str = "US") -> str:
     """Haiku Phase-1: HEADER + II~V."""
+    from backend.services.markets import get_market
+    spec = get_market(market)
+    exchange_hint = "NYSE/NASDAQ" if market == "US" else "KOSPI/KOSDAQ"
+    cur = spec.currency_symbol
+    # 금액 예시도 시장의 표기 관습을 따라야 한다. '₩XXXB' 라고 적어 두면
+    # 모델이 원화를 10억 단위로 쓰거나 아예 달러로 바꿔 적는다. 주가도
+    # 원화는 소수점이 없다(호가 단위 1원).
+    cap_ex   = "₩XXX조" if cur == "₩" else "$XXXB"
+    price_ex = "₩XXX,XXX" if cur == "₩" else "$XXX.XX"
     today = datetime.now().strftime("%Y년 %m월 %d일")
-    return f"""오늘은 {today}입니다. {company_name} ({ticker}) 레포트의 **HEADER와 섹션 II~V만** 작성하세요.
+    return f"""{_market_stance(market)}
+오늘은 {today}입니다. {company_name} ({ticker}) 레포트의 **HEADER와 섹션 II~V만** 작성하세요.
 아래 5개 블록을 모두 완성해야 합니다. 섹션 VI 이후는 쓰지 마세요.
 
 ## HEADER
 투자의견: [BUY/HOLD/SELL]
-현재주가: $XXX.XX [A]
-시가총액: $XXXB [A]
-Bull 목표주가: $XXX
-Bear 목표주가: $XXX
+현재주가: {price_ex} [A]
+시가총액: {cap_ex} [A]
+Bull 목표주가: {price_ex}
+Bear 목표주가: {price_ex}
 슬로건: [핵심 투자포인트 한 줄 — 수치 포함]
 KEY_HIGHLIGHT_1: [수치 포함 핵심 지표 1]
 KEY_HIGHLIGHT_2: [수치 포함 핵심 지표 2]
 KEY_HIGHLIGHT_3: [수치 포함 핵심 지표 3]
 KEY_HIGHLIGHT_4: [수치 포함 핵심 지표 4]
 KEY_HIGHLIGHT_5: [수치 포함 핵심 지표 5]
-거래소: [NYSE/NASDAQ]
+거래소: [{exchange_hint}]
 업종: [업종명]
 
 ## II. 투자의견 요약 (Executive Summary)
 | 구분 | 🐂 Bull Case | 🐻 Bear Case |
 | --- | --- | --- |
 | 투자의견 | BUY | HOLD |
-| 목표주가 | $XXX | $XXX |
-| 현재주가 | $XXX.XX [A] | $XXX.XX [A] |
+| 목표주가 | {price_ex} | {price_ex} |
+| 현재주가 | {price_ex} [A] | {price_ex} [A] |
 
 **핵심 요약**
 • [핵심 지표 1]
@@ -591,10 +748,20 @@ KEY_HIGHLIGHT_5: [수치 포함 핵심 지표 5]
 """
 
 
-def _equity_prompt_part2(ticker: str, company_name: str) -> str:
+def _equity_prompt_part2(ticker: str, company_name: str, market: str = "US") -> str:
     """Haiku Phase-2: VI~X."""
+    from backend.services.markets import get_market
+    spec = get_market(market)
+    exchange_hint = "NYSE/NASDAQ" if market == "US" else "KOSPI/KOSDAQ"
+    cur = spec.currency_symbol
+    # 금액 예시도 시장의 표기 관습을 따라야 한다. '₩XXXB' 라고 적어 두면
+    # 모델이 원화를 10억 단위로 쓰거나 아예 달러로 바꿔 적는다. 주가도
+    # 원화는 소수점이 없다(호가 단위 1원).
+    cap_ex   = "₩XXX조" if cur == "₩" else "$XXXB"
+    price_ex = "₩XXX,XXX" if cur == "₩" else "$XXX.XX"
     today = datetime.now().strftime("%Y년 %m월 %d일")
-    return f"""오늘은 {today}입니다. {company_name} ({ticker}) 레포트의 **섹션 VI~X만** 작성하세요.
+    return f"""{_market_stance(market)}
+오늘은 {today}입니다. {company_name} ({ticker}) 레포트의 **섹션 VI~X만** 작성하세요.
 아래 5개 블록을 모두 완성해야 합니다. 섹션 I~V는 이미 작성됐으므로 반복하지 마세요.
 
 ## VI. 재무제표 & KPI 분석 (Financials)
@@ -611,14 +778,38 @@ def _equity_prompt_part2(ticker: str, company_name: str) -> str:
 
 ## X. 종합 결론 (Conclusion)
 [결론 3~4문장]
-**최종 투자의견: [BUY/HOLD/SELL] | 목표주가: $XXX (Bull) / $XXX (Bear)**
+**최종 투자의견: [BUY/HOLD/SELL] | 목표주가: {price_ex} (Bull) / {price_ex} (Bear)**
 """
 
 
-def _industry_prompt(meta: dict) -> str:
+def _market_stance(market: str) -> str:
+    """리포트 프롬프트 앞머리에 붙일 시장 관점.
+
+    이걸 붙이지 않으면 모델이 기본값처럼 미국 시장을 전제로 쓴다 — 한국 산업
+    리포트인데 비교 대상이 미국 기업이 되고, 금액도 달러로 나온다.
+    """
+    from backend.services.markets import normalize
+    if normalize(market) == "KR":
+        return (
+            "**분석 관점: 한국 주식시장.** 상장 시장은 KOSPI/KOSDAQ 기준이고 금액은 원화(₩)로 씁니다.\n"
+            "비교 대상·경쟁사·예시는 **국내 상장 종목만** 사용하세요. 미국 기업을 예로 들지 마세요.\n"
+            "환율(원/달러), 수출 실적, 외국인·기관 수급처럼 한국 시장에서 실제로 작동하는 변수를 우선 다루세요.\n"
+        )
+    return (
+        "**분석 관점: 미국 주식시장.** 상장 시장은 NYSE/NASDAQ 기준이고 금액은 달러($)로 씁니다.\n"
+        "비교 대상·경쟁사·예시는 미국 상장 종목을 사용하세요.\n"
+    )
+
+
+def _industry_prompt(meta: dict, market: str = "US") -> str:
     """Sonnet 단일 호출용 (8000 토큰)."""
+    from backend.services.markets import get_market
+    spec = get_market(market)
+    exchange_hint = "NYSE/NASDAQ" if market == "US" else "KOSPI/KOSDAQ"
+    cur = spec.currency_symbol
     today = datetime.now().strftime("%Y년 %m월 %d일")
-    return f"""오늘은 {today}입니다. **{meta['name_kr']} ({meta['name_en']})** 산업 레포트를 아래 9개 섹션 순서대로 빠짐없이 작성하세요.
+    return f"""{_market_stance(market)}
+오늘은 {today}입니다. **{meta['name_kr']} ({meta['name_en']})** 산업 레포트를 아래 9개 섹션 순서대로 빠짐없이 작성하세요.
 yfinance 수치는 그대로 인용[A], 추정치는 [E] 표시. 마지막 섹션(IX)까지 반드시 완성하세요.
 
 ## HEADER
@@ -665,10 +856,15 @@ KEY_HIGHLIGHT_5: [최신 수치 포함 핵심 지표 5]
 """
 
 
-def _industry_prompt_part1(meta: dict) -> str:
+def _industry_prompt_part1(meta: dict, market: str = "US") -> str:
     """Haiku Phase-1: HEADER + II~V."""
+    from backend.services.markets import get_market
+    spec = get_market(market)
+    exchange_hint = "NYSE/NASDAQ" if market == "US" else "KOSPI/KOSDAQ"
+    cur = spec.currency_symbol
     today = datetime.now().strftime("%Y년 %m월 %d일")
-    return f"""오늘은 {today}입니다. **{meta['name_kr']}** 산업 레포트의 **HEADER와 섹션 II~V만** 작성하세요.
+    return f"""{_market_stance(market)}
+오늘은 {today}입니다. **{meta['name_kr']}** 산업 레포트의 **HEADER와 섹션 II~V만** 작성하세요.
 아래 5개 블록을 모두 완성해야 합니다. 섹션 VI 이후는 쓰지 마세요.
 
 ## HEADER
@@ -703,10 +899,15 @@ KEY_HIGHLIGHT_5: [최신 수치 포함 핵심 지표 5]
 """
 
 
-def _industry_prompt_part2(meta: dict) -> str:
+def _industry_prompt_part2(meta: dict, market: str = "US") -> str:
     """Haiku Phase-2: VI~IX."""
+    from backend.services.markets import get_market
+    spec = get_market(market)
+    exchange_hint = "NYSE/NASDAQ" if market == "US" else "KOSPI/KOSDAQ"
+    cur = spec.currency_symbol
     today = datetime.now().strftime("%Y년 %m월 %d일")
-    return f"""오늘은 {today}입니다. **{meta['name_kr']}** 산업 레포트의 **섹션 VI~IX만** 작성하세요.
+    return f"""{_market_stance(market)}
+오늘은 {today}입니다. **{meta['name_kr']}** 산업 레포트의 **섹션 VI~IX만** 작성하세요.
 아래 4개 블록을 모두 완성해야 합니다. 섹션 I~V는 이미 작성됐으므로 반복하지 마세요.
 
 ## VI. 산업 KPI 대시보드
@@ -728,6 +929,7 @@ def _industry_prompt_part2(meta: dict) -> str:
 def write_equity_report(
     ticker: str, model_tier: str = "basic",
     should_cancel: Optional[Callable[[], bool]] = None,
+    market: str = "US",
 ) -> dict:
     """종목 리서치 레포트 생성.
     model_tier: "basic" → GPT-5.6 Sol 2-phase (각 4096 토큰)
@@ -744,11 +946,11 @@ def write_equity_report(
 
     # 1) yfinance 데이터
     _check()
-    company_name, yf_text, raw_dict = gather_equity_yfinance(ticker)
+    company_name, yf_text, raw_dict = gather_equity_yfinance(ticker, market)
 
     # 2) Perplexity 뉴스
     _check()
-    news_text = gather_equity_perplexity(ticker, company_name)
+    news_text = gather_equity_perplexity(ticker, company_name, market)
 
     _check()
 
@@ -770,11 +972,11 @@ def write_equity_report(
 
     _write = _call_haiku if model_tier == "basic" else _call_sonnet
     p1 = _write(
-        f"{context_deep}\n\n{_equity_prompt_part1(ticker, company_name)}",
+        f"{context_deep}\n\n{_equity_prompt_part1(ticker, company_name, market)}",
         EQUITY_SYSTEM_PROMPT, max_tokens=4096, should_cancel=should_cancel,
     )
     p2 = _write(
-        f"{context_deep}\n\n{_equity_prompt_part2(ticker, company_name)}",
+        f"{context_deep}\n\n{_equity_prompt_part2(ticker, company_name, market)}",
         EQUITY_SYSTEM_PROMPT, max_tokens=4096, should_cancel=should_cancel,
     )
     raw = p1.strip() + "\n\n" + p2.strip()
@@ -787,12 +989,14 @@ def write_equity_report(
         "sections":     {k: v for k, v in sections.items() if not k.startswith("_")},
         "market_data":  raw_dict,
         "model_tier":   model_tier,
+        "market":       market,
     }
 
 
 def write_industry_report(
     industry_id: str, model_tier: str = "basic",
     should_cancel: Optional[Callable[[], bool]] = None,
+    market: str = "US",
 ) -> dict:
     """산업 리서치 레포트 생성.
     model_tier: "basic" → GPT-5.6 Sol 2-phase (각 4096 토큰)
@@ -800,9 +1004,9 @@ def write_industry_report(
 
     should_cancel 은 write_equity_report 와 같은 역할이다.
     """
-    if industry_id not in INDUSTRIES:
+    if industry_meta(industry_id) is None:
         raise ValueError(f"지원하지 않는 산업: {industry_id}")
-    meta = INDUSTRIES[industry_id]
+    meta = industry_meta(industry_id)
 
     def _check() -> None:
         if should_cancel is not None and should_cancel():
@@ -810,11 +1014,11 @@ def write_industry_report(
 
     # 1) yfinance 데이터
     _check()
-    yf_text, raw_dict = gather_industry_yfinance(meta)
+    yf_text, raw_dict = gather_industry_yfinance(meta, market)
 
     # 2) Perplexity 뉴스
     _check()
-    news_text = gather_industry_perplexity(meta)
+    news_text = gather_industry_perplexity(meta, market)
 
     _check()
 
@@ -826,11 +1030,11 @@ def write_industry_report(
 
     _write = _call_haiku if model_tier == "basic" else _call_sonnet
     p1 = _write(
-        f"{context}\n\n{_industry_prompt_part1(meta)}",
+        f"{context}\n\n{_industry_prompt_part1(meta, market)}",
         INDUSTRY_SYSTEM_PROMPT, max_tokens=4096, should_cancel=should_cancel,
     )
     p2 = _write(
-        f"{context}\n\n{_industry_prompt_part2(meta)}",
+        f"{context}\n\n{_industry_prompt_part2(meta, market)}",
         INDUSTRY_SYSTEM_PROMPT, max_tokens=4096, should_cancel=should_cancel,
     )
     raw = p1.strip() + "\n\n" + p2.strip()
