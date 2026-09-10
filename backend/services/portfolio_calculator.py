@@ -530,7 +530,12 @@ def calculate_metrics(
         return (cur / base - 1) * 100
 
     beta = calculate_portfolio_beta(holdings, close_df)
-    vix  = float(curr.get("^VIX", 18.0))
+    # `.get()` 의 기본값 18.0(VIX 장기 평균)은 **열이 없을 때만** 쓰인다.
+    # 열은 있는데 값이 전부 NaN 이면 NaN 이 그대로 나오고, ffill 도 전량 NaN 열은
+    # 채우지 못한다 — yfinance 가 ^VIX 를 빈 열로 주는 일이 있다. 그러면 폴백을
+    # 두었는데도 화면에는 '—' 가 뜬다 (앱 전역 SafeJSONResponse 가 NaN 을 null 로
+    # 바꿔 주므로 요청이 깨지지는 않는다. 그 안전망이 이 누락을 가려 왔다.)
+    vix  = _safe(curr.get("^VIX", 18.0), 18.0)
 
     alpha = 0.0
     if "^GSPC" in close_df.columns:
