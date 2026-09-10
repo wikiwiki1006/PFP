@@ -15,6 +15,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { auth, logout as fbLogout, type User } from './firebase'
 import AuthModal from '@/components/auth/AuthModal'
 import { api } from '@/api'
+import { setMarket, hasStoredMarket } from '@/lib/market'
 
 export interface Profile {
   uid: string
@@ -26,6 +27,8 @@ export interface Profile {
   email_verified: boolean
   photo_url: string | null
   created_at: string | null
+  /** 로그인 후 처음 열릴 시장. 프로필 설정에서 바꾼다. */
+  default_market?: 'US' | 'KR'
 }
 
 interface AuthState {
@@ -91,6 +94,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const { data } = await api.get<Profile>('/api/auth/me')
       setProfile(data)
       setUnregistered(false)
+      // 계정에 저장된 기본 시장을 반영한다. 이 기기에서 아직 한 번도 시장을
+      // 고른 적이 없을 때만 — 사용자가 방금 상단에서 바꾼 시장을 로그인 응답이
+      // 덮어써 버리면 전환이 되돌아간 것처럼 보인다.
+      if (data.default_market && !hasStoredMarket()) {
+        setMarket(data.default_market)
+      }
       return 'ok'
     } catch (e) {
       setProfile(null)

@@ -25,6 +25,8 @@ export interface EquityCurvePoint {
 
 export interface Holding {
   q: number
+  /** 화면용 종목명 (서버가 채운다). */
+  name?: string
   avg: number
   sector: string
   div?: number
@@ -36,6 +38,8 @@ export interface HoldingsMap {
 
 export interface HoldingDetail {
   ticker: string
+  /** 화면용 종목명. 한국 종목은 코드만으로 회사를 알 수 없어 서버가 채워 준다. */
+  name?: string
   qty: number
   avg_cost: number
   current_price: number
@@ -93,8 +97,8 @@ export interface SectorData {
   price: number
   change_1d_pct: number
   change_1w_pct: number
-  change_1m_pct: number
-  change_3m_pct?: number
+  change_1m_pct: number | null
+  change_3m_pct?: number | null
   change_6m_pct?: number
 }
 
@@ -235,6 +239,8 @@ export interface SignalScanPick {
   /** 항목별 배점 (수급 /40, 모멘텀 /30, 추세 /30) */
   components: { volume: number; momentum: number; trend: number }
   reason: string
+  /** 종목명. 한국 시장에서만 채워진다 — 코드만으로는 회사를 알 수 없어서다. */
+  name?: string
 }
 
 export interface SignalScanResult {

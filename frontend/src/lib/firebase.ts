@@ -10,6 +10,7 @@
 import { initializeApp } from 'firebase/app'
 import {
   getAuth,
+  connectAuthEmulator,
   GoogleAuthProvider,
   signInWithPopup,
   signInWithCustomToken,
@@ -31,6 +32,21 @@ const firebaseConfig = {
 
 export const firebaseApp = initializeApp(firebaseConfig)
 export const auth = getAuth(firebaseApp)
+
+// 로컬 개발에서는 인증 에뮬레이터에 붙는다.
+//
+// Firebase 프로젝트는 로컬과 운영이 같아서, 그냥 두면 로컬에서 만든 계정이
+// 실서비스 계정과 같은 공간에 쌓인다. 이미 운영에 있는 이메일로는 가입도
+// 안 되고, 잘못 지우면 실제 사용자 계정이 사라진다.
+// 에뮬레이터는 완전히 분리된 인증 저장소라 그런 사고가 없다.
+//
+// VITE_USE_AUTH_EMULATOR=true 로 켠다 (frontend/.env.local).
+if (import.meta.env.VITE_USE_AUTH_EMULATOR === 'true') {
+  const host = import.meta.env.VITE_AUTH_EMULATOR_URL || 'http://127.0.0.1:9099'
+  connectAuthEmulator(auth, host, { disableWarnings: true })
+  // eslint-disable-next-line no-console
+  console.info(`[auth] 에뮬레이터 사용 중: ${host} (운영 계정과 분리됨)`)
+}
 
 // Firebase 가 보내는 메일(비밀번호 재설정 등)을 한국어 템플릿으로 받는다.
 // 지정하지 않으면 영문 기본 템플릿이 나간다.

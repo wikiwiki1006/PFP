@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { getIdToken } from '@/lib/firebase'
+import { getMarket } from '@/lib/market'
 import type {
   PortfolioMetrics, EquityCurvePoint, HoldingsMap, HoldingDetail,
   SectorWeights, Trade, TradeForm, MarketSnapshot, SectorData,
@@ -30,6 +31,14 @@ export const api = axios.create({
 api.interceptors.request.use(async (config) => {
   const token = await getIdToken()
   if (token) config.headers.Authorization = `Bearer ${token}`
+
+  // 지금 보고 있는 시장을 모든 요청에 싣는다. 호출 지점이 60곳이 넘어
+  // 하나씩 넘기면 빠뜨리는 곳이 생기고, 그 하나가 다른 시장 데이터를
+  // 가져와 화면에 섞인다. 여기서 한 번에 붙이면 누락이 없다.
+  // 이미 명시된 요청은 건드리지 않는다 (그 호출이 의도를 갖고 지정한 것이다).
+  if (config.params?.market == null) {
+    config.params = { ...(config.params ?? {}), market: getMarket() }
+  }
   return config
 })
 
