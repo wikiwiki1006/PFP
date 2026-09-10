@@ -257,6 +257,13 @@ def get_conn():
                 conn = None
                 time.sleep(0.2)
                 continue
+            # 풀은 커넥션 상태를 되돌려주지 않는다. 빌려 간 쪽이 autocommit 을
+            # 켜고 반납하면 그대로 다음 사람에게 간다 (`user_write_lock` 이
+            # 실제로 그랬다). 그 커넥션에서는 아래 `rollback()` 이 아무 일도
+            # 하지 않아 여러 문장짜리 쓰기가 조용히 원자성을 잃는다.
+            # 트랜잭션 스코프 락(pg_advisory_xact_lock)도 문장 하나 만에 풀린다.
+            if conn.autocommit:
+                conn.autocommit = False
             # 간단한 ping으로 연결 유효성 검증
             with conn.cursor() as _cur:
                 _cur.execute("SELECT 1")

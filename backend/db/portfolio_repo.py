@@ -154,6 +154,14 @@ def user_write_lock(user_id: str = "default"):
                 # 이 줄이 곧 "직렬화가 언제 끊겼는가" 의 유일한 단서다.
                 logger.warning(f"user_write_lock({user_id}) 해제 실패: {e}")
             try:
+                # 빌릴 때 켠 autocommit 을 되돌린다. 풀은 커넥션 상태를
+                # 정리해주지 않으므로, 이대로 반납하면 다음에 이 커넥션을 받는
+                # 쪽이 트랜잭션 없이 돌게 된다.
+                if not conn.closed:
+                    conn.autocommit = False
+            except Exception as e:
+                logger.warning(f"user_write_lock({user_id}) autocommit 복원 실패: {e}")
+            try:
                 pool.putconn(conn)
             except Exception as e:
                 logger.warning(f"user_write_lock({user_id}) 커넥션 반납 실패: {e}")
