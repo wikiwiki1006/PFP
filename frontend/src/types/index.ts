@@ -30,8 +30,13 @@ export interface PortfolioMetrics {
   change_counted?: number
   /** 보유 종목 수 (CASH 제외). counted 와 다르면 일부만 반영된 것이다. */
   change_holdings?: number
-  /** 자기 시장의 마지막 확정 세션보다 뒤처진 종목 수. */
-  change_stale?: number
+  /** 자기 시장의 마지막 확정 세션보다 뒤처진 **종목 티커 목록**.
+   *
+   *  개수가 아니라 목록이다 (portfolio_calculator:561 `list(pc.stale)`).
+   *  처음에 `number` 로 선언했다가 실제 응답이 `[]` 인 것을 보고 고쳤다 —
+   *  빈 배열이 오면 `0` 처럼 보여서 개수로 착각하기 쉽다. 어느 종목이
+   *  뒤처졌는지가 화면에 필요한 정보이기도 하다. */
+  change_stale?: string[]
   /** 미국 증시 개장 여부 — true면 today_change_*가 실시간 값이다. */
   market_open?: boolean
 }

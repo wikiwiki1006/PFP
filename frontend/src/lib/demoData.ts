@@ -38,7 +38,7 @@ export const DEMO_METRICS: PortfolioMetrics = {
   // 구분할 수 없다. DEMO_HOLDINGS_DETAIL 의 CASH 제외 6종목과 맞춘다.
   change_counted:   6,
   change_holdings:  6,
-  change_stale:     0,
+  change_stale:     [],
 }
 
 export const DEMO_HOLDINGS_DETAIL: HoldingDetail[] = [
