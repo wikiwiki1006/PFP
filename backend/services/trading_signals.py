@@ -902,6 +902,18 @@ def pairs_auto_detail(
     종목이 다시 같은 방향으로 움직이고 있어도 격차가 좁혀지지 않고 계속 벌어지는
     것처럼 보인다. 롤링 평균은 시간이 지나며 같이 움직이므로 오래된 괴리는
     자연히 창 밖으로 밀려나 스프레드가 0 근방에서 다시 진동할 수 있다.
+
+    `correlation` 은 **수익률(일간 변화율) 상관**이다. 여기서 고른 페어는 곧바로
+    `pairs_trading_signal` 로 들어가고 그 게이트가 보는 값이 정확히 이것이므로
+    (`min_correlation=0.70`), 탐색도 같은 값으로 정렬해야 한다. 다른 값으로
+    고르면 시스템이 자기가 고른 1위 페어에 자기가 `낮은 상관계수 경고` 를 띄운다.
+    부호를 그대로 쓴다 — `abs()` 로 정렬하면 강한 역상관(예: -0.40)이 1위가 되고,
+    게이트는 `-0.40 >= 0.70` 이 거짓이라 그 페어를 반드시 거부한다.
+
+    남은 불일치: 이 함수는 `/pairs/auto` 의 2년 프레임에서 상관을 재고, 게이트는
+    `/pairs` 의 기본 1년 프레임에서 다시 잰다. 창이 달라 값도 조금 다르다
+    (실측: 같은 60종목 풀에서 1위가 바뀌는 종목 5/29). 창을 맞추는 것은
+    라우터의 `period` 기본값 문제라 여기서 건드리지 않는다.
     """
     SPREAD_WINDOW = 60  # 페어 트레이딩 기본 lookback(pairs_trading_signal)과 동일한 관례
 
@@ -910,7 +922,7 @@ def pairs_auto_detail(
         return {"matches": [], "best": None}
 
     price_a = close_df[ticker_a].dropna()
-    vol_a = price_a.pct_change().rolling(20).std().dropna()
+    ret_a = price_a.pct_change()
 
     scored = []
     for t in pool:
@@ -918,11 +930,9 @@ def pairs_auto_detail(
         common = price_a.index.intersection(price_b.index)
         if len(common) < 60:
             continue
-        vol_b = price_b.pct_change().rolling(20).std().dropna()
-        common_vol = vol_a.index.intersection(vol_b.index)
-        if len(common_vol) < 30:
-            continue
-        sim = float(vol_a.loc[common_vol].corr(vol_b.loc[common_vol]))
+        # 게이트(`pairs_trading_signal`)와 같은 계산: 각 종목의 결측을 뺀 뒤
+        # 일간 변화율을 내고, pandas 가 공통 날짜로 정렬해 상관을 낸다.
+        sim = float(ret_a.corr(price_b.pct_change()))
         if sim != sim:
             continue
         scored.append((t, sim, common))
@@ -930,7 +940,7 @@ def pairs_auto_detail(
     if not scored:
         return {"matches": [], "best": None}
 
-    scored.sort(key=lambda x: abs(x[1]), reverse=True)
+    scored.sort(key=lambda x: x[1], reverse=True)
     matches = [{"ticker": t, "correlation": round(c, 4)} for t, c, _ in scored[:top_n]]
 
     best_ticker = scored[0][0]
