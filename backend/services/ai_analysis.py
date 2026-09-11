@@ -30,7 +30,6 @@ logger = logging.getLogger(__name__)
 
 ANTHROPIC_API_KEY  = os.getenv("ANTHROPIC_API_KEY", "")
 GPT_API_KEY        = os.getenv("GPT_API_KEY", "")
-TODAY = datetime.now().strftime("%Y년 %m월 %d일")
 CONTEXT_CHAR_LIMIT   = 3200   # 20% 절감
 PHASE2_CONTEXT_LIMIT = 8000   # 20% 절감
 
@@ -59,6 +58,17 @@ _AGENT_MODEL_TIER: dict[int, str] = {
     8: "sonnet",  # 포트폴리오 액션 — 개인화 판단
     9: "sonnet",  # 최종 판정 — 종합 결론
 }
+
+
+def _today() -> str:
+    """오늘 날짜. **호출할 때마다** 계산한다.
+
+    예전에는 모듈 상수였다. 서버가 뜬 시각에 한 번 정해지므로, Cloud Run
+    인스턴스가 자정을 넘겨 살아 있으면 그 뒤로 만드는 모든 리포트가 **기동일**
+    로 날짜를 박는다. 브리프 제목이 어제 날짜로 나가고, 같은 값이 Perplexity
+    검색 프롬프트의 "Today:" 로도 들어가 엉뚱한 날의 뉴스를 모은다.
+    """
+    return datetime.now().strftime("%Y년 %m월 %d일")
 
 
 # ── yfinance + FRED: 시장 지표 수집 ──────────────────────────────────────────
@@ -201,7 +211,7 @@ def gather_yfinance_market_data(market: str = "US") -> str:
         all_sector_tickers = [t for t, _ in SECTOR_TICKERS]
         all_tickers = all_price_tickers + all_sector_tickers
 
-        lines = [f"[Current market data — yfinance] as of {TODAY}"]
+        lines = [f"[Current market data — yfinance] as of {_today()}"]
         cur_price:  dict[str, float] = {}
         prev_price: dict[str, float] = {}
         data_source = ""
@@ -349,7 +359,7 @@ def gather_perplexity_context(ev: str, market: str = "US") -> str:
 [Focus: UNITED STATES]
 - Prioritise US market impact and US-listed companies"""
     )
-    prompt = f"""Today: {TODAY}
+    prompt = f"""Today: {_today()}
 Event to analyze: {ev}
 
 Collect the following **in English**, concise bullet points.
@@ -566,7 +576,7 @@ def _build_agents(
     return [
         {
             "id": 1, "label": "이벤트 분석", "max_tokens": 1200, "inject_perplexity": True,
-            "prompt": f"""{stance}\n\n당신은 거시경제 분석 전문가입니다. 오늘 날짜: {TODAY}
+            "prompt": f"""{stance}\n\n당신은 거시경제 분석 전문가입니다. 오늘 날짜: {_today()}
 
 분석할 이벤트: {ev}
 
@@ -593,7 +603,7 @@ def _build_agents(
         },
         {
             "id": 2, "label": "역사적 유사 사례", "max_tokens": 1150, "inject_perplexity": False,
-            "prompt": f"""{stance}\n\n당신은 금융 역사 전문가입니다. 오늘: {TODAY}
+            "prompt": f"""{stance}\n\n당신은 금융 역사 전문가입니다. 오늘: {_today()}
 이벤트: {ev}
 앞선 분석: {prev}
 
@@ -620,7 +630,7 @@ def _build_agents(
         },
         {
             "id": 3, "label": "시장 반응 전망", "max_tokens": 1500, "inject_perplexity": True,
-            "prompt": f"""{stance}\n\n당신은 거시경제 리서치 전문가입니다. 오늘: {TODAY}
+            "prompt": f"""{stance}\n\n당신은 거시경제 리서치 전문가입니다. 오늘: {_today()}
 이벤트: {ev}
 앞선 분석: {prev}
 
@@ -645,7 +655,7 @@ def _build_agents(
         },
         {
             "id": 4, "label": "섹터 영향 분석", "max_tokens": 1150, "inject_perplexity": False,
-            "prompt": f"""{stance}\n\n당신은 산업 분석가입니다. 오늘: {TODAY}
+            "prompt": f"""{stance}\n\n당신은 산업 분석가입니다. 오늘: {_today()}
 이벤트: {ev}
 앞선 분석: {prev}
 
@@ -672,7 +682,7 @@ def _build_agents(
         },
         {
             "id": 5, "label": "현재 vs 과거 비교", "max_tokens": 950, "inject_perplexity": False,
-            "prompt": f"""{stance}\n\n당신은 거시경제 전략가입니다. 오늘: {TODAY}
+            "prompt": f"""{stance}\n\n당신은 거시경제 전략가입니다. 오늘: {_today()}
 이벤트: {ev}
 앞선 분석: {prev}
 
@@ -697,7 +707,7 @@ AI와 반도체가 새로운 변수로 등장한 점이 어떻게 다른지
         },
         {
             "id": 6, "label": "투자 전략", "max_tokens": 2000, "inject_perplexity": False,
-            "prompt": f"""{stance}\n\n당신은 헤지펀드 최고투자책임자(CIO)입니다. 오늘: {TODAY}
+            "prompt": f"""{stance}\n\n당신은 헤지펀드 최고투자책임자(CIO)입니다. 오늘: {_today()}
 이벤트: {ev}
 앞선 분석: {prev}
 
@@ -725,7 +735,7 @@ AI와 반도체가 새로운 변수로 등장한 점이 어떻게 다른지
         },
         {
             "id": 7, "label": "리스크 관리", "max_tokens": 1150, "inject_perplexity": False,
-            "prompt": f"""{stance}\n\n당신은 최고리스크관리책임자(CRO)입니다. 오늘: {TODAY}
+            "prompt": f"""{stance}\n\n당신은 최고리스크관리책임자(CRO)입니다. 오늘: {_today()}
 이벤트: {ev}
 앞선 전략 분석: {prev}
 
@@ -750,7 +760,7 @@ AI와 반도체가 새로운 변수로 등장한 점이 어떻게 다른지
         },
         {
             "id": 8, "label": "포트폴리오 액션", "max_tokens": 1500, "inject_perplexity": False,
-            "prompt": f"""{stance}\n\n당신은 개인 투자 자문가입니다. 오늘: {TODAY}
+            "prompt": f"""{stance}\n\n당신은 개인 투자 자문가입니다. 오늘: {_today()}
 매크로 이벤트: {ev}
 전체 분석 내용: {prev}
 
@@ -776,7 +786,7 @@ reason: 한국어 1문장.
         },
         {
             "id": 9, "label": "최종 판정", "max_tokens": 2100, "inject_perplexity": False,
-            "prompt": f"""{stance}\n\n당신은 거시경제 종합 분석 전문가입니다. 오늘: {TODAY}
+            "prompt": f"""{stance}\n\n당신은 거시경제 종합 분석 전문가입니다. 오늘: {_today()}
 분석 이벤트: {ev}
 전체 분석 요약: {prev}
 
@@ -807,6 +817,29 @@ reason: 한국어 1문장.
     ]
 
 
+def _company_names(tickers) -> dict[str, str]:
+    """티커 → 회사명. 실패하면 빈 사전(이름 없이 진행).
+
+    한국 종목은 코드만 보면 어느 회사인지 알 수 없고, **모델은 모르면 지어낸다.**
+    실측으로 005380.KS(현대자동차)가 브리프에 "LG전자" 로 실렸다 — 코드와 섹터만
+    주면 그럴듯한 이름을 채워 넣는다. 리포트를 읽는 사람은 그게 조회된 이름인지
+    추측인지 구별할 수 없다.
+
+    `report_writer` 와 `daily_report` 는 이미 이름을 붙여 넘긴다. 여기만 빠져 있었다.
+    """
+    try:
+        from backend.services.markets import name_map_for
+        return name_map_for([t for t in tickers if t != "CASH"])
+    except Exception:
+        logger.warning("종목명 조회 실패 — 티커만으로 진행", exc_info=True)
+        return {}
+
+
+def _label(ticker: str, names: dict[str, str]) -> str:
+    name = names.get(ticker)
+    return f"{ticker} ({name})" if name else ticker
+
+
 def _format_portfolio(holdings: dict, market: str) -> str:
     """보유 종목을 프롬프트용 텍스트로 적는다.
 
@@ -825,13 +858,14 @@ def _format_portfolio(holdings: dict, market: str) -> str:
 
     if not holdings:
         return "포트폴리오 없음"
+    names = _company_names(holdings.keys())
     lines = []
     for t, info in holdings.items():
         if t == "CASH":
             lines.append(f"CASH: {_fmt_price(info.get('q'), cur)}")
         else:
             lines.append(
-                f"{t}: {info['q']} sh @ avg {_fmt_price(info.get('avg'), cur)} "
+                f"{_label(t, names)}: {info['q']} sh @ avg {_fmt_price(info.get('avg'), cur)} "
                 f"(sector: {info.get('sector', '-')})"
             )
     return "\n".join(lines)
@@ -1148,7 +1182,7 @@ def generate_daily_brief(
     거시지표는 `build_macro_block` 이 시장에 맞는 것을 준다. 호출자가
     FRED 를 직접 넘기던 때에는 한국 브리프도 연준 금리를 근거로 받았다.
     """
-    from backend.services.markets import get_market
+    from backend.services.markets import get_market, normalize as normalize_market
     from backend.services.report_writer import _fmt_price
 
     if not ANTHROPIC_API_KEY:
@@ -1156,6 +1190,7 @@ def generate_daily_brief(
 
     cur = get_market(market).currency
     holdings_summary = _format_portfolio(holdings, market)
+    names = _company_names(set(holdings) | set(price_data))
 
     # 금액은 전부 계산해서 넘긴다. 비율만 주면 모델이 수량을 곱해 금액을
     # 지어내는데 그 산술이 틀린다 — 실측으로 1일 손익 +₩10,239 를
@@ -1171,12 +1206,27 @@ def generate_daily_brief(
         pnl_str = f"{pnl:+.2f}%" if pnl is not None else "불명"
         day_str = _fmt_price(day_pnl, cur) if day_pnl is not None else "불명"
         price_lines.append(
-            f"  {t}: {_fmt_price(d.get('price'), cur)} ({chg_str})"
+            f"  {_label(t, names)}: {_fmt_price(d.get('price'), cur)} ({chg_str})"
             f" | 평가액 {_fmt_price(d.get('pos_val'), cur)}"
             f" | 1일 손익 {day_str}"
             f" | 누적 P&L {pnl_str}"
         )
     price_block = "\n".join(price_lines) if price_lines else "  (데이터 없음)"
+
+    # 이 수치가 어느 세션의 것인지 적는다. 리포트는 오늘 만들지만 종가가
+    # 확정된 마지막 거래일은 어제일 수 있다 — 안 적으면 모델이 전 거래일
+    # 등락을 "오늘" 로 서술한다. 한국은 특히 갈린다(KRX·NYSE 캘린더가 다르다).
+    sessions = {d["as_of"] for d in price_data.values() if d.get("as_of")}
+    # 제목 날짜도 같은 세션을 쓴다. 본문은 09-10 장을 서술하는데 제목만
+    # 오늘(09-11)이면 독자는 오늘 장이 끝난 줄로 읽는다.
+    brief_date = sessions.copy().pop() if len(sessions) == 1 else _today()
+    if len(sessions) == 1:
+        session_line = f"\n위 수치는 {brief_date} 종가 기준입니다. 그 날짜로 서술하세요."
+    elif sessions:
+        session_line = (f"\n종목마다 기준일이 다릅니다 ({', '.join(sorted(sessions))})."
+                        " 한 날짜로 뭉뚱그리지 마세요.")
+    else:
+        session_line = ""
 
     # 합계의 기준은 `price_data` 가 아니라 **보유 종목**이다. 가격을 못 받은
     # 종목은 조립부에서 통째로 빠지므로, price_data 만 보고 더하면 그 종목이
@@ -1216,7 +1266,26 @@ def generate_daily_brief(
     else:
         total_line += f"  ·  오늘 손익 합계 {_fmt_price(_sum('day_pnl'), cur)}"
 
-    top_news = "\n".join(f"  - [{n['ticker']}] {n['title']}" for n in news_items[:8])
+    # `get_portfolio_news` 는 `headline` 키를 준다. 여기서는 `n['title']` 을
+    # 읽고 있었고, 그건 **뉴스가 하나라도 있으면 KeyError → 500** 이다.
+    # 테스트가 news_items=[] 로만 돌려서 드러나지 않았다. 생산자가 주는
+    # 이름을 확인하지 않고 짐작한 결과다.
+    #
+    # `title` 도 받아 준다 — 이 리포에서 뉴스 항목 모양이 이미 한 번 바뀌었다.
+    # 다만 조용히 넘기지는 않는다. 제목이 없어 버린 항목은 로그에 남긴다.
+    news_lines, dropped = [], 0
+    for n in news_items[:8]:
+        headline = n.get("headline") or n.get("title")
+        if not headline:
+            dropped += 1
+            continue
+        when = n.get("datetime") or ""
+        news_lines.append(f"  - [{n.get('ticker', '?')}] {headline}"
+                          + (f" ({when})" if when else ""))
+    if dropped:
+        logger.warning("뉴스 %d건에 제목이 없어 제외했다 (키 목록이 바뀌었을 수 있다)",
+                       dropped)
+    top_news = "\n".join(news_lines)
 
     # `build_macro_block` 은 이제 빈 문자열을 돌려주지 않으므로 이 `or` 는
     # 도달하지 않는다. **죽은 코드지만 일부러 남긴다** — 그 보장이 깨지는
@@ -1226,7 +1295,19 @@ def generate_daily_brief(
     # 가 이 동작을 고정한다.
     macro_block = build_macro_block(market) or "  (거시지표 수집 실패 — 인용하지 마세요)"
 
-    prompt = f"""당신은 월가 톱 헤지펀드의 포트폴리오 매니저입니다.
+    # 관점도 시장을 따른다. 한국 포트폴리오에 '월가 헤지펀드 매니저' 를 씌우면
+    # 모델은 나스닥·연준을 축으로 해석하고 코스피 수급이나 외국인 매매는 안
+    # 본다 — 거시지표를 FRED 로 주던 것과 같은 형태다. 문구는
+    # `daily_report.generate_daily_report` 의 것을 따른다(새로 짓지 않는다).
+    persona = (
+        "당신은 한국 증권사 리서치센터의 수석 포트폴리오 애널리스트입니다. "
+        "코스피·코스닥 수급, 원/달러 환율, 외국인·기관 매매, 국내 업황과 정책을 "
+        "축으로 해석합니다. 해외 이슈는 국내 시장에 전이되는 경로로만 다룹니다."
+        if normalize_market(market) == "KR" else
+        "당신은 월가 톱 헤지펀드의 포트폴리오 매니저입니다."
+    )
+
+    prompt = f"""{persona}
 아래 데이터를 바탕으로 오늘의 포트폴리오 브리프를 작성하세요.
 
 # 포트폴리오
@@ -1235,6 +1316,7 @@ def generate_daily_brief(
 # 오늘의 등락
 {price_block}
 {total_line}
+{session_line}
 
 금액은 위에 계산해 두었습니다. 직접 곱하거나 더해서 새 금액을 만들지 말고
 그대로 인용하세요. 없는 값은 '불명' 으로 적혀 있으니 추정하지 마세요.
@@ -1248,7 +1330,7 @@ def generate_daily_brief(
 ---
 
 # 출력 형식 (마크다운)
-**📊 데일리 브리프 — {TODAY}**
+**📊 데일리 브리프 — {brief_date}**
 
 ## 포트폴리오 총평
 (3~4문장: 오늘 전체 등락 원인 분석)

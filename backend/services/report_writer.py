@@ -26,7 +26,17 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 logger = logging.getLogger(__name__)
 
 ANTHROPIC_API_KEY  = os.getenv("ANTHROPIC_API_KEY", "")
-TODAY = datetime.now().strftime("%Y년 %m월 %d일")
+
+def _today() -> str:
+    """오늘 날짜. **호출할 때마다** 계산한다.
+
+    예전에는 모듈 상수였다. 서버가 뜬 시각에 한 번 정해지므로, Cloud Run
+    인스턴스가 자정을 넘겨 살아 있으면 그 뒤로 만드는 모든 리포트가 **기동일**
+    로 날짜를 박는다. 브리프 제목이 어제 날짜로 나가고, 같은 값이 Perplexity
+    검색 프롬프트의 "Today:" 로도 들어가 엉뚱한 날의 뉴스를 모은다.
+    """
+    return datetime.now().strftime("%Y년 %m월 %d일")
+
 
 # ── 시스템 프롬프트 ──────────────────────────────────────────────────────────────
 
@@ -429,7 +439,7 @@ def gather_equity_yfinance(ticker: str, market: str = "US") -> tuple[str, str, d
             pass
 
         # 텍스트 포매팅
-        lines = [f"【{company_name} ({ticker}) yfinance 실제 데이터】  기준: {TODAY}"]
+        lines = [f"【{company_name} ({ticker}) yfinance 실제 데이터】  기준: {_today()}"]
 
         price = raw_dict["currentPrice"]
         if price:
@@ -525,7 +535,7 @@ def gather_industry_yfinance(meta: dict, market: str = "US") -> tuple[str, dict]
     """산업 ETF + 커버리지 종목 yfinance 데이터 수집.
     Returns (formatted_text, raw_dict).
     """
-    lines = [f"【{meta['name_kr']} 산업 yfinance 실제 데이터】  기준: {TODAY}"]
+    lines = [f"【{meta['name_kr']} 산업 yfinance 실제 데이터】  기준: {_today()}"]
     raw: dict = {}
 
     # 벤치마크 ETF 1년 수익률
@@ -641,7 +651,7 @@ def gather_equity_perplexity(ticker: str, company_name: str, market: str = "US")
     # 같은 내용이라도 한국어는 글자당 약 1토큰, 영어는 약 0.23토큰이라
     # 실측상 Claude 입력이 66% 줄어든다 (2,308 → 791 토큰).
     # 최종 리포트는 Claude 가 한국어로 쓰므로 사용자 화면은 영향받지 않는다.
-    prompt = f"""Today: {TODAY}
+    prompt = f"""Today: {_today()}
 Stock: {company_name} ({ticker})
 
 Collect the following **in English**, concise bullet points. Favor news and narrative over raw figures.
@@ -669,7 +679,7 @@ def gather_industry_perplexity(meta: dict, market: str = "US") -> str:
     from backend.services import perplexity
 
     # 영어로 수집 — Claude 입력 토큰을 크게 줄인다 (한국어 대비 약 1/3)
-    prompt = f"""Today: {TODAY}
+    prompt = f"""Today: {_today()}
 Industry: {meta['name_en']}
 Key names: {meta['coverage']}
 
