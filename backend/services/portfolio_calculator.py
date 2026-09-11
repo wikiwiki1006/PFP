@@ -334,12 +334,34 @@ def _trades_by_chart_date(trade_markers, chart_dates: list[str]) -> dict:
 
 # ── 포트폴리오 베타 ────────────────────────────────────────────────────────────
 
+class PortfolioBeta(NamedTuple):
+    """포트폴리오 베타와 **그 값이 무엇을 덮는지**.
+
+    가중평균은 부분 정보로도 그럴듯한 숫자를 낸다. 근거 없이 값만 내보내면
+    "10종목 중 1종목만 측정된 베타" 와 "전 종목이 측정된 베타" 가 응답에서
+    구별되지 않는다 — `change_counted` 와 같은 이유로 사실을 함께 싣는다.
+    """
+    beta:        float | None
+    counted:     int            # 실제로 베타를 계산한 종목 수
+    holdings_n:  int            # 베타 대상 종목 수 (CASH 제외)
+    value_share: float | None   # 측정된 종목이 주식 평가액에서 차지하는 비중
+
+
 def calculate_portfolio_beta(
     holdings: dict,
     close_df: pd.DataFrame,
     benchmark: str,
 ) -> "float | None":
-    """포트폴리오 베타. 계산할 수 없으면 None.
+    """포트폴리오 베타 (값만). 근거까지 필요하면 `portfolio_beta_detail` 을 쓴다."""
+    return portfolio_beta_detail(holdings, close_df, benchmark).beta
+
+
+def portfolio_beta_detail(
+    holdings: dict,
+    close_df: pd.DataFrame,
+    benchmark: str,
+) -> PortfolioBeta:
+    """포트폴리오 베타. 계산할 수 없으면 beta=None.
 
     예전에는 어떤 이유로든 못 구하면 1.0 을 돌려줬다. 1.0 은 '시장과 똑같이
     움직인다'는 뜻이라 '모른다'와 전혀 다른 값인데, 5일치 프레임으로 부른
@@ -352,60 +374,81 @@ def calculate_portfolio_beta(
     "한국 주식이 S&P 를 안 따라간다" 는 뜻인데 화면 라벨은 "베타" 뿐이라
     사용자는 "내 포트폴리오는 방어적이다" 로 읽는다 — 계산은 맞고 질문이
     틀렸으며, 그게 맞는 답처럼 제시됐다. 빠뜨리면 TypeError 가 나게 둔다.
+
+    **못 구한 종목은 가중평균에서 빼고 남은 것으로 재정규화한다.** 예전에는
+    관측치가 30일 미만인 종목에 `beta_t = 1.0` 을 지어내 섞었다. 실측: 다섯
+    종목의 진짜 베타가 전부 2.0 인데 넷이 관측치 20일이면 포트폴리오 베타가
+    **1.194** 로 나왔다 (측정 가능한 종목만 쓰면 1.995). `measured == 0` 만
+    막았으므로 9/10 이 지어내진 값이어도 통과했다.
+
+    현금은 분모에 남는다 — 현금의 시장 노출이 0 인 것은 **지어낸 값이 아니라
+    사실**이다.
     """
+    empty = PortfolioBeta(None, 0, 0, None)
     try:
+        stock_tickers = [t for t in holdings if t != "CASH" and t in close_df.columns]
         if benchmark not in close_df.columns:
-            return None
+            return PortfolioBeta(None, 0, len(stock_tickers), None)
         mkt_ret = close_df[benchmark].pct_change().dropna()
         mkt_var = mkt_ret.var()
         if mkt_var <= 1e-12:
-            return None
+            return PortfolioBeta(None, 0, len(stock_tickers), None)
 
-        stock_tickers = [t for t in holdings if t != "CASH" and t in close_df.columns]
         if not stock_tickers:
-            return None
+            return empty
 
         # ffill 후 마지막 행을 쓴다 — 희소 프레임이 넘어오면 마지막 행이 NaN 일 수 있고,
         # NaN 은 `total_val <= 0` 비교를 통과해(비교 결과가 항상 False) 그대로 전파된다.
         latest = close_df.ffill().iloc[-1]
-        values, betas = [], []
-        measured = 0          # 실제로 베타를 계산해 낸 종목 수
+        values, betas = [], []       # 측정된 종목만
+        all_values = []              # 전 종목 (value_share 의 분모)
+        measured = 0                 # 실제로 베타를 계산해 낸 종목 수
         for t in stock_tickers:
             s_ret = close_df[t].pct_change().dropna()
             common = s_ret.index.intersection(mkt_ret.index)
+            px_t = float(latest.get(t, 0) or 0)
+            if not math.isfinite(px_t):
+                px_t = 0.0
+            all_values.append(px_t * _safe_or(holdings[t]["q"], 0.0))
+            beta_t = None
             if len(common) < 30:
-                beta_t = 1.0
+                beta_t = None
             else:
                 # 공분산과 분산을 같은 표본(common)에서 계산해야 베타가 성립한다.
                 # 분모만 전체 벤치마크 구간을 쓰면 표본이 어긋나 베타가 왜곡된다.
                 mv = float(mkt_ret.loc[common].var())
-                if mv <= 1e-12:
-                    beta_t = 1.0
-                else:
+                if mv > 1e-12:
                     cov = np.cov(s_ret.loc[common], mkt_ret.loc[common])[0, 1]
                     beta_t = cov / mv
-                    measured += 1
-            if not math.isfinite(beta_t):
-                beta_t = 1.0
-            px = float(latest.get(t, 0) or 0)
-            if not math.isfinite(px):
-                px = 0.0
-            values.append(px * holdings[t]["q"])
+                    if math.isfinite(beta_t):
+                        measured += 1
+                    else:
+                        beta_t = None
+            if beta_t is None:
+                continue                     # 못 구한 종목은 가중평균에서 뺀다
+            values.append(all_values[-1])
             betas.append(beta_t)
 
-        cash_val = holdings.get("CASH", {}).get("q", 0)
+        stock_total = sum(all_values)
+        value_share = (sum(values) / stock_total
+                       if stock_total > 0 and math.isfinite(stock_total) else None)
+        holdings_n = len(stock_tickers)
+
+        cash_val = _safe_or(holdings.get("CASH", {}).get("q", 0), 0.0)
+        # 분모는 **측정된 주식 + 현금**이다. 현금의 시장 노출 0 은 사실이고,
+        # 측정 못 한 주식은 0 이 아니라 **모르는** 값이라 분모에서도 뺀다.
         total_val = sum(values) + cash_val
-        if not math.isfinite(total_val) or total_val <= 0:
-            return 1.0
+        if measured == 0 or not math.isfinite(total_val) or total_val <= 0:
+            # 예전에는 `total_val <= 0` 에서 1.0 을 돌려줬다 — 값이 하나도
+            # 없는데 '시장과 똑같이 움직인다' 를 지어내는 자리였다.
+            return PortfolioBeta(None, measured, holdings_n, value_share)
 
         weighted = sum(v * b for v, b in zip(values, betas)) / total_val
-        # 한 종목도 실제로 계산하지 못했으면(구간이 짧아 전부 1.0 폴백)
-        # 그 결과는 데이터가 아니라 기본값의 평균일 뿐이다.
-        if measured == 0:
-            return None
-        return float(np.clip(weighted, -2.0, 3.0))
+        return PortfolioBeta(float(np.clip(weighted, -2.0, 3.0)),
+                             measured, holdings_n, value_share)
     except Exception:
-        return None
+        logger.warning("포트폴리오 베타 계산 실패 — 베타만 빠진다", exc_info=True)
+        return empty
 
 
 # ── 실현손익 (매도로 확정된 손익) ──────────────────────────────────────────────
@@ -877,7 +920,8 @@ def calculate_metrics(
     # '—' 가 맞다 — S&P 대비 0.2306 을 "베타" 라고 보여주는 것보다 정직하다.
     from backend.services.markets import benchmark_for, get_market
     bench = benchmark_for(market)
-    beta = calculate_portfolio_beta(holdings, close_df, bench)
+    beta_d = portfolio_beta_detail(holdings, close_df, bench)
+    beta = beta_d.beta
     # `.get()` 의 기본값 18.0(VIX 장기 평균)은 **열이 없을 때만** 쓰인다.
     # 열은 있는데 값이 전부 NaN 이면 NaN 이 그대로 나오고, ffill 도 전량 NaN 열은
     # 채우지 못한다 — yfinance 가 ^VIX 를 빈 열로 주는 일이 있다. 그러면 폴백을
@@ -972,6 +1016,14 @@ def calculate_metrics(
         "benchmark":         bench,
         "benchmark_label":   get_market(market).indices.get(bench, bench),
         "portfolio_beta":    _round_keep_none(beta, 4),
+        # 베타가 무엇을 덮는 값인지. 가중평균은 부분 정보로도 그럴듯한 숫자를
+        # 낸다 — 다섯 종목 중 하나만 측정돼도 값은 유한하고 범위도 그럴듯하다.
+        # `beta_value_share` 는 측정된 종목이 주식 평가액에서 차지하는 비중이다
+        # (종목 수보다 이 비중이 "이 숫자가 내 포트폴리오를 얼마나 설명하는가"
+        # 에 직접 답한다).
+        "beta_counted":      beta_d.counted,
+        "beta_holdings":     beta_d.holdings_n,
+        "beta_value_share":  _round_keep_none(beta_d.value_share, 4),
         "vix":               _round_keep_none(vix, 2),
         "perf_1w":           _round_keep_none(_perf(5), 4),
         "perf_1m":           _round_keep_none(_perf(21), 4),
