@@ -237,14 +237,20 @@ const fmtCurveDate = (v: string) => {
 }
 
 // ── Equity Curve ──────────────────────────────────────────────────────────────
-type BenchmarkMode = 'sp500' | 'nasdaq' | 'both'
+// 'sp500' 이 아니라 'benchmark' 다. 한국 포트폴리오의 비교 대상이 S&P 인 것은
+// 근거가 없고, 서버는 이미 시장별 지수로 곡선을 그린다(US ^GSPC / KR ^KS11).
+// 표시 이름은 /metrics 의 benchmark_label 에서 온다.
+type BenchmarkMode = 'benchmark' | 'nasdaq' | 'both'
 
 type CurvePoint = {
   date: string
   /** undefined = 그 날짜의 포트폴리오 수익률을 모른다 (시세 이력 시작 전 등).
-   *  0 으로 채우면 정체한 것처럼 그려지므로 선을 끊는다. sp 와 같은 취급이다. */
+   *  0 으로 채우면 정체한 것처럼 그려지므로 선을 끊는다. benchmark_pct 와 같은 취급. */
   port?: number
-  sp?: number
+  /** 벤치마크 대비 수익률. 어느 지수인지는 /metrics 의 benchmark_label 이 말한다 —
+   *  포인트마다 이름을 반복하지 않는다. 키에 'sp' 를 박지 않는 이유는
+   *  `alpha_vs_sp500` 과 같다: 계산이 ^KS11 로 바뀌어도 이름이 거짓말을 계속한다. */
+  benchmark_pct?: number
   nasdaq?: number
   total_equity?: number
   cash_flow?: number   // 양수=입금, 음수=출금
@@ -283,7 +289,16 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
   // 기본값은 ALL — 백엔드는 첫 거래일부터 전 구간을 내려주는데 여기서 1년으로
   // 잘라 버리면 "최초 입금일부터 보이지 않는" 문제가 그대로 남는다.
   const [range, setRange] = useState<'1M' | '3M' | '1Y' | 'ALL'>('ALL')
-  const [bm,    setBm]    = useState<BenchmarkMode>('sp500')
+  const [bm,    setBm]    = useState<BenchmarkMode>('benchmark')
+  // 벤치마크 표시 이름. 서버가 시장별로 정해 준다(US 'S&P 500' / KR '코스피').
+  // 여기서 시장을 보고 직접 고르지 않는다 — 곡선을 그리는 지수와 라벨이
+  // 갈라지면 화면이 다른 지수 이름으로 같은 선을 설명하게 된다.
+  // 아직 안 왔으면 이름을 지어내지 말고 중립어를 쓴다.
+  const benchLabelQ = useQuery({
+    queryKey: ['portfolio-metrics'], queryFn: getPortfolioMetrics,
+    staleTime: 55_000,
+  })
+  const benchLabel = benchLabelQ.data?.benchmark_label ?? '벤치마크'
   // 모바일에서는 드래그 확대(스와이프 줌)를 끈다 — 스크롤하려고 짚은 손가락이
   // 그대로 확대 영역 선택으로 잡혀 페이지 스크롤을 막았다.
   const isMobile = useIsMobile()
@@ -307,7 +322,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
   const nasdaqQ = useQuery({
     queryKey: ['nasdaq-prices', rangeToPeriod[range]],
     queryFn:  () => getIndexPrices('^IXIC', rangeToPeriod[range]),
-    enabled:  bm !== 'sp500',
+    enabled:  bm !== 'benchmark',
     staleTime: 300_000,
   })
 
@@ -346,7 +361,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
     //
     // 누적 수익률을 다시 기준 잡는 식은 (1+r_t)/(1+r_0) - 1 이다. 단순 뺄셈
     // (r_t - r_0)은 복리를 무시해 구간이 길수록 오차가 커진다.
-    const firstOf = (key: 'port' | 'sp'): number | null => {
+    const firstOf = (key: 'port' | 'benchmark_pct'): number | null => {
       for (const d of sliced) {
         const v = d[key]
         if (v != null && isFinite(v)) return v as number
@@ -354,7 +369,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
       return null
     }
     const basePort = firstOf('port')
-    const baseSp   = firstOf('sp')
+    const baseBench = firstOf('benchmark_pct')
 
     const rebase = (v: any, base: number | null): number | undefined => {
       if (v == null || !isFinite(v)) return undefined
@@ -377,7 +392,10 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
         // 바로 아래 sp 는 이미 undefined 로 두고 있었다. 값을 모르는 구간은
         // 선을 끊는 게 맞다.
         port:         rebase(d.port, basePort),
-        sp:           rebase(d.sp, baseSp),
+        // 백엔드가 키를 바꾸는 중이라 옛 이름도 받는다. pfp-76 이 바꾼 뒤
+        // `?? d.sp` 를 지운다 — 남겨 두면 그게 다음 사람에게 "둘 다 올 수
+        // 있다" 는 계약으로 읽힌다.
+        benchmark_pct: rebase(d.benchmark_pct ?? d.sp, baseBench),
         nasdaq:       nv,
         total_equity: d.total_equity ?? undefined,
         cash_flow:    d.cash_flow ?? undefined,
@@ -397,7 +415,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
   const computedYRange = useMemo((): [number, number] => {
     if (yDomain[0] !== 'auto') return yDomain as [number, number]
     const vals = displayData.flatMap(d =>
-      [d.port, d.sp, d.nasdaq].filter((v): v is number => v != null)
+      [d.port, d.benchmark_pct, d.nasdaq].filter((v): v is number => v != null)
     )
     if (!vals.length) return [-10, 10]
     const minV = Math.min(...vals), maxV = Math.max(...vals)
@@ -449,14 +467,14 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
 
   const portPct = lastChange(portAll, 'port')
 
-  const spRawAll = allRawData.filter((d: any) => d.sp != null)
-  const spPct = lastChange(spRawAll, 'sp')
+  const benchRawAll = allRawData.filter((d: any) => (d.benchmark_pct ?? d.sp) != null)
+  const benchPct = lastChange(benchRawAll, 'benchmark_pct')
 
   const nqFiltered = data.filter(d => d.nasdaq != null)
   const nqPct = lastChange(nqFiltered, 'nasdaq')
 
   const BM_BTNS: { key: BenchmarkMode; label: string; color: string }[] = [
-    { key: 'sp500',  label: 'S&P',  color: '#dc143c' },
+    { key: 'benchmark', label: benchLabel, color: '#dc143c' },
     { key: 'nasdaq', label: 'NQ',   color: '#a78bfa' },
     { key: 'both',   label: '전체', color: '#f59e0b' },
   ]
@@ -551,13 +569,13 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
               **계산 불가가 빨강(손실)** 으로 칠해진다. */}
           <span className="font-mono font-bold" style={{ color: chgColor(d.port) }}>{fp(d.port, 2)}</span>
         </div>
-        {d.sp != null && (bm === 'sp500' || bm === 'both') && (
+        {d.benchmark_pct != null && (bm === 'benchmark' || bm === 'both') && (
           <div className="flex items-center justify-between gap-3 mb-0.5">
             <span className="flex items-center gap-1.5">
               <span style={{ color: '#dc143c' }}>●</span>
-              <span style={{ color: '#dc143c' }} className="text-[10px]">S&P 500</span>
+              <span style={{ color: '#dc143c' }} className="text-[10px]">{benchLabel}</span>
             </span>
-            <span className="font-mono" style={{ color: '#dc143c' }}>{fp(d.sp, 2)}</span>
+            <span className="font-mono" style={{ color: '#dc143c' }}>{fp(d.benchmark_pct, 2)}</span>
           </div>
         )}
         {d.nasdaq != null && (bm === 'nasdaq' || bm === 'both') && (
@@ -667,7 +685,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
               {fp(portPct, 2)}
             </span>
           </div>
-          {(bm === 'sp500' || bm === 'both') && (
+          {(bm === 'benchmark' || bm === 'both') && (
             <div className="flex items-center gap-2">
               <svg width="20" height="5">
                 <line x1="0" y1="2.5" x2="5" y2="2.5" stroke="#dc143c" strokeWidth="1.5" />
@@ -675,7 +693,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
                 <line x1="14" y1="2.5" x2="20" y2="2.5" stroke="#dc143c" strokeWidth="1.5" />
               </svg>
               <span className="text-sm font-mono tabular-nums" style={{ color: '#dc143c' }}>
-                S&P {fp(spPct, 2)}
+                {benchLabel} {fp(benchPct, 2)}
               </span>
             </div>
           )}
@@ -802,8 +820,8 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
             domain={yDomain}
           />
           <Tooltip content={renderTooltip} />
-          {(bm === 'sp500' || bm === 'both') && (
-            <Area type="monotone" dataKey="sp" stroke="#dc143c" strokeWidth={1.5}
+          {(bm === 'benchmark' || bm === 'both') && (
+            <Area type="monotone" dataKey="benchmark_pct" stroke="#dc143c" strokeWidth={1.5}
               strokeDasharray="4 3" fill="url(#gSP)" dot={false}
               isAnimationActive={false} />
           )}
