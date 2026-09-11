@@ -138,6 +138,26 @@ def test_an_unowned_job_is_readable_by_a_signed_in_user(client, store):
     assert client.get(f"/api/optimizer/ai-optimize-job/{job_id}").status_code == 200
 
 
+def test_an_anonymous_caller_can_still_read_an_unowned_job(client, store):
+    """비로그인 호출자도 **소유자 없는** 잡은 읽어야 한다.
+
+    아래 결함을 고칠 때 **같이 지켜야 하는 조건**이다. `owner=None` 일 때
+    그냥 전부 막아 버리면 이 검사가 빨개진다 — 비로그인 최적화 사용자가
+    자기가 방금 띄운 잡의 진행 상황을 못 보게 되고, 화면은 영원히 "준비 중"
+    에 머문다.
+
+    그래서 고칠 자리는 "익명이면 막는다" 가 아니라 **"익명" 과 "소유자 검사
+    안 함" 을 서로 다른 값으로 만드는 것**이다.
+    """
+    job_id = _make_job(store, None)
+    client.as_user(None)
+
+    assert client.get(f"/api/optimizer/ai-optimize-job/{job_id}").status_code == 200, (
+        "an anonymous caller lost access to its own unowned job -- the fix "
+        "below must keep this working."
+    )
+
+
 # ── 익명 호출자에게는 그 규칙이 걸리지 않는다 ──────────────────────────────────
 #
 # `job_store.get` 의 검사는 `if owner is not None and user_id not in (None,
@@ -155,14 +175,34 @@ def test_an_unowned_job_is_readable_by_a_signed_in_user(client, store):
 # id 가 UUID4 라 추측은 어렵다. 다만 잡 id 는 URL·로그·브라우저 기록에
 # 남으므로 "모르면 안전" 은 소유자 검사의 대체물이 아니다.
 #
-# 고칠 자리가 `backend/routers/` 와 `backend/services/` 라 이 창 소유가
-# 아니다. 고쳐지면 XPASS 로 뒤집혀 이 표시를 떼라고 요구한다.
+# ## 무엇을 고쳐야 하는가
+#
+# "익명이면 막는다" 가 아니다. 그렇게 하면 바로 위 검사가 빨개진다 —
+# 비로그인 최적화 사용자가 자기 잡의 진행 상황을 못 보게 된다.
+#
+# 고칠 것은 **한 값이 두 뜻을 갖는 것**이다. `owner=None` 이 지금
+# "소유자 검사를 하지 마" 와 "익명 호출자" 를 동시에 뜻한다. 셋을 갈라야
+# 한다:
+#
+#     소유자 검사 안 함   (내부 호출·정리 작업)      → 전부 보인다
+#     익명 호출자        (`optional_user` 가 None)  → 소유자 **없는** 잡만
+#     로그인 호출자       uid                        → 자기 것 + 소유자 없는 것
+#
+# 가운데가 지금 없다. 셋째 줄의 규칙(`user_id not in (None, owner)`)은 이미
+# 맞으므로, 익명을 그 규칙에 태우면 된다 — 예를 들어 라우터가 `owner` 를
+# 안 넘기는 대신 "익명" 을 나타내는 별도 표식을 넘기고, `get` 이 그때
+# `user_id is None` 인 잡만 돌려주는 식이다.
+#
+# 고칠 자리가 `backend/routers/optimizer.py` 와
+# `backend/services/job_store.py` 라 이 창 소유가 아니다. 고쳐지면 XPASS 로
+# 뒤집혀 이 표시를 떼라고 요구한다.
 
 @pytest.mark.xfail(strict=True, reason=(
-    "owner=None 이 '익명' 이 아니라 '검사 생략' 으로 동작한다. 엔드포인트가 "
-    "optional_user 라, 로그인하지 않은 호출자는 소유자 검사를 통째로 "
-    "건너뛰고 남의 잡을 읽고 취소할 수 있다. 고칠 자리가 routers/ 와 "
-    "services/ 라 이 창 소유가 아니다."))
+    "owner=None 이 '익명' 과 '소유자 검사 생략' 을 동시에 뜻한다. "
+    "엔드포인트가 optional_user 라, 로그인하지 않은 호출자는 소유자 검사를 "
+    "통째로 건너뛰고 남의 잡을 읽고 취소할 수 있다. 고치는 방향은 '익명이면 "
+    "막는다' 가 아니라 그 두 뜻을 다른 값으로 가르는 것이다 — 위 설명 참고. "
+    "자리: routers/optimizer.py · services/job_store.py."))
 def test_an_anonymous_caller_cannot_read_someone_elses_job(client, store):
     """로그인하지 않은 호출자도 남의 잡은 못 읽어야 한다."""
     job_id = _make_job(store, OWNER)

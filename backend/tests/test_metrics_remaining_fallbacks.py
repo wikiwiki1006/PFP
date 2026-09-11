@@ -195,23 +195,34 @@ def _make_the_benchmark_unreadable(prices):
 # 그래서 그 함수를 전역으로 던지게 하면 지표가 통째로 죽는다 — 즉 "한 지표만
 # 실패" 가 아니다. 미국 캘린더는 규칙 계산이라 던질 일도 없다. 두 이유 모두
 # "일어날 수 없는 상태" 라서 뺐다.
+# 소유를 **이름으로 파생**시킨다. 근거 필드를 손으로 나열했더니 바로
+# 낡았다 — 베타에 `beta_counted`·`beta_holdings`·`beta_value_share` 가
+# 붙자 이 검사가 그 변경을 막는 장애물이 됐다(이 파일 docstring 이 경고하던
+# 그 상황이 목록 자체에서 났다). 목록을 고쳐 통과시키는 것이 반복되면
+# 그 편집은 생각 없이 이뤄지고, 그게 allowlist 가 조용히 넓어지는 방식이다.
+#
+# **파생이 안전한 이유는 아래 `money_totals` 래칫이 따로 있기 때문이다.**
+# 접두사가 아무리 넓어져도 평가액·원가·수익률은 그 표 밖에 못 박혀 있어
+# 넘어갈 수 없다. 래칫이 없으면 이 파생은 그냥 느슨한 검사가 된다.
 _FAILURES = [
     pytest.param(_break_the_daily_change_primitive,
-                 {"today_change_pct", "as_of", "change_counted",
-                  "change_holdings", "change_stale"},
+                 {"today_change_pct", "as_of"}, ("change_",),
                  id="일변동-primitive-실패"),
     pytest.param(_make_the_benchmark_unreadable,
                  {"alpha_vs_benchmark", "portfolio_beta",
-                  "benchmark", "benchmark_label",
-                  # 베타 근거 셋. 베타를 못 구하면 "몇 종목을 셌나" 도 0 이
-                  # 되는 것이 맞다 — 이 셋은 베타 계산의 산출물이다.
-                  "beta_counted", "beta_holdings", "beta_value_share"},
+                  "benchmark", "benchmark_label"}, ("beta_",),
                  id="벤치마크-판독-실패"),
 ]
 
 
-@pytest.mark.parametrize("break_it, may_change", _FAILURES)
-def test_one_failing_metric_does_not_invalidate_the_others(break_it, may_change):
+def _owned(baseline, exact: set, prefixes: tuple) -> set:
+    """그 실패가 소유한 필드 — 명시한 이름 + 접두사로 파생한 것."""
+    return set(exact) | {k for k in baseline if k.startswith(prefixes)}
+
+
+@pytest.mark.parametrize("break_it, owned_exact, owned_prefixes", _FAILURES)
+def test_one_failing_metric_does_not_invalidate_the_others(break_it, owned_exact,
+                                                           owned_prefixes):
     """한 계산이 실패해도 나머지 지표는 정상 실행과 **같은 값**이어야 한다.
 
     지금은 각 실패가 자기 자리에 갇혀 있는데, **나중에 누가 `except` 범위를
@@ -238,6 +249,7 @@ def test_one_failing_metric_does_not_invalidate_the_others(break_it, may_change)
     # 대조군을 검사 안에 둔다. 밖에 두면 표에 항목을 추가한 사람이 대조군을
     # 같이 늘리지 않고, 그 항목은 **아무 실패도 일어나지 않은 상태**를 정상과
     # 비교하며 조용히 통과한다.
+    may_change = _owned(baseline, owned_exact, owned_prefixes)
     moved = {k for k in may_change if damaged.get(k) != baseline.get(k)}
     assert moved, (
         f"nothing in {sorted(may_change)} changed -- the failure never "
@@ -263,7 +275,7 @@ def test_the_money_totals_survive_every_one_of_those_failures():
     healthy = _healthy_prices()
     baseline = _metrics(healthy, raw_df=_recent(healthy))
 
-    for break_it, _owned in [(p.values[0], p.values[1]) for p in _FAILURES]:
+    for break_it in [p.values[0] for p in _FAILURES]:
         damaged_prices, patch = break_it(healthy)
         with patch:
             damaged = _metrics(damaged_prices, raw_df=_recent(healthy))
