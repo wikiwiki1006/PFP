@@ -530,7 +530,7 @@ def get_earnings_dividends(tickers: list[str], ttl: int = 3600) -> list[dict]:
     def _fetch_one(t: str) -> dict:
         earn_date = "N/A"
         div_date  = "-"
-        div_yield = "0%"
+        div_yield = None
         try:
             tk = yf.Ticker(t)
             try:
@@ -545,12 +545,21 @@ def get_earnings_dividends(tickers: list[str], ttl: int = 3600) -> list[dict]:
                 divs = tk.dividends
                 if len(divs) > 0:
                     div_date = divs.index[-1].strftime("%b %d")
+                # yfinance 의 dividendYield 는 **이미 퍼센트**다 (AAPL 0.34 = 0.34%).
+                # 예전에는 `dy * 100 if dy < 0.10 else dy` 로 추측했는데, 그건
+                # 지금 우연히 맞을 뿐이다 — 실제로 0.05% 를 주는 종목이 오면
+                # 5% 로 부풀린다. 값의 크기로 단위를 추측하지 않는다.
+                #
+                # 주의: 같은 info dict 안에서도 필드마다 단위가 다르다.
+                # payoutRatio·profitMargins·returnOnEquity 는 여전히 분수다.
+                # 이 수정을 그쪽에 일괄 적용하면 100 분의 1이 된다.
                 dy = (tk.info or {}).get("dividendYield")
-                if dy and dy > 0:
-                    pct = dy * 100 if dy < 0.10 else dy
-                    div_yield = f"{pct:.2f}%"
+                if dy is None:
+                    # '무배당' 과 '모름' 은 다르다. 0% 로 적으면 배당주를
+                    # 무배당으로 오해해 후보에서 빼게 된다.
+                    div_yield = None
                 else:
-                    div_yield = "0%"
+                    div_yield = f"{float(dy):.2f}%"
             except Exception:
                 pass
         except Exception:
