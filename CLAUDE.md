@@ -423,6 +423,36 @@ Claude Code 세션 여러 개가 역할을 나눠 이 리포를 **동시에** �
 `postgres` 였고, 격리를 `dev.sh` 에만 걸어 둔 탓에 **게이트를 돌리는 순간 다섯
 창이 같은 DB 를 만지고 있었다.** 새 워크트리를 만들면 두 곳을 다 맞춰라.
 
+#### 스키마 변경은 창 수만큼 따로 적용된다
+
+DB 를 갈라 놓은 대가다. `schema.py` 를 고친 커밋을 받아도 **내 DB 는 아직 옛
+스키마다.** 기동 시 적용은 `dev.sh` 로 백엔드를 띄울 때만 일어나고, `pytest`
+직접 실행은 스키마를 건드리지 않는다.
+
+증상이 원인을 가리키지 않는다 — **"내 테스트가 이상하게 깨진다"** 로 나타난다.
+실제로 `reports` 인덱스를 바꾼 날 세 창이 같은 데 걸렸고, 전부 첫 반응이
+"내 코드가 틀렸나" 였다. 단서는 에러 메시지에 있지만 연결해야 알 수 있다:
+
+```
+no unique or exclusion constraint matching the ON CONFLICT specification
+```
+
+`ON CONFLICT` 가 가리키는 인덱스가 그 DB 에 없다는 뜻이고, 그러면 그 경로의
+**쓰기가 통째로 죽는다** (그날은 `save_report` 가 전부 실패했다).
+
+받은 뒤 한 번 돌린다:
+
+```bash
+PYTHONPATH=$PWD <venv>/python -c "
+from dotenv import load_dotenv; load_dotenv('backend/.env')
+import backend.db as db; db.init_pool(1,2)
+from backend.db.schema import init_schema; init_schema()"
+```
+
+**돌리기 전에 붙은 곳을 확인해라.** `conn.info.host` 가 로컬인지, DB 이름이
+자기 것인지 본다. `postgres` 템플릿에 적용하면 이후 만들어지는 모든 창이
+그걸 물려받고, Neon 은 실데이터다 (아래).
+
 실DB 를 쓰는 테스트는 붙은 DB 가 자기 것인지 직접 확인한다
 (`backend/tests/test_holdings_write_race.py` 의 `guard_target` 참고).
 `inet_server_addr()` 로 판단하면 안 된다 — 도커 포트매핑 때문에 컨테이너
