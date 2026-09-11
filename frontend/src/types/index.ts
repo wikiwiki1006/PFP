@@ -1,6 +1,20 @@
 // Portfolio Types
 export interface PortfolioMetrics {
   total_equity: number
+  /** `total_equity` 의 분해. 서버가 **검산용으로** 함께 싣는다:
+   *
+   *      total_equity     == stock_value + cash_value
+   *      total_return_pct == stock_value / total_cost - 1
+   *
+   *  `total_equity` 는 현금을 포함하는데 `total_cost` 는 증권 원가뿐이라,
+   *  이 둘만으로 수익률을 재현하면 틀린다 (실측: 528.29% 대 표시값 429.03%,
+   *  표시값이 맞다). 증권분을 따로 받아야 검산이 성립한다.
+   *
+   *  nullable 이 아니다 — 둘 다 `_safe_or(..., 0.0)` 을 거쳐 항상 유한한
+   *  수로 내려온다 (portfolio_calculator:589·786). `total_return_pct` 처럼
+   *  `_round_keep_none` 을 타지 않으므로 `| null` 을 붙이지 않는다. */
+  stock_value: number
+  cash_value: number
   total_cost: number
   /** TWRR 보정에 실패하면 null (보정 전 값은 추가 입금 시 왜곡돼 있어 쓰지 않는다) */
   total_return_pct: number | null

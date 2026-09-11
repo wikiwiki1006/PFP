@@ -11,7 +11,7 @@ import type { MacroAnalysisResult, MacroAgent } from '@/types'
 import { cn } from '@/lib/utils'
 import { useLoginPrompt } from '@/components/auth/LockedPreview'
 import { useDemoQuery } from '@/lib/useDemoQuery'
-import { DEMO_HOLDINGS_RAW } from '@/lib/demoData'
+import { demoHoldingsRaw } from '@/lib/demoData'
 import { marketSession } from '@/lib/marketStorage'
 
 // ── sessionStorage 키 ──────────────────────────────────────────────────────────
@@ -430,7 +430,7 @@ export default function MacroScenario() {
   const [showHist, setShowHist] = useState(false)
 
   const modesQ    = useQuery({ queryKey: ['macro-modes'], queryFn: getMacroModes })
-  const holdingsQ = useDemoQuery(['holdings'], getHoldings, DEMO_HOLDINGS_RAW, { staleTime: 60_000 })
+  const holdingsQ = useDemoQuery(['holdings'], getHoldings, demoHoldingsRaw(), { staleTime: 60_000 })
   const histQ     = useQuery({
     queryKey: ['macro-report-history'],
     queryFn:  getMacroReportHistory,

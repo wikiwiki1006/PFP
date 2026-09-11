@@ -24,14 +24,18 @@ import TickerDetailModal from '@/components/TickerDetailModal'
 import { FinancialTips } from '@/components/FinancialTips'
 import LockedPreview, { AuthOverlay } from '@/components/auth/LockedPreview'
 import SetupWizard from '@/components/portfolio/SetupWizard'
+import { dailyChangeHeader } from '@/components/portfolio/dailyChangeHeader'
 import { useTour } from '@/lib/TourContext'
 import ConfirmDialog from '@/components/auth/ConfirmDialog'
 import { useDemoQuery } from '@/lib/useDemoQuery'
 import { useAuth } from '@/lib/AuthContext'
 import { useIsMobile } from '@/lib/useIsMobile'
+// 시장에 따라 갈리는 넷은 **함수로** 받는다. 상수로 받으면 모듈 최상위에서
+// 한 번 고른 값이 박히고, 그건 시장 전환이 전체 새로고침을 유지하는 동안만
+// 맞다. 나머지 넷은 시장 중립이라 상수 그대로다 (곡선은 퍼센트).
 import {
-  DEMO_METRICS, DEMO_EQUITY_CURVE, DEMO_HOLDINGS_DETAIL, DEMO_HOLDINGS_RAW,
-  DEMO_SECTOR_WEIGHTS, DEMO_ANALYST_FEEDBACK, DEMO_NEWS, DEMO_EARNINGS,
+  demoMetrics, demoHoldingsDetail, demoHoldingsRaw, demoSectorWeights,
+  DEMO_EQUITY_CURVE, DEMO_ANALYST_FEEDBACK, DEMO_NEWS, DEMO_EARNINGS,
 } from '@/lib/demoData'
 import { formatPrice, formatCompact, formatMoney, marketSymbol,
          MARKETS, moneyInputProps, type Market } from '@/lib/market'
@@ -313,7 +317,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
   // 어느 쪽이 먼저 도느냐가 상태를 정한다. 둘 다 같은 훅으로 맞춰야 그 경쟁이
   // 없어진다.
   const benchLabelQ = useDemoQuery(['portfolio-metrics'], getPortfolioMetrics,
-                                   DEMO_METRICS, { staleTime: 55_000 })
+                                   demoMetrics(), { staleTime: 55_000 })
   const benchLabel = benchLabelQ.data?.benchmark_label ?? '벤치마크'
   // 모바일에서는 드래그 확대(스와이프 줌)를 끈다 — 스크롤하려고 짚은 손가락이
   // 그대로 확대 영역 선택으로 잡혀 페이지 스크롤을 막았다.
@@ -948,19 +952,7 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
 
   // 일변동률 컬럼 헤더: 실시간인지 / 어느 거래일 종가 기준인지 표시.
   // 각 행이 as_of·is_live 를 갖고 있으므로 여기서 파생한다 (metrics 를 prop 으로 받지 않음).
-  const chgHeader = (() => {
-    const rows: any[] = (holdQ.data || []).filter((h: any) => h.ticker !== 'CASH')
-    if (!rows.length) return '일변동률'
-    // `some` 이 아니라 `every` 다. 한 종목만 실시간이어도 헤더가 'LIVE' 라고
-    // 하면 **표 전체가 실시간이라는 주장**이 된다. fallback_df 로 채운 행은
-    // 마지막 확정 종가이고(is_live=false, chg_pct=null), 현재가 칸은 실시간
-    // 행과 똑같이 보인다 — 구별할 근거가 툴팁뿐이라 헤더가 유일하게 눈에
-    // 띄는 신호다. 섞여 있으면 섞였다고 말한다.
-    if (rows.every(r => r.is_live)) return '일변동률 · LIVE'
-    if (rows.some(r => r.is_live)) return '일변동률 · 일부 실시간'
-    const asOf = rows.find(r => r.as_of)?.as_of as string | undefined
-    return asOf ? `일변동률 (${asOf.slice(5).replace('-', '/')} 종가)` : '일변동률'
-  })()
+  const chgHeader = dailyChangeHeader(holdQ.data)
 
   // ── Holdings edit state ────────────────────────────────────────────────
   const [editTicker, setEditTicker] = useState<string | null>(null)
@@ -2492,13 +2484,13 @@ export default function AlphaTerminal() {
   // 핵심 지표: 60초 주기 (30초는 너무 자주 백엔드 호출)
   // 개인 데이터 쿼리 — 비로그인이면 서버를 부르지 않고(어차피 401) 예시 데이터를
   // 돌려준다. 화면은 정상적으로 그려지고 LockedPreview 가 그 위에 흐림을 씌운다.
-  const metricsQ  = useDemoQuery(['portfolio-metrics'], getPortfolioMetrics, DEMO_METRICS,       { refetchInterval: 60_000, staleTime: 55_000 })
+  const metricsQ  = useDemoQuery(['portfolio-metrics'], getPortfolioMetrics, demoMetrics(),        { refetchInterval: 60_000, staleTime: 55_000 })
   // 에쿼티 커브/섹터: 5분 캐시 (자주 변하지 않음)
   const curveQ    = useDemoQuery(['equity-curve'],      getEquityCurve,      DEMO_EQUITY_CURVE,  { staleTime: 300_000 })
   // 보유 종목 상세: 60초 (현재가 업데이트용)
-  const holdQ     = useDemoQuery(['holdings-detail'],   getHoldingsDetail,   DEMO_HOLDINGS_DETAIL, { refetchInterval: 60_000, staleTime: 55_000 })
-  const rawHoldQ  = useDemoQuery(['holdings-raw'],      getHoldings,         DEMO_HOLDINGS_RAW,  { staleTime: 300_000, placeholderData: (prev: any) => prev })
-  const sectorQ   = useDemoQuery(['sector-weights'],    getSectorWeights,    DEMO_SECTOR_WEIGHTS, { staleTime: 300_000 })
+  const holdQ     = useDemoQuery(['holdings-detail'],   getHoldingsDetail,   demoHoldingsDetail(), { refetchInterval: 60_000, staleTime: 55_000 })
+  const rawHoldQ  = useDemoQuery(['holdings-raw'],      getHoldings,         demoHoldingsRaw(),  { staleTime: 300_000, placeholderData: (prev: any) => prev })
+  const sectorQ   = useDemoQuery(['sector-weights'],    getSectorWeights,    demoSectorWeights(), { staleTime: 300_000 })
   const sectorTableQ = useQuery({ queryKey: ['sector-table'],    queryFn: getMarketSectors,   staleTime: 300_000, refetchInterval: 300_000 })
   // 시장 스냅샷: 60초 주기 (마커 바 업데이트)
   const snapQ     = useQuery({ queryKey: ['market-snapshot'],   queryFn: getMarketSnapshot,      refetchInterval: 60_000,  staleTime: 55_000 })
