@@ -429,7 +429,12 @@ def portfolio_beta_detail(
             return PortfolioBeta(None, 0, len(stock_tickers), None)
         mkt_ret = close_df[benchmark].pct_change().dropna()
         mkt_var = mkt_ret.var()
-        if mkt_var <= BETA_MIN_VARIANCE:
+        # 빈/1행 프레임에서는 `mkt_var` 가 NaN 이고 `NaN <= x` 는 False 라
+        # 가드를 통과했다. 그러면 아래 `iloc[-1]` 이 IndexError 를 내고
+        # `except` 가 **경고 트레이스백**을 남긴다 — 프레임이 짧은 것은 이제
+        # 정상 상태이므로 조용히 '없음' 으로 끝내야 한다.
+        if mkt_ret.empty or not math.isfinite(float(mkt_var)) \
+                or mkt_var <= BETA_MIN_VARIANCE:
             return PortfolioBeta(None, 0, len(stock_tickers), None)
 
         if not stock_tickers:
@@ -731,18 +736,46 @@ def calculate_metrics(
     곡선에서 나오므로 곡선이 합성이면 사용자의 성과가 아니라 **바스켓의 창
     수익률**이다. 그 판정을 붙일 때 이 인자를 쓴다.
     """
-    if close_df.empty or len(close_df) < 2:
-        return {}
-
+    # **`{}` 를 돌려주지 않는다.** 예전에는 프레임이 비었거나 행이 2개 미만이면
+    # 빈 dict 였고, 그래서 "지표가 없음" 과 "계산 실패" 가 호출자에게 같은
+    # 값으로 보였다 (§1.3 의 "실패한 경로의 반환값이 정상 경로와 구별되는가").
+    # 그 결과가 화면까지 갔다 — 행이 정확히 1개면 라우터 가드를 통과해 `{}` 가
+    # 200 으로 나가고, 프론트는 오류도 "보유 없음" 도 못 띄운 채 조용히 비었다.
+    #
+    # 행이 1개면 실제로는 **거의 다 계산된다.** 실측: 1행 프레임에서도 26개
+    # 키가 180행 대조군과 같은 금액을 냈다 (total_equity 6837.53 · stock_value
+    # 1837.53 · total_cost 1654.0 · total_return_pct 11.0961 · today_change_pct
+    # 0.6357). 평가액은 `raw_df`/`live` 에서 나오고 곡선 파생값만 못 낸다 —
+    # 그 셋(perf_1w·perf_1m·portfolio_beta)은 각자 None 으로 떨어진다.
+    # 그걸 통째로 버리고 있었다.
+    #
+    # 프레임이 아예 비면 `iloc[-1]` 이 IndexError 다. 그 경우도 조기 반환하지
+    # 않고 **아래 응답 조립 한 곳으로** 흐르게 한다 (조립을 두 벌 만들면
+    # 필드가 늘 때 한쪽만 늘어난다 — 오늘 고친 결함들과 같은 형태다).
     # 주말(토·일) 행 제거 — ffill로 복사된 주말 데이터가 당일 변동률 0%를 만드는 버그 방지
-    close_df     = close_df[close_df.index.dayofweek < 5]
-    equity_curve = equity_curve[equity_curve.index.dayofweek < 5]
-    if close_df.empty or len(close_df) < 2:
-        return {}
+    #
+    # **인덱스 종류를 먼저 본다.** 빈 프레임의 모양이 출처마다 갈린다:
+    #     get_close_df 실패      → 맨 `pd.DataFrame()`  → RangeIndex
+    #     build_equity_curve 빈값 → 이른 반환            → DatetimeIndex
+    # `RangeIndex.dayofweek` 는 AttributeError 라 `/metrics` 가 500 이 되고,
+    # 화면은 "보유 없음" 도 오류도 못 띄운다 — yfinance 가 한 번 흔들릴 때마다
+    # 그렇게 된다. 예전에는 위의 `{}` 조기 반환이 이 줄 **앞에서** 막아
+    # 주었는데, 그걸 없애면 가드가 사라진다.
+    #
+    # 같은 방어가 같은 파일에 이미 있다 — `_trim_to_session` 의
+    # `if not isinstance(close_df.index, pd.DatetimeIndex): return close_df`.
+    # 그 자리는 따라오지 않았다.
+    if isinstance(close_df.index, pd.DatetimeIndex):
+        close_df = close_df[close_df.index.dayofweek < 5]
+    if isinstance(equity_curve.index, pd.DatetimeIndex):
+        equity_curve = equity_curve[equity_curve.index.dayofweek < 5]
 
     # 비거래일(주말·공휴일)에 NaN이 생기지 않도록 ffill 적용
     price_df = close_df.ffill()
-    curr = price_df.iloc[-1]
+    # 빈 프레임에서는 '마지막 행' 이 없다. 빈 Series 를 쓰면 `curr.get(t, 0)`
+    # 이 0 을 주고 `_price` 가 0.0 으로 떨어진다 — 그 사실은 아래
+    # `priced_counted` 가 응답에 싣는다.
+    curr = price_df.iloc[-1] if len(price_df) else pd.Series(dtype=float)
     # `prev = price_df.iloc[-2]` 는 지웠다. 1일 변동이 `portfolio_daily_change`
     # primitive 로 옮겨간 뒤 아무도 읽지 않는데, 남겨 두면 다음 사람이 "전일
     # 종가는 여기 있다" 로 읽고 유령(ffill 복제) 행을 전일로 쓰게 된다.
@@ -784,12 +817,29 @@ def calculate_metrics(
             sorted(filled),
         )
 
-    value_tickers = ([t for t in holdings if t != "CASH" and t in priced]
-                     if priced else stock_tickers)
-
     def _value_price(t):
         row = priced.get(t)
         return row[0] if row is not None else _price(t)
+
+    # 평가액과 원가는 **같은 종목 집합**을 덮어야 한다. 가격을 못 구한 종목을
+    # 분모(원가)에만 넣으면 수익률이 그만큼 손실로 나온다 — 실측: 가격 출처가
+    # 하나도 없을 때 `stock_equity 0 / stock_cost 3,154` 로
+    # **`total_return_pct: -100.0`** 이 나갔다. "전액 손실" 이라는 단정이다.
+    # (예전에는 이 경우가 `{}` → 라우터 400 이라 화면까지 가지 않았다. `{}` 를
+    # 없애려면 이 자리를 먼저 고쳐야 한다.)
+    #
+    # 가격 0 은 이 계산에서 "데이터 없음" 이다 (`_priced_holdings` 의 `or 0.0`
+    # 관례). 그래서 0 인 종목은 양쪽에서 빼고, 몇 종목이 빠졌는지를 응답에 싣는다.
+    candidates = ([t for t in holdings if t != "CASH" and t in priced]
+                  if priced else stock_tickers)
+    value_tickers = [t for t in candidates if _value_price(t)]
+
+    # 평가액이 **몇 종목을 덮는가**. 가격을 한 종목도 못 구하면 `total_equity`
+    # 는 현금만 담은 값이 되는데, 그 숫자는 유한하고 그럴듯해서 어떤 가드에도
+    # 걸리지 않는다 — 400 을 걷어내는 대신 사실을 싣는다
+    # (`change_counted` 와 같은 규약).
+    held_n = len([t for t in holdings if t != "CASH"])
+    priced_n = len(value_tickers)
 
     stock_equity = _safe_or(sum(_value_price(t) * holdings[t]["q"]
                                 for t in value_tickers), 0.0)
@@ -988,6 +1038,11 @@ def calculate_metrics(
 
             b_sp = close_df[bench].reindex(equity_curve.index).ffill().bfill().loc[start:]
             b_valid = b_sp.dropna()
+            # 창에 점이 하나면 두 수익률이 정의상 0 이라 알파가 **0.0** 으로
+            # 나온다 — "시장과 정확히 같았다" 는 단정이다. 실측: 1행 프레임에서
+            # `alpha_vs_benchmark: 0.0` 이 나갔다. 창이 없으면 알파도 없다.
+            if len(eq_w) < 2 or len(b_valid) < 2:
+                raise ValueError("알파를 낼 창이 없다 (점이 2개 미만)")
             if base > 0 and not b_valid.empty and float(b_valid.iloc[0]) != 0:
                 p_last = float(eq_w.iloc[-1]) / base - 1
                 b_last = float(b_valid.iloc[-1]) / float(b_valid.iloc[0]) - 1
@@ -995,7 +1050,11 @@ def calculate_metrics(
                 if math.isfinite(a_val):
                     alpha = round(a_val, 4)
         except Exception:
-            pass
+            # 알파가 비는 정상 경로(기준 지수 열 없음·합성 곡선)는 위에서 이미
+            # 갈렸다. 여기까지 온 예외는 **계산이 깨진** 것이므로 남긴다 —
+            # 화면의 '—' 만 보고는 둘을 구별할 수 없다.
+            logger.debug("알파 계산 실패 — 알파만 빠진다 (market=%s)", market,
+                         exc_info=True)
 
     return {
         # 세 값이 서로 맞아떨어지게 싣는다. 예전에는 `total_equity` 가 현금을
@@ -1059,6 +1118,11 @@ def calculate_metrics(
         # `beta_value_share` 는 측정된 종목이 주식 평가액에서 차지하는 비중이다
         # (종목 수보다 이 비중이 "이 숫자가 내 포트폴리오를 얼마나 설명하는가"
         # 에 직접 답한다).
+        # 평가액이 덮는 종목 수. `priced_counted == 0` 이고 `priced_holdings > 0`
+        # 이면 `total_equity` 는 **현금만** 담은 값이다 — 화면이 그걸 총자산으로
+        # 그리면 자산이 사라진 것처럼 보인다. 예전에는 이 경우가 `{}` 였다.
+        "priced_counted":    priced_n,
+        "priced_holdings":   held_n,
         "beta_counted":      beta_d.counted,
         "beta_holdings":     beta_d.holdings_n,
         "beta_value_share":  _round_keep_none(beta_d.value_share, 4),
