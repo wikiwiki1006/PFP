@@ -221,21 +221,32 @@ def gather_yfinance_market_data(market: str = "US") -> str:
             from backend.db.market_cache import get_prices_from_db
             from backend.services.market_data import ALWAYS_FETCH
             if is_available():
-                df_cache = get_prices_from_db(ALWAYS_FETCH, "5d")
+                # `fill=False`. ffill 된 프레임의 마지막 두 행을 빼면, 종가가
+                # 확정되지 않은 날은 전일 값이 복제돼 있어 **모든 지수가 정확히
+                # +0.00% d/d** 가 된다. 실측으로 장중에 KOSPI·KOSDAQ·S&P·VIX·
+                # 원달러가 전부 보합으로 프롬프트에 실렸다 — /daily-brief 에서
+                # 고친 것과 같은 결함이다 (§1.3a·§1.6).
+                # 필요한 티커를 전부 묻는다. 예전에는 `ALWAYS_FETCH` 만 물었는데
+                # 거기에는 US 섹터 ETF 일부와 **한국 섹터 ETF 가 하나도 없다.**
+                # 그래서 한국 시나리오는 섹터 데이터를 한 번도 받지 못했고,
+                # 아래 ②(yfinance 직접)는 핵심 지수가 있으면 안 돌아 보완도
+                # 안 됐다. DB 에 없는 티커는 그냥 빠지므로 더 물어서 손해는 없다.
+                df_cache = get_prices_from_db(all_tickers, "5d", fill=False)
                 if df_cache is not None and not df_cache.empty:
                     # 주말 행 제거: 장이 열리지 않는 날은 ffill 값과 동일해 0% 변동률 오류 발생
                     df_cache = df_cache[df_cache.index.dayofweek < 5]
-                if df_cache is not None and not df_cache.empty and len(df_cache) >= 2:
-                    cur_row  = df_cache.iloc[-1]
-                    prev_row = df_cache.iloc[-2]
+                if df_cache is not None and not df_cache.empty:
+                    # 티커마다 **실제 관측치** 마지막 둘을 고른다. 프레임의 행
+                    # 위치로 고르면 24/7 자산 하나가 인덱스를 오늘까지 끌어와
+                    # 주식 티커의 '마지막 행' 이 빈 칸이 된다.
                     for t in all_tickers:
-                        if t in cur_row.index:
-                            c = cur_row.get(t)
-                            p = prev_row.get(t)
-                            if c is not None and not pd.isna(c):
-                                cur_price[t] = float(c)
-                            if p is not None and not pd.isna(p):
-                                prev_price[t] = float(p)
+                        if t not in df_cache.columns:
+                            continue
+                        s = df_cache[t].dropna()
+                        if len(s) >= 1:
+                            cur_price[t] = float(s.iloc[-1])
+                        if len(s) >= 2:
+                            prev_price[t] = float(s.iloc[-2])
                     if cur_price:
                         data_source = "DB 캐시"
         except Exception:
@@ -259,17 +270,18 @@ def gather_yfinance_market_data(market: str = "US") -> str:
                     closes = raw["Close"]
                     # 주말(토·일) 행 제거 — yfinance가 NaN 행을 반환하거나 ffill 시 0% 변동률 오류 방지
                     closes = closes[closes.index.dayofweek < 5]
-                    if len(closes) >= 2:
-                        cur_row  = closes.iloc[-1]
-                        prev_row = closes.iloc[-2]
+                    if not closes.empty:
+                        # ①과 같은 이유로 티커별 실제 관측치에서 고른다. 행
+                        # 위치로 고르면 한 자산이 오늘 행을 만들었을 때 나머지
+                        # 티커의 '오늘' 이 빈 칸이라 전일 값과 짝이 어긋난다.
                         for t in all_tickers:
-                            if t in closes.columns:
-                                c = cur_row.get(t)
-                                p = prev_row.get(t)
-                                if c is not None and not pd.isna(c):
-                                    cur_price[t] = float(c)
-                                if p is not None and not pd.isna(p):
-                                    prev_price[t] = float(p)
+                            if t not in closes.columns:
+                                continue
+                            s = closes[t].dropna()
+                            if len(s) >= 1:
+                                cur_price[t] = float(s.iloc[-1])
+                            if len(s) >= 2:
+                                prev_price[t] = float(s.iloc[-2])
                         if cur_price:
                             data_source = "yfinance 직접"
             except Exception:
