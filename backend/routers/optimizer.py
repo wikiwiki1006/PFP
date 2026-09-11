@@ -167,7 +167,7 @@ def run_factor_analysis(req: FactorAnalysisRequest, _auth: Optional[dict] = Depe
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# AI Portfolio Optimizer (Black-Litterman + GPT Views)
+# AI Portfolio Optimizer (Black-Litterman + Perplexity Views)
 # ══════════════════════════════════════════════════════════════════════════════
 
 class AIOptimizeRequest(BaseModel):

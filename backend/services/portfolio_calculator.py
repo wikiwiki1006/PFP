@@ -503,6 +503,11 @@ def calculate_metrics(
     raw_df   — fill=False 희소 프레임 (1일 변동 전용). 없으면 기존 곡선 차분으로 폴백.
     live     — 장중 실시간 가격 {ticker: price}
 
+    total_return_pct 는 **취득원가 대비 현재 평가액**이다. 매도로 실현한
+    손익은 들어오지 않는다 — 현금에 남고 현금은 이 계산에서 빠진다. "총
+    수익률이 왜 이래" 로 돌아올 자리라 여기 적어 둔다. 실현손익까지 담으려면
+    별도 필드가 필요하다.
+
     trade_log — 매매 이력. **세 상태를 구별한다:**
 
         None    호출자가 알려주지 않았다. 곡선 기반 값을 그대로 쓴다.
@@ -562,6 +567,23 @@ def calculate_metrics(
     eq_last = float(equity_curve.iloc[-1]) if not equity_curve.empty else 0.0
     if total_equity == 0 and eq_last > 0:
         total_equity = eq_last
+
+    # 곡선이 **합성**인지. 매매 이력에 주식 거래가 하나도 없으면
+    # `build_equity_curve` 의 `static_qty` 가 현재 수량을 프레임 첫날부터
+    # 적용하므로, 곡선은 사용자가 겪지 않은 과거를 그린다. 그 위에서 기간
+    # 수익률·알파를 계산하면 **바스켓의 창 수익률**이 사용자의 성과로 나간다.
+    #
+    # CASH 입금만 있는 이력도 여기 걸린다 — SetupWizard 로 보유만 입력한
+    # 사용자가 그 형태다.
+    #
+    # `trade_log is None` 은 "호출자가 알려주지 않았다" 이므로 판정하지 않는다.
+    # 없는 결손을 만드는 것이 빠뜨리는 것보다 나쁘다.
+    curve_is_synthetic = False
+    if trade_log is not None:
+        curve_is_synthetic = not any(
+            str(tr.get("ticker", "")).upper() not in ("CASH", "")
+            for tr in trade_log
+        )
 
     # 총 수익률: **취득원가 대비 현재 평가액.** 주식만 보고 현금은 양쪽에서 뺀다.
     #
@@ -640,6 +662,10 @@ def calculate_metrics(
         포트폴리오가 조회 기간보다 짧으면 base 가 0(첫 거래 이전 구간)이라
         예전에는 '이번 주 보합'이라는 잘못된 확신을 표시했다.
         """
+        if curve_is_synthetic:
+            # 곡선이 합성이면 N 거래일 전 자산은 '그때 이 바스켓의 값' 이고
+            # 사용자가 그때 그것을 보유했다는 근거가 없다.
+            return None
         if len(_sessions) < days + 1:
             return None
         # 여기서 `0.0` 은 표시값이 아니라 **센티넬**이다 — 바로 아래 `<= 0` 검사가
@@ -676,7 +702,7 @@ def calculate_metrics(
     # 초기값을 `0.0` 에서 `None` 으로 바꾼다. 기준 지수 열이 없으면 알파는
     # 계산 불가인데 `0.0` 은 "시장과 정확히 같았다" 는 단정이다 (§1.3).
     alpha = None
-    if bench in close_df.columns:
+    if bench in close_df.columns and not curve_is_synthetic:
         try:
             # 에쿼티 곡선은 첫 거래 이전 구간이 0 이므로 iloc[0] 으로 나누면 inf 가 되고,
             # NaN 검사(a_val == a_val)는 inf 를 잡지 못해 alpha 가 항상 null 로 나갔다.
