@@ -852,17 +852,17 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
           />
           <Tooltip content={renderTooltip} />
           {(bm === 'benchmark' || bm === 'both') && (
-            <Area type="monotone" dataKey="benchmark_pct" stroke="#dc143c" strokeWidth={1.5}
+            <Area key="benchmark_pct" type="monotone" dataKey="benchmark_pct" stroke="#dc143c" strokeWidth={1.5}
               strokeDasharray="4 3" fill="url(#gSP)" dot={false}
               isAnimationActive={false} />
           )}
           {(bm === 'nasdaq' || bm === 'both') && (
-            <Area type="monotone" dataKey="nasdaq" stroke="#a78bfa" strokeWidth={1.5}
+            <Area key="nasdaq" type="monotone" dataKey="nasdaq" stroke="#a78bfa" strokeWidth={1.5}
               strokeDasharray="4 3" fill="url(#gNQ)" dot={false}
               isAnimationActive={false} />
           )}
           {/* 포트폴리오 라인 — 매매일에 컬러 포인트 표시 */}
-          <Area type="monotone" dataKey="port" stroke="#00e6ff" strokeWidth={2.5}
+          <Area key="port" type="monotone" dataKey="port" stroke="#00e6ff" strokeWidth={2.5}
             fill="url(#gPort)"
             dot={tradeDot}
             activeDot={{ r: 5, fill: '#00e6ff', stroke: '#fff', strokeWidth: 2 }}
@@ -945,7 +945,14 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
   // 각 행이 as_of·is_live 를 갖고 있으므로 여기서 파생한다 (metrics 를 prop 으로 받지 않음).
   const chgHeader = (() => {
     const rows: any[] = (holdQ.data || []).filter((h: any) => h.ticker !== 'CASH')
-    if (rows.some(r => r.is_live)) return '일변동률 · LIVE'
+    if (!rows.length) return '일변동률'
+    // `some` 이 아니라 `every` 다. 한 종목만 실시간이어도 헤더가 'LIVE' 라고
+    // 하면 **표 전체가 실시간이라는 주장**이 된다. fallback_df 로 채운 행은
+    // 마지막 확정 종가이고(is_live=false, chg_pct=null), 현재가 칸은 실시간
+    // 행과 똑같이 보인다 — 구별할 근거가 툴팁뿐이라 헤더가 유일하게 눈에
+    // 띄는 신호다. 섞여 있으면 섞였다고 말한다.
+    if (rows.every(r => r.is_live)) return '일변동률 · LIVE'
+    if (rows.some(r => r.is_live)) return '일변동률 · 일부 실시간'
     const asOf = rows.find(r => r.as_of)?.as_of as string | undefined
     return asOf ? `일변동률 (${asOf.slice(5).replace('-', '/')} 종가)` : '일변동률'
   })()
