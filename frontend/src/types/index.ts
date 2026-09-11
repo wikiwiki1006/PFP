@@ -674,8 +674,17 @@ export interface TickerDetailQuant {
   /** 4팩터 합성 점수 (0~100). 계산 불가 시 null. */
   score: number | null
   score_label: string
-  /** 팩터별 원점수 — 합성 점수의 근거 */
-  factors?: { momentum?: number; trend?: number; quality?: number; value?: number }
+  /** 팩터별 원점수 — 합성 점수의 근거. **null 은 "재지 못했다"** 이고
+   *  0 과 다르다. ETF 는 펀더멘털이 없어 quality·value 가 통째로 null 이다. */
+  factors?: {
+    momentum?: number | null; trend?: number | null
+    quality?: number | null;  value?: number | null
+  }
+  /** 점수를 **실제로** 만든 가중치. 못 구한 팩터를 빼고 재정규화한 결과라,
+   *  키 개수가 곧 "몇 개로 잰 점수인가" 다. 실측: AAPL 4개 · SPY 2개. */
+  weights_used?: Record<string, number>
+  /** 모멘텀이 실제로 본 창 (예: ['21d','63d','126d']). 이력이 짧으면 줄어든다. */
+  momentum_windows?: string[]
   /** 한국어 국면 라벨 */
   regime: string
   /** 'Bull' | 'Sideways' | 'Bear'. null = 국면 계산 실패 (f13dec1 이후) —
