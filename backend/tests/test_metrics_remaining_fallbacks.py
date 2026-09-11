@@ -147,12 +147,18 @@ def test_factor_analysis_returns_empty_not_zeros(close_df, returns, why):
 
 
 def test_factor_analysis_measures_when_it_can():
-    """대조군 — 데이터가 충분하면 실제 값이 나와야 한다.
+    """대조군 — 데이터가 충분하면 실제 값이 나온다.
 
-    지금은 **어떤 입력으로도** 빈 dict 가 나온다. 그래서 위의 '빈 dict 여야
-    한다' 검사 세 개는 전부 통과하지만 아무것도 증명하지 못한다 — 함수가
-    올바르게 판단해서 비운 것인지, 애초에 아무것도 못 하는 것인지 구별되지
-    않는다. 대조군이 그 둘을 가른다.
+    한동안 **어떤 입력으로도** 빈 dict 가 나왔다. 첫 줄이
+    `close_df.get("^GSPC") or close_df.get("SPY")` 였는데 `Series or Series`
+    는 ValueError 를 던지고, 그걸 이 함수 자신의 바깥 `except` 가 삼켰다 —
+    벤치마크를 찾아놓고 같은 식에서 버린 것이다. (`SPY` 폴백은 그래서 작성
+    이후 한 번도 도달된 적이 없었다.)
+
+    그동안 위의 '빈 dict 여야 한다' 검사 세 개는 **전부 통과했지만 아무것도
+    증명하지 못했다** — 함수가 판단해서 비운 것인지 애초에 아무것도 못 하는
+    것인지 구별되지 않았다. 이 대조군만이 그 둘을 갈랐다. 고쳐진 지금도
+    같은 이유로 남는다.
     """
     rng = np.random.default_rng(1)
     mkt = pd.Series(rng.normal(0, 0.01, 180), index=_IDX)
