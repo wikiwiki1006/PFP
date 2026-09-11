@@ -806,13 +806,19 @@ def _run_pypfopt(
             mu_v = np.array([float(mu.get(t, 0.0)) for t in tickers])
             exp_ret = float(wv @ mu_v)
             vol = float(np.sqrt(wv @ S.values @ wv))
-            sharpe = (exp_ret - risk_free_rate) / vol if vol > 1e-12 else 0.0
+            # 변동성이 0 이면 샤프가 **정의되지 않는다**(무한). `0.0` 은 화면에서
+            # "위험조정수익 없음" = 최악으로 읽히는데 실제로는 위험이 없다는
+            # 뜻이다 — sortino·calmar 와 같은 부호 뒤집힘이다.
+            from backend.services.portfolio_calculator import MIN_VOL_FOR_RATIO
+            sharpe = ((exp_ret - risk_free_rate) / vol
+                      if vol > MIN_VOL_FOR_RATIO else None)
 
             return {
                 "weights":         weights,
                 "expected_return": round(exp_ret, 4),
                 "volatility":      round(vol, 4),
-                "sharpe_ratio":    round(sharpe, 4),
+                "sharpe_ratio":    round(sharpe, 4) if sharpe is not None else None,
+                "sharpe_reason":   None if sharpe is not None else "no_volatility",
             }
         except Exception as ex:
             logger.warning("HRP 최적화 실패 — 그 조합은 결과에서 빠진다",
