@@ -2507,7 +2507,12 @@ export default function AlphaTerminal() {
               <Pill label="1Month"       value={fp(m.perf_1m)}   color={chgColor(m.perf_1m)} />
               <Pill label="누적 수익"  value={fp(m.total_return_pct)}  color={chgColor(m.total_return_pct)} />
               <Pill label="베타"       value={fn(m.portfolio_beta)} />
-              <Pill label="변동성"        value={fn(m.vix)}               color={fv(m.vix) > 25 ? '#ef4444' : fv(m.vix) > 18 ? '#f59e0b' : '#10b981'} />
+              {/* VIX 는 구간 색이라 chgColor(증감 기준)를 못 쓴다. 대신 null 을
+                  먼저 갈라낸다 — fv 로 0 을 만들면 `0 > 25`·`0 > 18` 이 둘 다
+                  거짓이라 **읽지 못한 상태가 초록(정상)** 으로 칠해진다. */}
+              <Pill label="변동성"        value={fn(m.vix)}
+                    color={m.vix == null ? '#64748b'
+                           : m.vix > 25 ? '#ef4444' : m.vix > 18 ? '#f59e0b' : '#10b981'} />
             </div>
             </LockedPreview>
           )}
