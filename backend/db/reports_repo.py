@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta
 from typing import Optional
 
 from backend.db import get_conn, is_available, require_uid
@@ -224,23 +223,35 @@ def save_analysis(
     ttl_hours: int = 24,
     user_id: "str | None" = None,
 ):
-    """AI 분석 결과 저장 (upsert, TTL 설정)."""
+    """AI 분석 결과 저장 (upsert, TTL 설정).
+
+    **만료 시각을 DB 시계로 만든다.** 예전에는 `datetime.now()`(프로세스의
+    naive 로컬 시각)로 만들었는데, 만료 검사는 `get_analysis` 가 `NOW()` 로
+    한다 — 즉 **쓰는 시계와 읽는 시계가 달랐다.** `expires_at` 은 timestamptz
+    라 naive 입력을 세션 TimeZone 으로 해석하므로, 프로세스 시간대가 DB 세션과
+    다르면 수명이 그 차이만큼 어긋난다.
+
+    실측 (KST 머신 · DB 세션 UTC · ttl_hours=24):
+        고치기 전  만료까지 33.00시간  (+9.00)
+        고친 후    만료까지 24.00시간
+    운영(Cloud Run)은 프로세스도 UTC 라 둘이 우연히 맞았다. 우연에 기대고
+    있었다는 뜻이다.
+    """
     user_id = require_uid(user_id)
     if not is_available():
         return
-    expires = datetime.now() + timedelta(hours=ttl_hours)
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """INSERT INTO analysis_cache
                            (user_id, analysis_type, cache_key, result, created_at, expires_at)
-                       VALUES(%s,%s,%s,%s,NOW(),%s)
+                       VALUES(%s,%s,%s,%s,NOW(), NOW() + (%s * INTERVAL '1 hour'))
                        ON CONFLICT(user_id, analysis_type, cache_key) DO UPDATE
                        SET result=EXCLUDED.result,
                            created_at=NOW(),
                            expires_at=EXCLUDED.expires_at""",
-                    (user_id, analysis_type, cache_key, json.dumps(result), expires),
+                    (user_id, analysis_type, cache_key, json.dumps(result), ttl_hours),
                 )
     except Exception as e:
         logger.error(f"DB save_analysis 실패: {e}")

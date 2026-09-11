@@ -443,13 +443,15 @@ def test_an_expired_analysis_is_not_returned(two_users):
 # 실제로 **33시간**이다. Cloud Run 컨테이너는 UTC 라 운영에서는 맞는다 —
 # **개발하는 곳에서만 틀리는** 형태다. TZ 가 다른 곳에 배포하면 조용히 바뀐다.
 #
-# 고치는 방법은 만료를 SQL 에 맡기는 것이다:
-# `expires_at = NOW() + (%s * INTERVAL '1 hour')`. 그러면 기준이 하나가 된다.
+# **고쳤다.** 만료를 SQL 에 맡긴다:
+# `expires_at = NOW() + (%s * INTERVAL '1 hour')`. 기준이 하나가 됐다.
+# 고친 뒤 같은 머신에서 다시 재니 24.00시간(오차 -0.00)이다. xfail(strict) 이
+# XPASS 로 뒤집혀 마커를 지웠다 — 원장이 스스로 회수를 요구한 형태다.
+#
+# 위 실측 기록은 남겨 둔다. 다음에 누가 "파이썬에서 만료를 만드는 게 읽기
+# 쉽다" 며 되돌릴 때, **운영에서는 우연히 맞았다**는 사실이 그 자리에 있어야
+# 한다. 기준이 둘인 채로 맞는 것은 고쳐진 것이 아니다.
 
-@pytest.mark.xfail(strict=True, reason=(
-    "save_analysis 가 naive datetime.now() 로 만료를 만든다. 만료 검사는 DB "
-    "시계로 하므로 프로세스 시간대가 DB 세션과 다르면 수명이 그 차이만큼 "
-    "어긋난다. 고칠 자리가 backend/db/ 라 이 창 소유가 아니다."))
 def test_the_cache_lifetime_does_not_depend_on_the_process_clock(two_users):
     """프로세스 시계가 틀려도 방금 저장한 캐시는 살아 있어야 한다.
 
@@ -463,7 +465,11 @@ def test_the_cache_lifetime_does_not_depend_on_the_process_clock(two_users):
     """
     from unittest import mock
 
-    with mock.patch.object(rr, "datetime") as fake:
+    # create=True 로 건다. 고친 뒤 save_analysis 는 프로세스 시계를 **아예
+    # 안 읽으므로** 모듈에 `datetime` 이 없다. 그게 이 검사가 원하는 상태다 —
+    # 대상이 없다고 실패하면 "고쳐져서" 빨개지는 검사가 된다. 그래도 패치는
+    # 남겨 둔다: 누가 파이썬 시계를 다시 들여오면 그 순간 이 검사가 잡는다.
+    with mock.patch.object(rr, "datetime", create=True) as fake:
         fake.now.return_value = datetime(2000, 1, 1)
         rr.save_analysis("feedback", "clock", {"text": "결과"}, ttl_hours=24,
                          user_id=ALICE)
@@ -479,7 +485,7 @@ def test_the_cache_lifetime_does_not_depend_on_the_process_clock(two_users):
 def test_the_cache_survives_with_a_correct_clock(two_users):
     """대조군 — 시계를 안 건드리면 24시간짜리는 읽힌다.
 
-    없으면 위 xfail 이 "캐시가 아예 안 읽힌다" 는 상태로도 성립한다.
+    없으면 위 검사가 "캐시가 아예 안 읽힌다" 는 상태로도 성립한다.
     """
     rr.save_analysis("feedback", "normal", {"text": "결과"}, ttl_hours=24,
                      user_id=ALICE)
