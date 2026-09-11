@@ -662,7 +662,9 @@ def calculate_metrics(
     # 비거래일(주말·공휴일)에 NaN이 생기지 않도록 ffill 적용
     price_df = close_df.ffill()
     curr = price_df.iloc[-1]
-    prev = price_df.iloc[-2]
+    # `prev = price_df.iloc[-2]` 는 지웠다. 1일 변동이 `portfolio_daily_change`
+    # primitive 로 옮겨간 뒤 아무도 읽지 않는데, 남겨 두면 다음 사람이 "전일
+    # 종가는 여기 있다" 로 읽고 유령(ffill 복제) 행을 전일로 쓰게 된다.
 
     def _price(t):
         v = curr.get(t, 0)
@@ -818,12 +820,30 @@ def calculate_metrics(
             today_chg_val = 0.0
             today_chg_pct = None
 
-    # 실제 NYSE 거래일만 추린 인덱스 — 행 개수로 세면 공휴일·합성 today 행이 섞여
+    # 실제 거래일만 추린 인덱스 — 행 개수로 세면 공휴일·합성 today 행이 섞여
     # '5행 전'이 5거래일 전이 아니게 된다 (24/7 자산과 인덱스를 합치면 공휴일 행이 남는다).
+    #
+    # **그 시장의 캘린더로 센다.** 예전에는 시장과 무관하게 NYSE 로 세서, 한국
+    # 포트폴리오의 `perf_1w`·`perf_1m` 기준점이 미국 거래일로 잡혔다. 같은 규칙을
+    # 다루는 `_trim_to_session` 은 이미 시장별로 갈려 있었고(그 docstring 이 같은
+    # 사고를 기록한다) 이 자리만 안 따라왔다.
+    #
+    # 실측 (최근 평일 252일, 관측된 KRX 개장일 485일 기준):
+    #     두 캘린더가 어긋나는 날 16일 — 한국 공휴일 14일(설·추석·개천절 등)을
+    #     미국 캘린더는 거래일로 세고, 미국 공휴일 2일은 한국에서 개장이다.
+    #     '5거래일 전' 기준점이 달라지는 날이 1년 중 **80일(31.7%)**.
     try:
-        from backend.services.market_calendar import is_us_trading_day
-        _sessions = [d for d in equity_curve.index if is_us_trading_day(d.date())]
+        if market == "KR":
+            from backend.services.market_calendar import is_kr_trading_day as _is_session
+        else:
+            from backend.services.market_calendar import is_us_trading_day as _is_session
+        _sessions = [d for d in equity_curve.index if _is_session(d.date())]
     except Exception:
+        # 캘린더를 못 읽으면 행 전체를 쓴다. 다른 시장 캘린더로 대신 세지 않는다 —
+        # 틀린 기준일로 계산한 수익률은 없는 것보다 나쁘다.
+        logger.warning("거래일 캘린더를 읽지 못했다 (market=%s) — 곡선 행 전체를 "
+                       "기준으로 쓴다. perf_1w·perf_1m 의 기준점이 거래일이 "
+                       "아닐 수 있다.", market, exc_info=True)
         _sessions = list(equity_curve.index)
 
     def _perf(days):
