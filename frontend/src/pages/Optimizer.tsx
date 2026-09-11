@@ -10,7 +10,8 @@ import LoadingSpinner from '@/components/LoadingSpinner'
 import { startAIOptimizeJob, getAIOptimizeJob, cancelAIOptimizeJob, getHoldings, checkTickerExists } from '@/api'
 import type { AIOptimizationResult, OptimizationMode } from '@/types'
 import { cn, colorForValue } from '@/lib/utils'
-import { formatPrice } from '@/lib/market'
+import { formatPrice, type Market } from '@/lib/market'
+import { useMarket } from '@/lib/useMarket'
 import { marketSession } from '@/lib/marketStorage'
 import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
 import TickerLabel from '@/components/TickerLabel'
@@ -71,6 +72,14 @@ const OPT_CARDS = [
   },
 ]
 
+// 입력 예시는 시장을 따라간다. RegimePanel 이 같은 형태를 이미 쓴다
+// (MARKET_DEFAULTS 의 hint) — 한국 화면에서 미국 티커를 예시로 보여 주면
+// 사용자는 그 형식으로 입력해야 하는 줄 안다.
+const TICKER_HINT: Record<Market, string> = {
+  US: 'AAPL MSFT NVDA... (Enter로 추가, 비우면 보유 종목 자동 사용)',
+  KR: '삼성전자 SK하이닉스... (Enter로 추가, 비우면 보유 종목 자동 사용)',
+}
+
 const GLOSSARY: Record<string, string> = {
   '샤프비율': '(기대수익률 - 무위험이자율) / 변동성. 위험 한 단위당 초과수익입니다. 높을수록 효율적입니다.',
   '변동성': '수익률의 표준편차를 연간화한 수치입니다. 낮을수록 안정적이지만 기대수익도 제한됩니다.',
@@ -79,7 +88,11 @@ const GLOSSARY: Record<string, string> = {
   '소르티노': '(기대수익 - 무위험이율) / 하방편차. 샤프비율과 달리 손실 방향의 변동만 위험으로 봅니다. 1 이상이면 양호합니다.',
   '최대낙폭': 'MDD (Max Drawdown). 분석 기간 중 최고점 대비 최대 손실폭입니다. 과거 최악 시나리오의 하락 크기를 보여줍니다.',
   '칼마비율': '연환산 수익률 / |MDD|. 낙폭 위험 대비 수익을 측정합니다. 0.5 이상이면 양호, 1 이상이면 우수합니다.',
-  '베타': 'S&P 500 대비 시장 민감도. 1이면 시장과 동일하게 움직이며, 1 초과면 더 크게 반응합니다.',
+  // 벤치마크를 문구에 박지 않는다. 이 화면의 베타는 아직 SPY 고정이지만
+  // (portfolio_optimizer:895 가 하드코딩), 포트폴리오 화면의 베타는 이미
+  // 시장별 지수로 계산된다. 같은 단어가 화면마다 다른 기준을 가리키는
+  // 상태라, 문구가 특정 지수를 단정하면 둘 중 하나는 거짓이 된다.
+  '베타': '시장 지수 대비 민감도. 1이면 지수와 동일하게 움직이며, 1 초과면 더 크게 반응합니다.',
   'HRP': '계층적 리스크 패리티(Hierarchical Risk Parity). 상관계수 거리로 자산을 계층 군집화한 뒤, 클러스터 간에는 분산에 반비례하게, 클러스터 내부에서는 다시 같은 방식으로 비중을 나눕니다. 공분산 역행렬을 쓰지 않아 종목이 많아도 안정적이며, 상관 높은 자산군에 비중이 쏠리는 현상을 막습니다.',
   'CVaR 95%': '조건부 VaR. 수익률 하위 5% 시나리오에서 기대되는 평균 연손실입니다. 극단적 하락 위험의 크기를 나타냅니다.',
 }
@@ -712,6 +725,7 @@ function ProgressBar({ stage, stageText, elapsed }: { stage: number; stageText: 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function Optimizer() {
+  const market = useMarket()
   const names = useTickerNames()
   const { isAuthed, requireLogin, modalEl } = useLoginPrompt()
   const [tickers, setTickers]             = useState<string[]>([])
@@ -910,7 +924,7 @@ export default function Optimizer() {
               onKeyDown={handleKeyDown}
               onBlur={() => { if (tickerInput) void addTicker(tickerInput) }}
               disabled={isRunning}
-              placeholder={tickers.length ? '' : 'AAPL MSFT NVDA... (Enter로 추가, 비우면 보유 종목 자동 사용)'}
+              placeholder={tickers.length ? '' : TICKER_HINT[market]}
               className="flex-1 bg-transparent text-xs text-[#e2e8f0] outline-none placeholder-[#374151] min-w-[180px] disabled:opacity-50"
             />
             {checkingTicker
