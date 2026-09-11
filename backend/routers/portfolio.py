@@ -961,7 +961,10 @@ def get_equity_curve(
         and float(tr.get("price") or 0) > 0
     ]
 
-    return return_pct_to_records(return_pct, holdings_by_date, close_df, trade_markers, initial_equity, cash_events, equity)
+    # market 을 넘겨야 비교선이 그 시장의 기준 지수가 된다 (US ^GSPC · KR ^KS11).
+    # 안 넘기면 기본값 "US" 로 한국 차트에도 S&P 500 이 그려진다.
+    return return_pct_to_records(return_pct, holdings_by_date, close_df, trade_markers,
+                                 initial_equity, cash_events, equity, market=market)
 
 
 @router.get("/holdings-detail")

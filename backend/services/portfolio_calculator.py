@@ -333,6 +333,7 @@ def _trades_by_chart_date(trade_markers, chart_dates: list[str]) -> dict:
 def equity_curve_to_records(
     curve: pd.Series,
     benchmark_df: pd.DataFrame | None = None,
+    market: str = "US",
     cash_event_amounts: dict | None = None,
     trade_markers: list | None = None,
 ) -> list[dict]:
@@ -351,16 +352,22 @@ def equity_curve_to_records(
     if not meaningful.empty:
         curve = curve.loc[meaningful.index[0]:]
 
-    sp500_indexed = None
-    if benchmark_df is not None and "^GSPC" in benchmark_df.columns:
-        b = benchmark_df["^GSPC"].reindex(curve.index).ffill().bfill()
+    # 비교선도 시장 기준 지수다. 베타·알파는 `benchmark_for(market)` 로 고쳤는데
+    # 곡선의 비교 시리즈가 `"^GSPC"` 하드코딩으로 남아, 같은 화면이 두 벤치마크를
+    # 쓰고 있었다 — metrics 는 `^KS11`(코스피), 곡선은 S&P 500.
+    from backend.services.markets import benchmark_for
+    bench = benchmark_for(market)
+
+    bench_indexed = None
+    if benchmark_df is not None and bench in benchmark_df.columns:
+        b = benchmark_df[bench].reindex(curve.index).ffill().bfill()
         b_clean = b.dropna()
         if len(b_clean) > 0:
-            sp500_indexed = b / float(b_clean.iloc[0]) * float(curve.iloc[0])
+            bench_indexed = b / float(b_clean.iloc[0]) * float(curve.iloc[0])
 
     # 벤치마크는 위에서 `curve.index` 로 reindex 했으므로 행 위치가 그대로 맞는다.
     # 날짜 라벨로 매번 `.loc` 을 걸면 날짜 수만큼 인덱스 조회가 생긴다.
-    bench_vals = None if sp500_indexed is None else sp500_indexed.to_numpy()
+    bench_vals = None if bench_indexed is None else bench_indexed.to_numpy()
 
     def _bv(i: int):
         if bench_vals is None:
@@ -503,6 +510,11 @@ def calculate_metrics(
     raw_df   — fill=False 희소 프레임 (1일 변동 전용). 없으면 기존 곡선 차분으로 폴백.
     live     — 장중 실시간 가격 {ticker: price}
 
+    total_return_pct 는 **취득원가 대비 현재 평가액**이다. 매도로 실현한
+    손익은 들어오지 않는다 — 현금에 남고 현금은 이 계산에서 빠진다. "총
+    수익률이 왜 이래" 로 돌아올 자리라 여기 적어 둔다. 실현손익까지 담으려면
+    별도 필드가 필요하다.
+
     trade_log — 매매 이력. **세 상태를 구별한다:**
 
         None    호출자가 알려주지 않았다. 곡선 기반 값을 그대로 쓴다.
@@ -562,6 +574,23 @@ def calculate_metrics(
     eq_last = float(equity_curve.iloc[-1]) if not equity_curve.empty else 0.0
     if total_equity == 0 and eq_last > 0:
         total_equity = eq_last
+
+    # 곡선이 **합성**인지. 매매 이력에 주식 거래가 하나도 없으면
+    # `build_equity_curve` 의 `static_qty` 가 현재 수량을 프레임 첫날부터
+    # 적용하므로, 곡선은 사용자가 겪지 않은 과거를 그린다. 그 위에서 기간
+    # 수익률·알파를 계산하면 **바스켓의 창 수익률**이 사용자의 성과로 나간다.
+    #
+    # CASH 입금만 있는 이력도 여기 걸린다 — SetupWizard 로 보유만 입력한
+    # 사용자가 그 형태다.
+    #
+    # `trade_log is None` 은 "호출자가 알려주지 않았다" 이므로 판정하지 않는다.
+    # 없는 결손을 만드는 것이 빠뜨리는 것보다 나쁘다.
+    curve_is_synthetic = False
+    if trade_log is not None:
+        curve_is_synthetic = not any(
+            str(tr.get("ticker", "")).upper() not in ("CASH", "")
+            for tr in trade_log
+        )
 
     # 총 수익률: **취득원가 대비 현재 평가액.** 주식만 보고 현금은 양쪽에서 뺀다.
     #
@@ -640,6 +669,10 @@ def calculate_metrics(
         포트폴리오가 조회 기간보다 짧으면 base 가 0(첫 거래 이전 구간)이라
         예전에는 '이번 주 보합'이라는 잘못된 확신을 표시했다.
         """
+        if curve_is_synthetic:
+            # 곡선이 합성이면 N 거래일 전 자산은 '그때 이 바스켓의 값' 이고
+            # 사용자가 그때 그것을 보유했다는 근거가 없다.
+            return None
         if len(_sessions) < days + 1:
             return None
         # 여기서 `0.0` 은 표시값이 아니라 **센티넬**이다 — 바로 아래 `<= 0` 검사가
@@ -676,7 +709,7 @@ def calculate_metrics(
     # 초기값을 `0.0` 에서 `None` 으로 바꾼다. 기준 지수 열이 없으면 알파는
     # 계산 불가인데 `0.0` 은 "시장과 정확히 같았다" 는 단정이다 (§1.3).
     alpha = None
-    if bench in close_df.columns:
+    if bench in close_df.columns and not curve_is_synthetic:
         try:
             # 에쿼티 곡선은 첫 거래 이전 구간이 0 이므로 iloc[0] 으로 나누면 inf 가 되고,
             # NaN 검사(a_val == a_val)는 inf 를 잡지 못해 alpha 가 항상 null 로 나갔다.
@@ -1030,6 +1063,9 @@ def return_pct_to_records(
     initial_equity: float = 0.0,
     cash_events: "dict[str, float] | None" = None,
     equity: "pd.Series | None" = None,
+    # 마지막에 둔다 — 이 함수는 위치 인자로 불린다. 중간에 끼우면 그 뒤 인자가
+    # 한 칸씩 밀려 `trade_markers` 가 `market` 자리에 들어간다 (실제로 그랬다).
+    market: str = "US",
 ) -> list[dict]:
     """
     수익률(%) 시계열을 API 응답용 레코드 리스트로 변환.
@@ -1074,14 +1110,18 @@ def return_pct_to_records(
     if curve.empty:
         return []
 
-    # S&P 500: TWRR 포트폴리오는 현금흐름 왜곡이 없으므로 첫날 기준 단순 누적 수익률로 비교
+    # 비교선은 **시장 기준 지수**다 (US ^GSPC · KR ^KS11). TWRR 포트폴리오는
+    # 현금흐름 왜곡이 없으므로 첫날 기준 단순 누적 수익률로 비교한다.
+    from backend.services.markets import benchmark_for
+    bench = benchmark_for(market)
+
     b_full: "pd.Series | None" = None
-    sp_first_val: "float | None" = None
-    if close_df is not None and "^GSPC" in close_df.columns:
-        b_full = close_df["^GSPC"].reindex(curve.index).ffill().bfill()
+    bench_first_val: "float | None" = None
+    if close_df is not None and bench in close_df.columns:
+        b_full = close_df[bench].reindex(curve.index).ffill().bfill()
         b_from_first = b_full.loc[b_full.index >= first_date].dropna()
         if not b_from_first.empty:
-            sp_first_val = float(b_from_first.iloc[0])
+            bench_first_val = float(b_from_first.iloc[0])
 
     cash_evts = cash_events or {}
 
@@ -1104,11 +1144,11 @@ def return_pct_to_records(
             continue
         date_str = date_strs[i]
 
-        sp_val = None
-        if b_vals is not None and sp_first_val:
+        bench_pct = None
+        if b_vals is not None and bench_first_val:
             v = b_vals[i]
             if not pd.isna(v):
-                sp_val = round((float(v) / sp_first_val - 1) * 100, 2)
+                bench_pct = round((float(v) / bench_first_val - 1) * 100, 2)
 
         eq_val = None
         if eq_vals is not None:
@@ -1122,7 +1162,12 @@ def return_pct_to_records(
         records.append({
             "date":         date_str,
             "port":         round(float(pct), 2),
-            "sp":           sp_val,
+            # TODO(pfp-61 프론트 착륙 후): 키 이름을 `benchmark_pct` 로.
+            # `sp` 는 `alpha_vs_sp500` 과 같은 문제다 — 다만 지금 바꾸면
+            # `AlphaTerminal.tsx` 가 `d.sp` 를 여섯 곳에서 읽어 비교선이
+            # 사라진다. 그 사이 `sp` 가 거짓이 되지는 않는다: 프레임에 아직
+            # `^KS11` 이 없어 KR 은 None 이고, US 는 실제로 S&P 500 이다.
+            "sp":           bench_pct,
             "total_equity": eq_val,
             "cash_flow":    cf_val,
             "trades":       trade_by_date.get(date_str, []),
@@ -1136,10 +1181,27 @@ def return_pct_to_records(
 def factor_analysis(portfolio_returns: pd.Series, close_df: pd.DataFrame) -> dict:
     """
     포트폴리오 수익률을 시장/모멘텀/가치 팩터에 회귀해 노출도 산출.
-    데이터 부족 시 빈 dict 반환.
+    데이터가 모자라면 빈 dict 반환.
+
+    **계산 실패와 데이터 부족을 구별한다.** 예전에는 함수 전체를
+    `except Exception: return {}` 로 감싸서 둘이 같은 값으로 나왔다. 그래서
+    아래 버그가 6개월간 "데이터가 모자란가 보다" 로 보였다:
+
+        mkt = close_df.get("^GSPC") or close_df.get("SPY")
+
+    `Series or Series` 는 `ValueError: The truth value of a Series is
+    ambiguous` 다 — **벤치마크를 찾아 놓고 같은 식에서 버렸다.** 300일치
+    ^GSPC 를 줘도 `{}` 였다.
+
+    예외는 삼키지 않고 로그에 남긴다. 값이 비는 것과 계산이 깨진 것은 다르다.
     """
     try:
-        mkt = close_df.get("^GSPC") or close_df.get("SPY")
+        # `or` 를 쓰지 않는다 — Series 의 진리값은 정의되지 않는다.
+        mkt = None
+        for sym in ("^GSPC", "SPY"):
+            if sym in close_df.columns:
+                mkt = close_df[sym]
+                break
         if mkt is None:
             return {}
 
@@ -1163,6 +1225,8 @@ def factor_analysis(portfolio_returns: pd.Series, close_df: pd.DataFrame) -> dic
             ss_tot = np.sum((y - y.mean()) ** 2)
             r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
         except Exception:
+            logger.warning("팩터 회귀 실패 (표본 %d일) — 팩터 노출도 없이 진행",
+                           len(common), exc_info=True)
             return {}
 
         return {
@@ -1171,4 +1235,6 @@ def factor_analysis(portfolio_returns: pd.Series, close_df: pd.DataFrame) -> dic
             "r_squared":        round(float(r2), 4),
         }
     except Exception:
+        logger.warning("팩터 분석 실패 — 데이터 부족과 구별되지 않으므로 남긴다",
+                       exc_info=True)
         return {}

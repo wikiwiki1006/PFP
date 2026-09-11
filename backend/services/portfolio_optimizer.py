@@ -5,7 +5,8 @@ AI-powered Black-Litterman portfolio optimization.
 
 Pipeline (모든 IO 병렬 실행):
   ① yfinance prices  ‖  Perplexity news  ‖  yfinance Ticker.info (fundamentals)
-  ② GPT AI views — 밸류에이션·성장·애널리스트·모멘텀 종합 → forward-looking 예상수익
+  ② AI views (Perplexity sonar-pro) — 밸류에이션·성장·애널리스트·모멘텀 종합
+     → forward-looking 예상수익
   ③ Ledoit-Wolf cov  →  Black-Litterman (Idzorek confidence)
   ④ EfficientFrontier × 4 modes  +  frontier curve
 """
@@ -366,7 +367,7 @@ def _fetch_news(tickers: list[str], market: str = "US") -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. GPT AI View 생성 — 전향적 분석
+# 4. AI View 생성 (Perplexity) — 전향적 분석
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _build_ticker_section(t: str, ps: dict, f: dict, market: str) -> str:

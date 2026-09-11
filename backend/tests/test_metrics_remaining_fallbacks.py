@@ -146,20 +146,6 @@ def test_factor_analysis_returns_empty_not_zeros(close_df, returns, why):
     )
 
 
-_FACTOR_DEAD = (
-    "factor_analysis can never return a result. Its first line is "
-    "`close_df.get(\"^GSPC\") or close_df.get(\"SPY\")`, and `or` on a Series "
-    "raises ValueError('The truth value of a Series is ambiguous'), which the "
-    "function's own outer `except Exception: return {}` swallows. So the "
-    "benchmark is found and then immediately discarded: every call returns an "
-    "empty dict, whatever the data. POST /api/optimizer/factor-analysis is "
-    "wired to it, so that screen has always been blank and nothing says why. "
-    "Pick the column explicitly instead of relying on truthiness. "
-    "(owner: programoptimize)"
-)
-
-
-@pytest.mark.xfail(strict=True, reason=_FACTOR_DEAD)
 def test_factor_analysis_measures_when_it_can():
     """대조군 — 데이터가 충분하면 실제 값이 나와야 한다.
 
