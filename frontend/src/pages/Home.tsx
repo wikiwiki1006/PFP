@@ -91,17 +91,17 @@ export default function Home() {
           />
           <StatusCard
             label="VIX 추세"
-            value={m ? (m.vix > 25 ? '발작 구간' : m.vix > 18 ? '주의 구간' : '정상') : '로드 중'}
-            sub={m ? `VIX ${m.vix.toFixed(2)}` : ''}
+            value={m ? (m.vix == null ? '알 수 없음' : m.vix > 25 ? '발작 구간' : m.vix > 18 ? '주의 구간' : '정상') : '로드 중'}
+            sub={m ? `VIX ${m.vix == null ? '—' : m.vix.toFixed(2)}` : ''}
             ok={!!m}
-            warn={m ? m.vix > 25 : false}
+            warn={m ? (m.vix != null && m.vix > 25) : false}
           />
           <StatusCard
             label="VIX 공포지수"
-            value={m ? m.vix.toFixed(2) : '—'}
-            sub={m ? (m.vix > 25 ? '발작 구간' : m.vix > 18 ? '주의 구간' : '정상 구간') : ''}
+            value={m && m.vix != null ? m.vix.toFixed(2) : '—'}
+            sub={m && m.vix != null ? (m.vix > 25 ? '발작 구간' : m.vix > 18 ? '주의 구간' : '정상 구간') : ''}
             ok={!!m}
-            warn={m ? m.vix > 25 : false}
+            warn={m ? (m.vix != null && m.vix > 25) : false}
           />
         </div>
       </div>

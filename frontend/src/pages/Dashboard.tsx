@@ -53,7 +53,7 @@ export default function Dashboard() {
               title="Total Value"
               value={formatLargeNumber(m.total_equity)}
               icon={<DollarSign className="w-4 h-4" />}
-              change={m.today_change_pct}
+              change={m.today_change_pct ?? undefined}
               changeLabel="today"
             />
             <MetricCard
@@ -61,7 +61,7 @@ export default function Dashboard() {
               value={formatCurrency(m.today_change_val)}
               icon={<TrendingUp className="w-4 h-4" />}
               valueColor={colorForValue(m.today_change_val)}
-              change={m.today_change_pct}
+              change={m.today_change_pct ?? undefined}
             />
             <MetricCard
               title="Total Return"
@@ -78,9 +78,9 @@ export default function Dashboard() {
             />
             <MetricCard
               title="VIX"
-              value={m.vix.toFixed(2)}
+              value={m.vix == null ? '—' : m.vix.toFixed(2)}
               icon={<Shield className="w-4 h-4" />}
-              valueColor={m.vix > 25 ? 'text-[#ef4444]' : m.vix > 18 ? 'text-[#f59e0b]' : 'text-[#10b981]'}
+              valueColor={m.vix == null ? 'text-[#64748b]' : m.vix > 25 ? 'text-[#ef4444]' : m.vix > 18 ? 'text-[#f59e0b]' : 'text-[#10b981]'}
               subtitle={`1W: ${formatPct(m.perf_1w)} | 1M: ${formatPct(m.perf_1m)}`}
             />
           </>

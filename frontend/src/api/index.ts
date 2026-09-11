@@ -297,10 +297,13 @@ export const getMacroReportHistory = async (): Promise<{ name: string; event: st
 export const getMacroReportFile = async (filename: string): Promise<MacroAnalysisResult> =>
   (await api.get(`/api/macro/reports/${filename}`)).data
 
+// null 을 그대로 보낸다. 서버의 LiveMetrics 가 Optional[float] 이고,
+// 프롬프트에서 '산출 불가'로 처리한다 — 여기서 값을 지어내 채우면 그 판단이
+// 무너진다 (VIX 20 은 '변동성 정상'이라는 실측 주장이 된다).
 export const getAnalystFeedback = async (metrics?: {
-  vix?: number
-  portfolio_beta?: number
-  today_chg_pct?: number
+  vix?: number | null
+  portfolio_beta?: number | null
+  today_chg_pct?: number | null
 }): Promise<AnalystFeedback> =>
   (await api.post('/api/macro/analyst-feedback/auto', metrics ?? {})).data
 

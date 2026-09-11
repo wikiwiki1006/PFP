@@ -337,7 +337,13 @@ def analyst_feedback_auto(
     portfolio_sector_summary = " / ".join(sector_lines) if sector_lines else "섹터 데이터 없음"
 
     text = get_ai_analyst_feedback(
-        vix=live.vix if live.vix is not None else metrics.get("vix", 20.0),
+        # 기본값 20.0 을 두지 않는다. 두 가지가 겹쳐 있었다 —
+        #   (1) 지어낸 값이다. VIX 20 은 '정상' 구간이라, 읽지 못한 상태가
+        #       "변동성 정상" 이라는 실측 판단으로 프롬프트에 실린다.
+        #   (2) 애초에 발동하지도 않았다. metrics 에 'vix' 키가 있으면
+        #       (값이 None 이어도) dict.get 은 기본값을 쓰지 않고 None 을 준다.
+        # 바로 아래 portfolio_beta 가 이미 같은 이유로 None 을 넘긴다.
+        vix=live.vix if live.vix is not None else metrics.get("vix"),
         # metrics 의 베타는 5일치 프레임에서 나와 신뢰할 수 없다(관측치 부족).
         # 클라이언트가 보낸 값이 없으면 None 을 넘겨 '산출 불가'로 처리한다.
         portfolio_beta=(live.portfolio_beta if live.portfolio_beta is not None

@@ -139,13 +139,7 @@ def test_the_colour_helper_still_separates_unknown_from_flat():
 
 # ── 본 검사 ───────────────────────────────────────────────────────────────────
 
-_KNOWN = {
-    ("frontend/src/pages/AlphaTerminal.tsx", "fv(m.vix)"):
-        "변동성 타일이 `fv(m.vix) > 25 ? ... : ... : 초록` 이다. VIX 를 못 읽으면 "
-        "fv 가 0 을 주고 두 비교가 모두 거짓이 되어 **초록('변동성 낮음')** 으로 "
-        "칠해진다. 숫자는 `—` 인데 색은 안심하라고 말한다. `chgColor` 처럼 "
-        "모름을 회색으로 빼는 분기가 필요하다. (소유: develop)",
-}
+_KNOWN: dict[tuple[str, str], str] = {}
 
 
 def test_no_colour_is_chosen_from_a_zeroed_unknown():
