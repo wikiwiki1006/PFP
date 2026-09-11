@@ -40,6 +40,7 @@ from backend.services.market_data import (
     GICS_SECTOR_ETFS,
 )
 from backend.services.portfolio_calculator import calculate_metrics, build_equity_curve
+from backend.services.price_series import daily_change
 
 logger = logging.getLogger(__name__)
 
@@ -377,37 +378,40 @@ def daily_brief(
     if not holdings:
         raise HTTPException(status_code=400, detail="보유 종목 없음")
 
-    tickers  = [t for t in holdings if t != "CASH"]
-    close_df = get_close_df(tickers, period="5d", ttl=60)
+    tickers = [t for t in holdings if t != "CASH"]
 
-    # 가격 데이터 수집
+    # `fill=False` 로 받는다. ffill 된 프레임의 **마지막 두 행**을 빼면 안 된다 —
+    # 종가가 아직 확정되지 않은 날은 전일 종가가 그대로 복제돼 들어 있어서,
+    # 두 행의 차이가 정확히 0 이 된다. 실측으로 한국 브리프의 보유 세 종목이
+    # 전부 `+0.00%`, 오늘 손익 합계 `₩0` 으로 나갔고, 모델은 그걸 '보합'
+    # 으로 서술했다. 값이 없는 것이 '움직이지 않았다' 로 둔갑한다 (§1.3a·§1.6).
     #
-    # 비율만 넘기면 모델이 수량을 곱해 금액을 만들어 내는데, 그 산술이 맞지
-    # 않는다 (실측: 1일 손익 +₩10,239 을 +₩688,000 으로 썼다). daily_report
-    # 쪽은 pos_val·day_pnl 을 미리 계산해 넘겨서 이 문제가 없다. 같은 방식을
-    # 쓴다 — 모델에게 시킬 일이 아니라 여기서 끝낼 일이다.
+    # 마지막 두 **실제 관측치**를 고르는 일은 `price_series.daily_change` 가
+    # 이미 한다 — 비거래일·중복 인덱스·장전 행까지 처리한다. 여기서 다시
+    # 구현하지 않는다.
+    raw_df = get_close_df(tickers, period="5d", ttl=60, fill=False)
+
+    # 금액은 전부 계산해서 넘긴다. 비율만 주면 모델이 수량을 곱해 금액을
+    # 지어내는데 그 산술이 틀린다 (실측: 1일 손익 +₩10,239 → +₩688,000).
     price_data = {}
-    if not close_df.empty and len(close_df) >= 2:
-        cur, prev = close_df.iloc[-1], close_df.iloc[-2]
-        for t in tickers:
-            if t not in close_df.columns:
-                continue
-            p  = cur.get(t)
-            pp = prev.get(t)
-            p  = float(p) if p is not None and p == p else None
-            pp = float(pp) if pp is not None and pp == pp else None
-            if p is None:
-                continue
-            qty = float(holdings[t].get("q") or 0)
-            avg = float(holdings[t].get("avg") or 0)
-            price_data[t] = {
-                "price":   round(p, 2),
-                # 값이 없으면 0 이 아니라 None. '0.00%' 는 '보합'으로 읽힌다 (§1.3).
-                "chg_pct": round((p / pp - 1) * 100, 4) if pp else None,
-                "pnl_pct": round((p / avg - 1) * 100, 4) if avg else None,
-                "pos_val": round(p * qty, 2),
-                "day_pnl": round((p - pp) * qty, 2) if pp is not None else None,
-            }
+    for t in tickers:
+        ch = daily_change(raw_df, t)
+        if ch is None:
+            # 관측치가 두 개 미만이면 이 종목은 빼고, 합계도 이 종목 없이
+            # 내지 않는다 — generate_daily_brief 가 '합산 불가'로 적는다.
+            continue
+        qty = float(holdings[t].get("q") or 0)
+        avg = float(holdings[t].get("avg") or 0)
+        price_data[t] = {
+            "price":   round(ch.price, 2),
+            "chg_pct": round(ch.chg_pct, 4),
+            "pnl_pct": round((ch.price / avg - 1) * 100, 4) if avg else None,
+            "pos_val": round(ch.price * qty, 2),
+            "day_pnl": round(ch.chg_val * qty, 2),
+            # 이 수치가 **어느 세션의 것인지**. 브리프가 "오늘" 이라고 쓰는데
+            # 실제로는 전 거래일 종가인 경우를 모델이 알아야 한다.
+            "as_of":   ch.as_of.strftime("%Y-%m-%d"),
+        }
 
     # 거시지표는 여기서 고르지 않는다. 시장에 맞는 것을 고르는 분기가
     # ai_analysis 에 이미 있고, 여기서 FRED 를 무조건 부르던 탓에 한국
