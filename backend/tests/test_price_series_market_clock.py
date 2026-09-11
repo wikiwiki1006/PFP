@@ -137,23 +137,20 @@ def test_kr_ticker_converts_an_aware_timestamp_whatever_zone_it_arrives_in():
         )
 
 
-# ── 반대 방향의 같은 결함 — 아직 있다 ──────────────────────────────────────────
-
-_US_ASYMMETRY = (
-    "_market_now converts an explicit `now` into Seoul time for a KR ticker "
-    "but returns it untouched for a US one (`return now or now_et()`). Hand it "
-    "a KST-aware timestamp and a US ticker takes the Seoul date -- the mirror "
-    "image of the bug this module just fixed. No caller passes an explicit "
-    "`now` today, so nothing is broken right now; the moment one does (a mixed "
-    "US+KR portfolio sharing a single timestamp is the obvious case, and "
-    "portfolio_daily_change already threads one `now` through every holding), "
-    "US tickers silently inherit whatever zone the caller used. Convert on "
-    "both branches. (owner: unassigned -- price_series.py is not in the layout "
-    "table; integration to assign, per the ledger procedure.)"
-)
+# ── 반대 방향의 같은 결함 — 고쳤다 ────────────────────────────────────────────
+#
+# _market_now 가 KR 티커에는 명시적 now 를 서울 시간으로 변환하면서 US 티커에는
+# 손대지 않고 돌려줬다 (`return now or now_et()`). KST-aware 타임스탬프를 주면
+# 미국 종목이 서울 날짜를 쓴다 — 이 모듈이 방금 고친 버그의 정확한 거울상이다.
+#
+# 당시에는 명시적 now 를 넘기는 호출자가 없어 살아 있지 않았지만,
+# portfolio_daily_change 가 이미 하나의 now 를 모든 보유 종목에 꿰어 넘긴다.
+# 혼합 포트폴리오에서 호출자가 타임스탬프를 주기 시작하면 미국 종목이 그
+# 시간대를 조용히 물려받는다. 티커의 거래소 시간대로 변환하게 고쳤다.
+#
+# xfail 은 제거했다 — 이 두 테스트는 이제 실제 계약을 지킨다.
 
 
-@pytest.mark.xfail(strict=True, reason=_US_ASYMMETRY)
 def test_us_ticker_converts_an_aware_timestamp_too():
     """미국 종목도 받은 순간을 뉴욕 시간대로 변환해야 한다.
 
@@ -166,7 +163,6 @@ def test_us_ticker_converts_an_aware_timestamp_too():
     )
 
 
-@pytest.mark.xfail(strict=True, reason=_US_ASYMMETRY)
 def test_us_intraday_still_uses_the_new_york_date():
     """같은 순간의 미국 종목 일변동은 뉴욕 날짜를 기준으로 잘라야 한다."""
     dc = daily_change(_FRAME, _US, live_price=240.0, now=_KST_MORNING)

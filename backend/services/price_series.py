@@ -27,6 +27,7 @@ import numpy as np
 import pandas as pd
 
 from backend.services.market_calendar import (
+    ET,
     KST,
     _holidays_for_year,
     kr_price_cutoff,
@@ -81,11 +82,14 @@ def _market_now(ticker: str, now: Optional[datetime]) -> datetime:
     이틀치 변동을 오늘 등락으로 부르고, 실시간 가격에 어제 날짜를 붙였다.
     차이가 작아 보이는 건 이틀이 비슷했기 때문이고, 구조는 매일 틀린다.
     """
-    if uses_kr_session_calendar(ticker):
-        if now is None:
-            return now_kst()
-        return now.astimezone(KST) if (KST is not None and now.tzinfo) else now
-    return now or now_et()
+    tz = KST if uses_kr_session_calendar(ticker) else ET
+    if now is None:
+        return now_kst() if tz is KST else now_et()
+    if now.tzinfo is None:
+        # naive 는 어느 시간대인지 알 수 없다. 임의로 붙이면 조용히 하루를
+        # 밀 수 있으므로 그대로 돌려주고 호출자의 의도를 존중한다.
+        return now
+    return now.astimezone(tz) if tz is not None else now
 
 
 class DailyChange(NamedTuple):
