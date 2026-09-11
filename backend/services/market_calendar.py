@@ -15,9 +15,13 @@ pandas 내장 holiday 규칙만 사용한다 (신규 의존성 없음).
 """
 from __future__ import annotations
 
+import logging
+import time as _time
 from datetime import date, datetime, time as _dtime, timedelta
 from functools import lru_cache
 from typing import Literal, Optional
+
+logger = logging.getLogger(__name__)
 
 try:
     from zoneinfo import ZoneInfo
@@ -58,7 +62,11 @@ def uses_us_session_calendar(ticker: str) -> bool:
     return not t.endswith(_NON_US_SUFFIX)
 
 
-@lru_cache(maxsize=32)
+# maxsize 는 조회하는 서로 다른 연도 수보다 커야 한다. 32 였을 때 41개 연도를
+# 훑으면 캐시가 완전히 무너졌다 — 32개 연도 2회 조회 339ms(적중 32) 대 41개 연도
+# 2회 조회 798ms(적중 0). LRU 라 매 조회가 직전 것을 밀어내 적중률이 0이 된다.
+# 값은 연도당 frozenset 10개짜리라 256개를 들고 있어도 메모리는 무시할 만하다.
+@lru_cache(maxsize=256)
 def _holidays_for_year(year: int) -> frozenset[date]:
     """해당 연도의 NYSE 정기 휴장일 집합 (연도별 메모이제이션)."""
     from pandas.tseries.holiday import (
@@ -240,44 +248,133 @@ _KRX_OPEN  = _dtime(9, 0)
 _KRX_CLOSE = _dtime(15, 30)
 
 
-def _krx_trading_days() -> frozenset:
-    """최근 2년간 KRX 실제 개장일. DB 캐시 우선.
+# 캘린더를 지수 하나로 만들지 않는다.
+#
+# ^KS11 은 정규 거래일인데도 행이 통째로 빠질 때가 있다. 2026-09-10(목)이
+# ^KS11 과 ^KQ11 양쪽 모두에 없었지만 005930.KS 와 000660.KS 에는 정상 봉이
+# 있었다 — KRX 는 열려 있었고 야후의 **지수 피드만** 구멍이 났다.
+#
+# 이 집합은 "없으면 휴장"으로 읽히므로 그 구멍이 그대로 휴장일이 된다. 그러면
+# save_prices_to_db 의 가드가 그날 종가를 영구히 거부하고(가드는 날짜 선후가
+# 아니라 개장 여부를 보므로 나중에 다시 받아도 통과하지 못한다),
+# last_completed_kr_session 은 그 전날을 가리켜 수집기는 이미 최신이라고 믿는다.
+# 아무도 모르는 채로 하루가 영구히 사라진다. 실제로 09-10 종가는 ^KS11 과
+# 005930.KS 모두 DB 에 없었다.
+#
+# 그래서 지수 + 대형주 두 종목의 **합집합**으로 만든다. 어느 하나라도 거래된
+# 날은 개장일이다 — 정의상 맞는 판정이고, 세 소스가 같은 날을 동시에 빠뜨려야
+# 구멍이 생긴다. 소스끼리 어긋나면 경고로 남긴다: 합집합이 고장 난 소스를
+# 조용히 덮어 주면 피드가 망가진 것을 아무도 모른다.
+_KRX_CALENDAR_SOURCES = ("^KS11", "005930.KS", "000660.KS")
 
-    TTL 은 24시간이 아니라 2시간이다. 짧게 잡는 이유는 캐시 시점 race 때문이다:
-    이 캐시가 마감(15:30 KST) 직전—오늘 종가가 아직 NaN 인 순간—에 한 번
-    갱신되면, 그 스냅샷은 "오늘은 개장일 아님"으로 굳어 24시간 동안 유지된다.
-    그동안 save_prices_to_db 의 캘린더 가드가 오늘 종가 행을 계속 거부하고,
-    화면에는 실제로는 마감된 날의 종가가 통째로 빠진 채 그 전날이 최신으로
-    보인다. get_stale_tickers 의 날짜 비교도 "기대치"를 같은 캐시로 계산하므로
-    같이 틀려 재수집조차 트리거되지 않을 수 있다.
-    (실제로 있었던 사고: 09-07 마감 직후 캐시된 값이 09-08 오전까지 남아
-    포트폴리오 화면에 09-04 종가가 최신으로 표시됐다.)
-    TTL 을 짧게 두면 늦어도 몇 시간 안에 스스로 고쳐진다. ^KS11 단일 티커
-    조회라 2시간마다 다시 불러도 비용은 무시할 만하다.
+
+# 프로세스 안 메모. DB 캐시(2시간)만으로는 부족하다 — save_prices_to_db 는
+# 프레임의 **행마다** is_kr_trading_day 를 부르고, 그 한 번이 DB 왕복 1회다.
+# 2년 프레임 한 장이면 약 500회, 측정으로 992ms 가 캘린더 재조회에만 쓰였다.
+# 2시간 동안 바뀌지 않는 집합을 500번 다시 읽는 것이므로 전부 낭비다.
+#
+# TTL 을 DB 쪽(7200s)보다 훨씬 짧게 둔다. 길게 잡으면 DB 캐시가 스스로 고쳐진
+# 뒤에도 이 프로세스만 옛 스냅샷을 들고 있게 된다. 실패는 더 짧게 기억한다 —
+# 소스가 잠깐 죽었을 때 10분씩 평일 폴백에 머물 이유가 없다.
+#
+# 락은 걸지 않는다. 경합하면 조회가 두 번 날 뿐 결과는 같다.
+_KRX_MEMO_TTL      = 600.0
+_KRX_MEMO_TTL_FAIL = 60.0
+_krx_memo: tuple = (0.0, frozenset())
+
+
+def reset_krx_calendar_memo() -> None:
+    """프로세스 메모를 비운다 (테스트·수동 갱신용). DB 캐시는 건드리지 않는다."""
+    global _krx_memo
+    _krx_memo = (0.0, frozenset())
+
+
+def _krx_trading_days() -> frozenset:
+    """최근 2년간 KRX 실제 개장일 (프로세스 메모 → DB 캐시 → 소스)."""
+    global _krx_memo
+    ts, memo = _krx_memo
+    if ts and (_time.monotonic() - ts) < (_KRX_MEMO_TTL if memo else _KRX_MEMO_TTL_FAIL):
+        return memo
+    days = _krx_trading_days_fetch()
+    _krx_memo = (_time.monotonic(), days)
+    return days
+
+
+def _krx_trading_days_fetch() -> frozenset:
+    """DB 캐시 우선, 없으면 소스에서 새로 만든다.
+
+    **오늘도 들어 있다.** 야후는 장중에도 당일 봉의 Close 를 실시간 값으로
+    채워 주므로 첫 체결이 찍힌 뒤로는 오늘이 개장일로 잡힌다. 예전 주석들은
+    "오늘은 항상 빠져 있다"고 적혀 있었는데, 그때는 야후가 미확정 종가를 NaN
+    으로 내려 줬기 때문이다. 외부 계약이 바뀌었고 그 전제는 더 이상 참이 아니다.
+    종가 확정 여부는 이 집합이 아니라 last_completed_kr_session 이 판단한다
+    (15:30 KST 를 지났는지 직접 본다).
+
+    TTL 이 24시간이 아니라 2시간인 것은 이 집합이 관측 기반이기 때문이다.
+    09:00 이전에 갱신되면 오늘이 아직 없고, 그 스냅샷이 오래 남을수록 그
+    상태가 길어진다. 2시간이면 늦어도 오전 중에 스스로 메워진다.
+    (사고 기록: 09-07 마감 직후 캐시된 값이 09-08 오전까지 남아 포트폴리오
+    화면에 09-04 종가가 최신으로 표시됐다.)
     """
     from backend.db.market_cache import get_common, save_common
 
-    cached = get_common("krx_trading_days")
+    # 캐시 키에 소스 구성을 넣는다. 넣지 않으면 소스를 고쳐도 옛 결과가 최대
+    # 2시간 동안 계속 나온다 — 실제로 소스를 하나에서 셋으로 늘린 직후 옛
+    # 484일 목록(09-10 이 빠진 것)이 그대로 반환됐다. 키가 구성을 담으면
+    # 코드 변경이 곧 캐시 무효화가 된다.
+    key = "krx_trading_days:" + ",".join(_KRX_CALENDAR_SOURCES)
+
+    cached = get_common(key)
     if cached:
         return frozenset(date.fromisoformat(d) for d in cached)
 
     try:
         import yfinance as yf
-        hist = yf.Ticker("^KS11").history(period="2y")
-        # 종가가 있는 날만 개장일로 센다.
-        #
-        # 인덱스 행이 있다고 개장일인 것이 아니다. 야후는 당일 장이 끝난 뒤에도
-        # 종가가 확정되기 전까지 거래량만 채운 NaN 행을 내려 준다. 그 행을 개장일로
-        # 세면 last_completed_kr_session 이 '종가를 받을 수 없는 날'을 가리키게 되고,
-        # 수집기는 그 날짜에 영원히 도달하지 못해 같은 종목을 무한히 다시 받는다.
-        days = sorted({d.date() for d in hist.index[hist["Close"].notna()]})
     except Exception as e:
-        logger.warning(f"KRX 개장일 수집 실패: {e}")
+        logger.warning("KRX 개장일 수집 실패 — yfinance 를 불러올 수 없습니다: %s", e)
         return frozenset()
 
-    if days:
-        save_common("krx_trading_days", [d.isoformat() for d in days],
-                    ttl_seconds=7200)
+    per_source: dict[str, set] = {}
+    for tkr in _KRX_CALENDAR_SOURCES:
+        try:
+            hist = yf.Ticker(tkr).history(period="2y")
+            # Close 가 있는 날만 센다. 값이 없는 행(거래정지·데이터 공백)은
+            # 그 소스에게는 개장일의 증거가 되지 못한다. 다른 소스가 메운다.
+            got = {d.date() for d in hist.index[hist["Close"].notna()]}
+            if got:
+                per_source[tkr] = got
+            else:
+                logger.warning("KRX 캘린더 소스 %s 가 빈 시계열을 돌려줬습니다", tkr)
+        except Exception as e:
+            logger.warning("KRX 캘린더 소스 %s 조회 실패: %s", tkr, e)
+
+    if not per_source:
+        # 여기서 빈 집합을 돌려주면 is_kr_trading_day 가 '평일이면 개장'으로
+        # 내려간다. 그 폴백은 의도된 것이지만, 조용히 일어나면 안 된다.
+        logger.warning("KRX 개장일을 한 소스도 받지 못했습니다 — 평일 폴백으로 내려갑니다")
+        return frozenset()
+
+    days = set().union(*per_source.values())
+
+    # 합집합이 메워 준 구멍을 남긴다. 최근 30일만 본다 — 2년 전 거래정지까지
+    # 전부 찍으면 신호가 아니라 소음이 된다.
+    recent = now_kst().date() - timedelta(days=30)
+    for tkr, got in per_source.items():
+        gaps = sorted(d for d in days - got if d >= recent)
+        if gaps:
+            logger.warning(
+                "KRX 캘린더: %s 에 최근 개장일 %d일이 없습니다 (%s%s) — 다른 소스로 메웠습니다",
+                tkr, len(gaps), ", ".join(d.isoformat() for d in gaps[:5]),
+                " 외" if len(gaps) > 5 else "",
+            )
+
+    if len(per_source) < len(_KRX_CALENDAR_SOURCES):
+        logger.warning(
+            "KRX 캘린더를 소스 %d/%d 개로만 만들었습니다 (%s) — 구멍 방어력이 낮습니다",
+            len(per_source), len(_KRX_CALENDAR_SOURCES), ", ".join(per_source),
+        )
+
+    save_common(key, [d.isoformat() for d in sorted(days)], ttl_seconds=7200)
     return frozenset(days)
 
 
@@ -286,6 +383,12 @@ def is_kr_trading_day(d: date) -> bool:
 
     캘린더를 못 받았을 때는 '평일이면 개장'으로 본다. 데이터를 못 읽었다는
     이유로 멀쩡한 거래일을 휴장으로 처리하면 그날 시세가 통째로 버려진다.
+
+    반대로 캘린더 **범위 안**의 빠진 날은 휴장으로 본다. 범위 안에서는 구멍과
+    공휴일을 구별할 수 없고, 둘 중 하나를 골라야 한다면 휴장이 맞다: 평일로
+    돌리면 설·추석마다 last_completed_kr_session 이 존재하지 않는 종가를
+    가리켜 수집기가 같은 종목을 무한히 다시 받는다(연 십수 일). 구멍 쪽은
+    _KRX_CALENDAR_SOURCES 합집합으로 막고 어긋나면 경고를 남긴다.
     """
     if hasattr(d, "date") and not isinstance(d, date):
         d = d.date()  # type: ignore[assignment]
@@ -300,9 +403,10 @@ def is_kr_trading_day(d: date) -> bool:
 def kr_market_status(now: Optional[datetime] = None) -> Literal["pre", "open", "post", "closed"]:
     """현재 한국 증시 상태 (정규장 09:00~15:30 KST).
 
-    거래일 판정에 _krx_trading_days() 를 쓰지 않는다 — 그 캘린더는 종가가 확정된
-    날만 담아 **오늘이 항상 빠져 있다.** 그걸로 판단하면 장이 열려 있는 지금도
-    'closed' 가 나와, 화면의 LIVE 배지가 한국장 중에 꺼진다.
+    거래일 판정에 _krx_trading_days() 를 쓰지 않는다. 그 캘린더는 **관측 기반**
+    이라 첫 체결이 찍히기 전에는 오늘을 알 수 없다 — 08:50 에 물어보면 '개장일
+    아님'이 나오고, 그걸로 판단하면 09:00 직후 화면의 LIVE 배지가 꺼진 채로
+    시작한다. 캐시가 어제 갱신됐다면 더 오래 간다.
 
     평일 여부만 본다. 한국 공휴일에는 'open' 으로 오판하지만(연 십수 일),
     장중에 '마감'이라고 하는 것보다 낫다. is_kr_extended_hours 와 같은 규칙이다.
@@ -331,9 +435,9 @@ _KRX_EXT_CLOSE = _dtime(18, 0)    # 장후 시간외 종료
 def is_kr_extended_hours(now: Optional[datetime] = None) -> bool:
     """한국 주식 가격이 **변할 수 있는** 시간대인지 (시간외 포함 08:30~18:00 KST).
 
-    거래일 판정에 _krx_trading_days() 를 쓰지 않는다. 그 캘린더는 종가가 확정된
-    날만 담기 때문에 **오늘이 항상 빠져 있다** — 장이 열려 있는 지금 물어보면
-    '거래일 아님'이 나온다. 그걸로 실시간 수집을 막으면 정작 장중에 시세가 멈춘다.
+    거래일 판정에 _krx_trading_days() 를 쓰지 않는다. 그 캘린더는 관측 기반이라
+    첫 체결 전에는 오늘을 알 수 없다 — 08:30 시간외 시작 시점에 물어보면 '거래일
+    아님'이 나온다. 그걸로 실시간 수집을 막으면 정작 장중에 시세가 멈춘다.
 
     그래서 평일 여부만 본다. 공휴일에 불필요한 조회가 조금 생기지만(연 십수 일),
     장중에 시세가 멈추는 것보다 훨씬 낫다. is_kr_trading_day 도 캘린더가 없을 때
@@ -351,9 +455,10 @@ def kr_price_cutoff(now: Optional[datetime] = None) -> date:
     09:00 KST 이후(장중·장후)에는 오늘 봉이 유효하므로 오늘. 그 이전이나
     주말이면 직전 평일까지만.
 
-    last_completed_kr_session 을 쓰지 않는 이유는 그 함수가 캘린더 기반이라
-    **오늘을 절대 돌려주지 않기 때문이다.** 자산곡선을 그걸로 자르면 한국
-    포트폴리오의 가장 최근 거래일이 매번 사라진다.
+    last_completed_kr_session 을 쓰지 않는다. 그 함수는 15:30 KST 를 지나야
+    오늘을 돌려주므로, 장중에 자산곡선을 그걸로 자르면 한국 포트폴리오의
+    오늘자 평가액이 사라진다. 여기서 필요한 것은 '종가가 확정된 날'이 아니라
+    '값이 존재할 수 있는 가장 늦은 날'이다.
     """
     n = now or now_kst()
     d = n.date()
