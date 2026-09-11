@@ -495,12 +495,29 @@ def calculate_metrics(
     live: dict | None = None,
     now=None,
     market: str = "US",
+    trade_log: list | None = None,
 ) -> dict:
     """포트폴리오 지표.
 
     close_df — ffill 된 프레임 (에쿼티 곡선·베타·알파용)
     raw_df   — fill=False 희소 프레임 (1일 변동 전용). 없으면 기존 곡선 차분으로 폴백.
     live     — 장중 실시간 가격 {ticker: price}
+
+    trade_log — 매매 이력. **세 상태를 구별한다:**
+
+        None    호출자가 알려주지 않았다. 곡선 기반 값을 그대로 쓴다.
+        []      이력이 실제로 없다. 곡선의 시작점은 `build_equity_curve` 의
+                `static_qty`(현재 수량을 프레임 첫날부터 적용)로 만든 합성값이다.
+        [...]   CASH 아닌 티커의 거래가 있으면 그 시점부터가 실제 이력이다.
+
+    `trade_log or []` 로 넘기면 앞의 두 상태가 합쳐져 구별이 사라진다 —
+    그대로 넘겨야 한다.
+
+    지금 이 인자를 읽는 계산은 없다. `total_return_pct` 가 곡선 대신 취득원가
+    기준으로 바뀌면서 그 판정이 필요 없어졌기 때문이다(창과 무관하게 성립한다).
+    남은 용도는 `perf_1w`·`perf_1m`·`alpha_vs_benchmark` 로, 그 셋은 여전히
+    곡선에서 나오므로 곡선이 합성이면 사용자의 성과가 아니라 **바스켓의 창
+    수익률**이다. 그 판정을 붙일 때 이 인자를 쓴다.
     """
     if close_df.empty or len(close_df) < 2:
         return {}
@@ -546,19 +563,27 @@ def calculate_metrics(
     if total_equity == 0 and eq_last > 0:
         total_equity = eq_last
 
-    # 총 수익률: 에쿼티 커브 첫 양수 시점 대비 현재 (거래 이력 기반, 더 정확)
-    eq_meaningful = equity_curve[equity_curve > 0]
-    if not eq_meaningful.empty:
-        # `eq_first` 는 `equity_curve[equity_curve > 0]` 의 첫 값이라 항상 양수다.
-        # 예전에 있던 `if eq_first else 0.0` 은 도달하지 않는 분기였다.
-        eq_first = float(eq_meaningful.iloc[0])
-        total_rtn = _num_or_none((total_equity / eq_first - 1) * 100)
-    else:
-        # 주식 평가액 대 주식 원가. 분자에도 현금을 넣지 않는다 — 한쪽만 빼면
-        # 현금을 수익으로 세어 수익률이 폭증한다 (현금 절반이면 +99%).
-        # 원가가 0 이면 기준점이 없다 — 0% 는 "본전" 이라는 단정이다.
-        total_rtn = (_num_or_none((stock_equity / stock_cost - 1) * 100)
-                     if stock_cost else None)
+    # 총 수익률: **취득원가 대비 현재 평가액.** 주식만 보고 현금은 양쪽에서 뺀다.
+    #
+    # 예전에는 에쿼티 곡선의 첫 양수 지점 대비로 계산했다. 그 값은 곡선이
+    # 투자 시작 시점을 덮을 때만 총 수익률이고, 넘겨받은 `close_df` 가 짧으면
+    # **그 창의 수익률**이 된다. 실측: 평단 165.4 → 현재 155.28 (실제 -6.12%)
+    # 인 보유가 5일 창에서 `+55.28%` 로 보고됐다. 창이 100 에서 시작했기 때문이고,
+    # 매매 이력이 있든 없든 같았다.
+    #
+    # 결정적이었던 것은 **같은 응답의 `total_cost`(1654)·`total_equity`(1552.8)
+    # 가 -6.12% 를 가리킨다**는 점이다. 창이 짧은 것은 호출자의 정당한 선택이고,
+    # 그 창으로 정당화할 수 없는 숫자를 "총 수익률" 이라는 이름으로 내보내는 것이
+    # 계산하는 쪽의 문제다. 응답이 자기 자신과 모순될 이유가 없다.
+    #
+    # 원가 기준은 창과 무관하게 성립하고 옆 두 필드와 정의상 일치한다. 곡선
+    # 기준이 맞는 경우(창이 매수 시점에서 시작)에는 두 값이 같다 — 잃는 것이
+    # 없다. 다만 **매도로 실현한 손익은 들어오지 않는다** (현금에 남고, 현금은
+    # 이 계산에서 빠진다). 그건 별도 필드가 답할 문제다.
+    #
+    # 원가가 0 이면 기준점이 없다 — 0% 는 "본전" 이라는 단정이다.
+    total_rtn = (_num_or_none((stock_equity / stock_cost - 1) * 100)
+                 if stock_cost else None)
 
     # 1D 변화 — 종목별 '마지막 두 실제 관측치' 합산이 1순위.
     # 에쿼티 커브의 위치 기반 차분(iloc[-1]-iloc[-2])은 마지막 두 행이

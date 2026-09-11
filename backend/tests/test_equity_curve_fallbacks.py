@@ -195,21 +195,6 @@ def test_live_badge_is_off_when_the_calendar_cannot_answer(monkeypatch):
 
 # ── 부호 뒤집힘 ───────────────────────────────────────────────────────────────
 
-_SIGN_XFAIL = (
-    "total_return_pct is measured from the first positive point of the equity "
-    "curve, which only spans the close_df it was handed. Given a window that "
-    "starts after the holdings were bought -- /analyst-feedback passes "
-    "period='5d' -- it reports the window's move as the total return: +55.28% "
-    "for a position that is down 6.12% against its cost. The same response "
-    "carries total_cost and total_equity that say the opposite, and the number "
-    "goes to the screen and into an AI prompt, so the model advises on a "
-    "portfolio it believes is up 55%. Either refuse the figure when the curve "
-    "cannot reach the cost basis, or stop calling a window return a total "
-    "return. (owner: programoptimize; caller /analyst-feedback: develop)"
-)
-
-
-@pytest.mark.xfail(strict=True, reason=_SIGN_XFAIL)
 @pytest.mark.parametrize("trades, why", [
     (_BUY, "매매 이력 있음"),
     ([], "매매 이력 없음 — _fallback 경로"),
