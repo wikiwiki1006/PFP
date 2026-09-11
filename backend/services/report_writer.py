@@ -11,7 +11,7 @@ import math
 import os
 import re
 from decimal import Decimal, ROUND_HALF_UP
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -36,6 +36,34 @@ def _today() -> str:
     검색 프롬프트의 "Today:" 로도 들어가 엉뚱한 날의 뉴스를 모은다.
     """
     return datetime.now().strftime("%Y년 %m월 %d일")
+
+
+def _as_of(market: str) -> str:
+    """이 리포트의 수치가 **언제 것인지**. 장중이면 시각과 '장중' 을 함께 적는다.
+
+    `yf.Ticker(...).info` 는 장중 실시간 값을 준다 — 같은 시각에 005930.KS 가
+    여기서는 257,750, 확정 종가로는 269,000 이었다. 둘 다 각자 맞지만, 헤더에
+    **날짜만** 있으면 읽는 사람은 종가로 읽는다. 리포트는 파일로 남아서 며칠
+    뒤에 열리고, 그때는 그날 장중이었다는 사실이 어디에도 없다.
+
+    값은 맞는데 '언제 것인지' 가 값과 함께 이동하지 않는 형태다.
+    """
+    from backend.services.markets import normalize
+    is_kr = normalize(market) == "KR"
+    try:
+        from backend.services.market_calendar import is_kr_market_open, is_us_market_open
+        open_now = is_kr_market_open() if is_kr else is_us_market_open()
+    except Exception:
+        logger.warning("장중 여부를 판정하지 못했다 (market=%s)", market, exc_info=True)
+        return f"{_today()} (장중 여부 확인 불가 — 확정 종가가 아닐 수 있음)"
+
+    if not open_now:
+        return _today()
+    if is_kr:
+        now = datetime.now(timezone(timedelta(hours=9))).strftime("%H:%M KST")
+    else:
+        now = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    return f"{_today()} {now} — **장중 시세이며 확정 종가가 아닙니다**"
 
 
 # ── 시스템 프롬프트 ──────────────────────────────────────────────────────────────
@@ -439,7 +467,7 @@ def gather_equity_yfinance(ticker: str, market: str = "US") -> tuple[str, str, d
             pass
 
         # 텍스트 포매팅
-        lines = [f"【{company_name} ({ticker}) yfinance 실제 데이터】  기준: {_today()}"]
+        lines = [f"【{company_name} ({ticker}) yfinance 실제 데이터】  기준: {_as_of(market)}"]
 
         price = raw_dict["currentPrice"]
         if price:
@@ -460,15 +488,18 @@ def gather_equity_yfinance(ticker: str, market: str = "US") -> tuple[str, str, d
             # 적으면 TSMC 처럼 둘이 다른 종목에서 통화가 바뀐다 — 바로 아래
             # 연간 실적 블록은 이미 `fin_cur` 를 쓰고 통화까지 적어 둔다.
             # 같은 종목의 매출이 두 줄에서 다른 통화로 나가고 있었다.
-            lines.append(f"연매출: {_fmt_amount(raw_dict['totalRevenue'], fin_cur)} [A]")
+            lines.append(f"연매출 (TTM): {_fmt_amount(raw_dict['totalRevenue'], fin_cur)} [A]")
+        # 기간을 항목마다 적는다. 아래 연간 실적에는 연도가 붙어 있는데 이쪽에는
+        # 아무 표시가 없으면, 한 블록에 나란히 있는 이상 모델은 같은 기간으로
+        # 읽는다. 다르다는 표시가 없는 쪽이 같다고 읽히는 것이다.
         if raw_dict["revenueGrowth"] is not None:
-            lines.append(f"매출성장률 (YoY): {float(raw_dict['revenueGrowth'])*100:.1f}% [A]")
+            lines.append(f"매출성장률 (최근 분기 YoY): {float(raw_dict['revenueGrowth'])*100:.1f}% [A]")
         if raw_dict["grossMargins"] is not None:
-            lines.append(f"매출총이익률: {float(raw_dict['grossMargins'])*100:.1f}% [A]")
+            lines.append(f"매출총이익률 (TTM): {float(raw_dict['grossMargins'])*100:.1f}% [A]")
         if raw_dict["operatingMargins"] is not None:
-            lines.append(f"영업이익률: {float(raw_dict['operatingMargins'])*100:.1f}% [A]")
+            lines.append(f"영업이익률 (TTM): {float(raw_dict['operatingMargins'])*100:.1f}% [A]")
         if raw_dict["profitMargins"] is not None:
-            lines.append(f"순이익률: {float(raw_dict['profitMargins'])*100:.1f}% [A]")
+            lines.append(f"순이익률 (TTM): {float(raw_dict['profitMargins'])*100:.1f}% [A]")
         if raw_dict["beta"] is not None:
             lines.append(f"베타: {float(raw_dict['beta']):.2f}")
         if raw_dict["fiftyTwoWeekHigh"]:
@@ -535,7 +566,7 @@ def gather_industry_yfinance(meta: dict, market: str = "US") -> tuple[str, dict]
     """산업 ETF + 커버리지 종목 yfinance 데이터 수집.
     Returns (formatted_text, raw_dict).
     """
-    lines = [f"【{meta['name_kr']} 산업 yfinance 실제 데이터】  기준: {_today()}"]
+    lines = [f"【{meta['name_kr']} 산업 yfinance 실제 데이터】  기준: {_as_of(market)}"]
     raw: dict = {}
 
     # 벤치마크 ETF 1년 수익률
@@ -1043,10 +1074,12 @@ def write_equity_report(
     # 컨텍스트에 넣었다. 같은 숫자가 두 형태로 중복되는 데다 요약 호출 자체가
     # 추가 비용이었다. yf_text 는 이미 정형화된 지표 목록이라 요약이 정보를 늘리지
     # 않으므로 원본만 전달한다.
+    from backend.services.perplexity import window_notice
     context_deep = (
         f"[Market data — yfinance]\n{yf_text}\n\n"
         f"[Recent news & analyst view — Perplexity]\n"
-        f"{news_text if news_text else NO_NEWS_NOTICE}"
+        # 요청 범위는 `gather_equity_perplexity` 의 "last 30 days".
+        f"{window_notice('30일') + chr(10) + news_text if news_text else NO_NEWS_NOTICE}"
     )
 
     _write = _call_haiku if model_tier == "basic" else _call_sonnet
@@ -1101,10 +1134,12 @@ def write_industry_report(
 
     _check()
 
+    from backend.services.perplexity import window_notice
     context = (
         f"【yfinance 실제 데이터】\n{yf_text}\n\n"
         f"【최신 뉴스·트렌드·규제 (Perplexity)】\n"
-        f"{news_text if news_text else NO_NEWS_NOTICE}"
+        # 요청 범위는 `gather_industry_perplexity` 의 "last 30 days".
+        f"{window_notice('30일') + chr(10) + news_text if news_text else NO_NEWS_NOTICE}"
     )
 
     _write = _call_haiku if model_tier == "basic" else _call_sonnet

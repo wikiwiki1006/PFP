@@ -410,7 +410,10 @@ def gather_context(ev: str, market: str = "US") -> str:
     parts = [market_data]
     if news_data.strip():
         parts.append("")
+        from backend.services.perplexity import window_notice
         parts.append("[Latest news & expert commentary — Perplexity]")
+        # 요청한 범위는 `gather_perplexity_context` 의 "last 48 hours" 다.
+        parts.append(window_notice("48시간"))
         parts.append(news_data)
     else:
         # 뉴스 블록을 조용히 빼면, 받아 본 모델은 뉴스가 없다는 사실 자체를

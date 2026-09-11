@@ -375,11 +375,17 @@ def _generate_with_claude(holdings, price_data, news, api_key, log,
                 log(f"웹서치 오류 (계속 진행): {e}")
 
     base_prompt = _build_prompt(holdings, price_data, news, market)
+    from backend.services.perplexity import window_notice
+
     full_prompt = base_prompt
     if extra_context:
-        full_prompt += f"\n\n=== 국내 매체 수집 ===\n{extra_context}"
+        # `_collect_korean_news` 가 요청한 범위.
+        full_prompt += (f"\n\n=== 국내 매체 수집 ===\n{window_notice('48시간')}\n"
+                        f"{extra_context}")
     if web_ctx:
-        full_prompt += f"\n\n=== 웹서치 추가 컨텍스트 ===\n{web_ctx}"
+        # 급등락 원인 질의는 '전일' 을 요청한다.
+        full_prompt += (f"\n\n=== 웹서치 추가 컨텍스트 ===\n{window_notice('전 거래일')}\n"
+                        f"{web_ctx}")
 
     resp = client.messages.create(
         model="claude-sonnet-4-6",
