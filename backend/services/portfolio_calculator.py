@@ -663,7 +663,22 @@ def calculate_metrics(
             pass
 
     return {
+        # 세 값이 서로 맞아떨어지게 싣는다. 예전에는 `total_equity` 가 현금을
+        # 포함하고 `total_cost` 는 제외해서, **`total_return_pct` 를 옆 두
+        # 필드로 재현할 수 없었다.** 실측: equity 75,960,000 / cost 12,090,000
+        # 으로 계산하면 528.29% 인데 표시값은 429.03% 였다 (표시값이 맞다 —
+        # 증권만 본 값이다).
+        #
+        # `total_equity` 는 그대로 둔다. 화면 라벨이 "총 자산" 이고 현금이
+        # 들어가는 것이 사용자 기대이며, `typeof m.total_equity === 'number'`
+        # 가 지표 바 전체의 게이트다. 대신 증권·현금을 따로 실어 소비자가
+        # 검산할 수 있게 한다:
+        #
+        #     total_equity == stock_value + cash_value
+        #     total_return_pct == stock_value / total_cost - 1
         "total_equity":      round(total_equity, 2),
+        "stock_value":       round(stock_equity, 2),
+        "cash_value":        round(_safe_or(cash_val, 0.0), 2),
         "total_cost":        round(total_cost, 2),
         # 계산 불가는 null 로 내려간다 — `_round_keep_none` 이 None 을 통과시킨다.
         # 0 으로 바꾸면 '보합'·'본전'·'변동성 낮음' 이라는 단정이 된다 (§1.3).
