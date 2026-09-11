@@ -1189,11 +1189,17 @@ def generate_daily_brief(
     # 제목 날짜도 같은 세션을 쓴다. 본문은 09-10 장을 서술하는데 제목만
     # 오늘(09-11)이면 독자는 오늘 장이 끝난 줄로 읽는다.
     brief_date = sessions.copy().pop() if len(sessions) == 1 else _today()
+    # 거시지표는 **같은 날짜가 아니다.** 환율·금리는 조회 시점의 현재값이고
+    # 위 표는 확정 종가라, 장중에 돌리면 두 블록이 하루 어긋난다. 실측으로
+    # 09-10 종가 브리프에 09-11 장중 환율 1,347원이 근거로 실렸다. 한쪽만
+    # 날짜를 붙이면 나머지도 같은 날로 읽힌다.
+    _macro_note = " 아래 거시지표는 조회 시점의 현재값이라 이 날짜와 다를 수 있습니다."
     if len(sessions) == 1:
-        session_line = f"\n위 수치는 {brief_date} 종가 기준입니다. 그 날짜로 서술하세요."
+        session_line = (f"\n위 수치는 {brief_date} 종가 기준입니다. 그 날짜로 서술하세요."
+                        + _macro_note)
     elif sessions:
         session_line = (f"\n종목마다 기준일이 다릅니다 ({', '.join(sorted(sessions))})."
-                        " 한 날짜로 뭉뚱그리지 마세요.")
+                        " 한 날짜로 뭉뚱그리지 마세요." + _macro_note)
     else:
         session_line = ""
 
