@@ -20,7 +20,20 @@ export interface PortfolioMetrics {
   total_return_pct: number | null
   /** null = 전일 종가를 못 구해 계산 불가. 0%(보합)와 구분해야 한다. */
   today_change_pct: number | null
-  portfolio_beta: number
+  /** null = 베타를 계산하지 못함. 서버는 원래부터 null 을 줄 수 있었는데
+   *  (portfolio_calculator:812 `_round_keep_none`) 선언만 `number` 였다.
+   *  이 값은 그대로 `getAnalystFeedback` 으로 흘러가는데 그쪽 파라미터는
+   *  이미 `number | null` 이다 — 같은 값이 경로 중간에서만 non-null 이었다. */
+  portfolio_beta: number | null
+  /** 보유도 거래 이력도 없는 사용자 (§1.3 "빈 값을 실패로 취급하지 마라").
+   *
+   *  예전에는 이 상태가 400 이었다. 화면은 **조회 실패**와 **빈 포트폴리오**를
+   *  반드시 구별해야 하는데, 그 구별을 `isError` 에 걸어 두면 서버가 정상
+   *  상태를 오류라고 부르는 동안만 동작한다. 이제 응답 안에 있다.
+   *
+   *  금액 필드는 이때 0 이다 — 아무것도 없는 사용자의 자산은 실제로 0 이다.
+   *  비율 필드는 분모가 없어 null 이다. */
+  is_empty?: boolean
   /** null = VIX 를 읽지 못함. 20 같은 기본값으로 메우면 '변동성 정상'이라는
    *  실측 판단이 되어 버린다. */
   vix: number | null

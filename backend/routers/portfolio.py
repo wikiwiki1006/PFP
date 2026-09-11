@@ -859,7 +859,49 @@ def get_metrics(_auth: dict = Depends(current_user), market: str = Depends(marke
     holdings  = get_holdings(uid, market=market)
     trade_log = get_trade_log(uid, market=market)
     if not holdings and not trade_log:
-        raise HTTPException(status_code=400, detail="보유 종목 없음")
+        # 라벨은 계산기와 **같은 자리**에서 낸다 (portfolio_calculator:811).
+        # 여기서 따로 지어내면 두 경로가 서로 다른 이름을 말하게 된다.
+        from backend.services.markets import benchmark_for, get_market
+        _bench = benchmark_for(market)
+        # 보유가 없는 것은 **새 사용자의 정상 상태**다 (§1.3 마지막 항목).
+        # 예전에는 400 을 던졌는데, 그러면 서버가 정상 상태를 클라이언트
+        # 오류라고 부르고 그 사용자는 화면을 열 때마다 콘솔에 400 을 둘씩
+        # 쌓는다. 같은 파일의 /holdings-detail·/sector-weights·/refresh 는
+        # 이미 200 + 빈 값을 준다 — 그쪽이 맞고 여기가 틀렸다.
+        #
+        # 금액은 **0 이 참이다.** 아무것도 없는 사용자의 자산은 실제로 0 이지,
+        # "모름" 이 아니다. 반대로 수익률·베타는 분모가 없어 계산 불가이므로
+        # null 이다. 0 으로 채우면 '본전'·'시장과 같은 변동성' 이라는 단정이
+        # 된다 (§1.3 (a)).
+        #
+        # `is_empty` 를 따로 싣는 이유: 소비자가 0 을 보고 "빈 포트폴리오" 와
+        # "전량 매도해 평가액이 0" 을 구별할 수 없다. 후자는 trade_log 가
+        # 있으므로 이 분기로 오지 않지만, 그 구별을 값 추론에 맡기면 나중에
+        # 조건이 바뀌었을 때 조용히 틀린다.
+        return {
+            "is_empty":           True,
+            "total_equity":       0.0,
+            "stock_value":        0.0,
+            "cash_value":         0.0,
+            "total_cost":         0.0,
+            "total_return_pct":   None,
+            "today_change_pct":   None,
+            "perf_1w":            None,
+            "perf_1m":            None,
+            "portfolio_beta":     None,
+            "alpha_vs_benchmark": None,
+            # VIX 는 포트폴리오와 무관한 시장 지표지만, 아무것도 없는 사용자를
+            # 위해 외부 조회를 돌리지 않는다. 값이 없다는 사실만 남긴다.
+            "vix":                None,
+            "as_of":              None,
+            "change_counted":     0,
+            "change_holdings":    0,
+            "change_stale":       [],
+            # 벤치마크는 보유와 무관하게 시장이 정한다. 빈 포트폴리오라고
+            # 라벨까지 지울 이유가 없다 — 차트 범례가 '벤치마크' 로 떨어진다.
+            "benchmark":          _bench,
+            "benchmark_label":    get_market(market).indices.get(_bench, _bench),
+        }
     # 과거 매도 종목 포함 → 전량 매도 이후에도 수익률 계산 가능
     traded_tickers = list({
         str(tr.get("ticker", "")).upper()
@@ -933,7 +975,10 @@ def get_equity_curve(
     holdings  = get_holdings(uid, market=market)
     trade_log = get_trade_log(uid, market=market)
     if not holdings and not trade_log:
-        raise HTTPException(status_code=400, detail="보유 종목 없음")
+        # /metrics 와 같은 이유로 200 + 빈 목록이다. 곡선은 원래 레코드
+        # 목록이므로 "그릴 점이 없다" 가 그대로 `[]` 다 — 별도 표식이
+        # 필요 없고, /holdings-detail 이 이미 같은 모양을 쓴다.
+        return []
 
     # 과거 매도 종목도 가격 데이터 포함 — close_df에 없으면 해당 기간 수익률이 0으로 계산됨
     traded_tickers = list({
