@@ -72,7 +72,23 @@ port_busy() {
 }
 for p in "$BE_PORT" "$FE_PORT"; do
   if port_busy "$p"; then
-    echo "포트 $p 가 이미 사용 중입니다. 다른 --slot 을 쓰세요."
+    echo "포트 $p 가 이미 사용 중입니다."
+    # 대부분은 '다른 창' 이 아니라 **자기 이전 실행의 고아**다. 아래 trap 은
+    # taskkill //T 로 트리째 정리하지만, 창을 닫거나 밖에서 죽이면 trap 이
+    # 아예 안 돈다. 그러면 uvicorn --reload 의 자식이 소켓을 물고 남는다.
+    #
+    # 그 상태에서 '다른 슬롯을 쓰라' 는 조언은 틀렸다. 고아가 **낡은 코드로
+    # 계속 응답**하므로, 슬롯을 옮기면 옛 서버가 살아 있는 채로 새 서버가
+    # 하나 더 뜬다. 실제로 한 창이 지운 라우트가 계속 200 을 주는 것을 보고
+    # 멀쩡한 삭제를 되돌릴 뻔했다.
+    if command -v netstat >/dev/null 2>&1 && command -v taskkill >/dev/null 2>&1; then
+      pids=$(netstat -ano -p tcp 2>/dev/null              | grep -E "[:.]$p[[:space:]].*LISTENING" | awk '{print $NF}' | sort -u)
+      for pid in $pids; do
+        echo "  PID $pid 이 물고 있습니다:  taskkill //PID $pid //T //F"
+      done
+      echo "  //T 를 빼지 마세요 — 부모만 죽고 --reload 자식이 소켓을 물고 남습니다."
+    fi
+    echo "  다른 창이 정말 쓰고 있는 것이면 --slot 을 바꾸세요."
     exit 1
   fi
 done
@@ -192,6 +208,16 @@ fi
 #
 # 둘 다 **조용히** 실패한다. 프로세스는 --reload 를 달고 정상 기동하고 로그에
 # "Started reloader process ... using WatchFiles" 까지 찍힌다.
+#
+# 더 나쁜 형태가 하나 더 관측됐다. 파일을 **통째로 다시 쓰면**(읽어서 문자열
+# 바꾸고 전체 덮어쓰기 — 에디터의 atomic save 와 같은 모양) 두 가지가 갈린다:
+#
+#   한 파일 → "detected changes ... Reloading" 은 찍히는데 그 뒤에
+#             "Application startup complete" 가 없다. 요청은 옛 코드로 응답한다.
+#   다른 파일 → reload 메시지 자체가 안 나온다.
+#
+# 앞의 것이 특히 위험하다 — **로그가 리로드했다고 말하는데 안 했다.** 로그를
+# 근거로 삼으면 검증이 반대로 답한다.
 #
 # 실제로 09:36 에 띄운 서버가 오후까지 09:36 코드를 서빙했고, 그날 고친 것을
 # 브라우저로 확인한 것이 전부 옛 코드였다. 고친 것을 화면에서 확인했다고
