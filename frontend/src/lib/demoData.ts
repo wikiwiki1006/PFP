@@ -33,6 +33,12 @@ export const DEMO_METRICS: PortfolioMetrics = {
   benchmark_label:  'S&P 500',
   as_of:            null,
   market_open:      false,
+  // 일변동 집계 근거. 데모는 전 종목이 반영된 상태로 둔다 — 미리보기에서
+  // "일부만 반영" 경고가 뜨면 방문자는 그게 데모의 한계인지 서비스의 상태인지
+  // 구분할 수 없다. DEMO_HOLDINGS_DETAIL 의 CASH 제외 6종목과 맞춘다.
+  change_counted:   6,
+  change_holdings:  6,
+  change_stale:     0,
 }
 
 export const DEMO_HOLDINGS_DETAIL: HoldingDetail[] = [

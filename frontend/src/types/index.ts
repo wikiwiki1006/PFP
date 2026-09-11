@@ -24,6 +24,14 @@ export interface PortfolioMetrics {
   portfolio_beta_unavailable?: boolean
   /** 일변동률의 기준 거래일 (YYYY-MM-DD). 장 외에는 마지막 확정 거래일. */
   as_of?: string | null
+  /** 일변동 집계에 **실제로 반영된** 종목 수. 집계는 부분 정보로도 그럴듯한
+   *  숫자를 낸다 — 10종목이 전부 +10% 오른 날 1종목만 계산되면 +0.92% 가
+   *  나오고, 유한하고 범위도 그럴듯해 어떤 가드에도 걸리지 않는다. */
+  change_counted?: number
+  /** 보유 종목 수 (CASH 제외). counted 와 다르면 일부만 반영된 것이다. */
+  change_holdings?: number
+  /** 자기 시장의 마지막 확정 세션보다 뒤처진 종목 수. */
+  change_stale?: number
   /** 미국 증시 개장 여부 — true면 today_change_*가 실시간 값이다. */
   market_open?: boolean
 }

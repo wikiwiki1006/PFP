@@ -34,7 +34,7 @@ import {
   DEMO_SECTOR_WEIGHTS, DEMO_ANALYST_FEEDBACK, DEMO_NEWS, DEMO_EARNINGS,
 } from '@/lib/demoData'
 import { formatPrice, formatCompact, formatMoney, marketSymbol,
-         MARKETS, moneyInputProps } from '@/lib/market'
+         MARKETS, moneyInputProps, type Market } from '@/lib/market'
 import { useMarket } from '@/lib/useMarket'
 import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
 import TickerLabel from '@/components/TickerLabel'
@@ -243,6 +243,14 @@ const fmtCurveDate = (v: string) => {
 // 표시 이름은 /metrics 의 benchmark_label 에서 온다.
 type BenchmarkMode = 'benchmark' | 'nasdaq' | 'both'
 
+// 2차 비교 지수는 **프론트가 티커를 직접 지정해 직접 그린다**(getIndexPrices).
+// 주 벤치마크와 달리 서버가 관여하지 않으므로 이름도 여기서 갖는다 — 생산자가
+// 이름을 갖는 게 일관되고, 서버에 아무도 안 쓰는 필드를 늘리지 않는다.
+const SECONDARY_INDEX: Record<Market, { ticker: string; label: string }> = {
+  US: { ticker: '^IXIC', label: 'NASDAQ' },
+  KR: { ticker: '^KQ11', label: '코스닥' },
+}
+
 type CurvePoint = {
   date: string
   /** undefined = 그 날짜의 포트폴리오 수익률을 모른다 (시세 이력 시작 전 등).
@@ -320,9 +328,24 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
 
   const rangeToPeriod = { '1M': '3mo', '3M': '6mo', '1Y': '2y', 'ALL': 'max' } as const
 
+  // 2차 비교 지수. 주 벤치마크와 **같은 축에 같은 역할로** 그려지므로 시장을
+  // 따라가야 한다 — 한국 포트폴리오의 성과를 NASDAQ 에 견주는 근거는 S&P 에
+  // 견주는 근거와 다르지 않고, 그 S&P 는 이미 코스피로 갈랐다.
+  //
+  // 코스닥이 완벽한 대응물은 아니다. 나스닥보다 소형주·투기 비중이 크다.
+  // 다만 "성장·기술 쪽 2차 지수" 라는 역할이 가장 가깝고 대안이 없다.
+  //
+  // VIX 와 다르게 보는 이유: VIX 는 별도 타일의 시장 분위기 지표라 한국
+  // 투자자도 실제로 보지만, 이건 성과 비교선이다.
+  const market = useMarket()
+  const secondary = SECONDARY_INDEX[market]
   const nasdaqQ = useQuery({
-    queryKey: ['nasdaq-prices', rangeToPeriod[range]],
-    queryFn:  () => getIndexPrices('^IXIC', rangeToPeriod[range]),
+    // 키에 **티커**를 넣는다. 시장이 아니라 티커다 — 이 결과가 실제로
+    // 의존하는 것이 티커이고, 나중에 사용자가 비교 지수를 직접 고르게 되면
+    // 그때도 맞다. 티커가 빠진 채로 시장별 전환만 하면 시장을 바꿔도
+    // react-query 가 같은 키를 보고 이전 지수 데이터를 돌려준다 (§1.1).
+    queryKey: ['secondary-index', secondary.ticker, rangeToPeriod[range]],
+    queryFn:  () => getIndexPrices(secondary.ticker, rangeToPeriod[range]),
     enabled:  bm !== 'benchmark',
     staleTime: 300_000,
   })
@@ -396,10 +419,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
         // 바로 아래 sp 는 이미 undefined 로 두고 있었다. 값을 모르는 구간은
         // 선을 끊는 게 맞다.
         port:         rebase(d.port, basePort),
-        // 백엔드가 키를 바꾸는 중이라 옛 이름도 받는다. pfp-76 이 바꾼 뒤
-        // `?? d.sp` 를 지운다 — 남겨 두면 그게 다음 사람에게 "둘 다 올 수
-        // 있다" 는 계약으로 읽힌다.
-        benchmark_pct: rebase(d.benchmark_pct ?? d.sp, baseBench),
+        benchmark_pct: rebase(d.benchmark_pct, baseBench),
         nasdaq:       nv,
         total_equity: d.total_equity ?? undefined,
         cash_flow:    d.cash_flow ?? undefined,
@@ -471,7 +491,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
 
   const portPct = lastChange(portAll, 'port')
 
-  const benchRawAll = allRawData.filter((d: any) => (d.benchmark_pct ?? d.sp) != null)
+  const benchRawAll = allRawData.filter(d => d.benchmark_pct != null)
   const benchPct = lastChange(benchRawAll, 'benchmark_pct')
 
   const nqFiltered = data.filter(d => d.nasdaq != null)
@@ -479,7 +499,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
 
   const BM_BTNS: { key: BenchmarkMode; label: string; color: string }[] = [
     { key: 'benchmark', label: benchLabel, color: '#dc143c' },
-    { key: 'nasdaq', label: 'NQ',   color: '#a78bfa' },
+    { key: 'nasdaq', label: secondary.label, color: '#a78bfa' },
     { key: 'both',   label: '전체', color: '#f59e0b' },
   ]
 
@@ -586,7 +606,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
           <div className="flex items-center justify-between gap-3 mb-0.5">
             <span className="flex items-center gap-1.5">
               <span style={{ color: '#a78bfa' }}>●</span>
-              <span className="text-[#94a3b8] text-[10px]">NASDAQ</span>
+              <span className="text-[#94a3b8] text-[10px]">{secondary.label}</span>
             </span>
             <span className="font-mono text-[#a78bfa]">{fp(d.nasdaq, 2)}</span>
           </div>
@@ -709,7 +729,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
                 <line x1="14" y1="2.5" x2="20" y2="2.5" stroke="#a78bfa" strokeWidth="1.5" />
               </svg>
               <span className="text-sm font-mono text-[#a78bfa] tabular-nums">
-                NASDAQ {fp(nqPct, 2)}
+                {secondary.label} {fp(nqPct, 2)}
               </span>
             </div>
           )}
