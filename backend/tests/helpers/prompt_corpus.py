@@ -194,9 +194,23 @@ def _daily_brief_prompt() -> list[Prompt]:
 
 
 def build_corpus() -> list[Prompt]:
-    """빌더 전부의 프롬프트. 새 빌더가 생기면 여기에 더한다."""
+    """빌더 전부의 프롬프트. 새 빌더가 생기면 여기에 더한다.
+
+    **종목명 조회를 막는다.** `_company_names` 가 네이버에서 한글 종목명을
+    받아 오는데, 이 코퍼스는 모듈 수준에서 만들어지므로 그 호출이 **수집할
+    때마다** 나갔다. 두 가지가 나빴다 — 프롬프트 내용이 바깥 응답에 따라
+    달라져 비결정적이었고, 다섯 창이 게이트를 돌릴 때마다 같이 나갔다.
+
+    코드를 이름으로 바꾸는 것은 이 규칙들이 재는 대상이 아니다. 고정값을 준다.
+    """
     from backend.services import ai_analysis
 
+    with mock.patch.object(ai_analysis, "_company_names",
+                           lambda tickers: {str(t): str(t) for t in tickers}):
+        return _build_corpus_offline(ai_analysis)
+
+
+def _build_corpus_offline(ai_analysis) -> list[Prompt]:
     out = [
         Prompt("ai_analysis._format_portfolio", "KR",
                ai_analysis._format_portfolio(KR_HOLDINGS, "KR")),

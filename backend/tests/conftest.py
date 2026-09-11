@@ -20,11 +20,88 @@ DB 를 둔 것이 그걸 가능하게 하려는 것이다.
 """
 from __future__ import annotations
 
+import socket
 import uuid
 
 import pytest
 
 import backend.db as db
+
+# ── 바깥 네트워크를 막는다 ─────────────────────────────────────────────────────
+#
+# 테스트가 조용히 인터넷을 타면 두 가지가 동시에 나빠진다.
+#
+# **결과가 비결정적이 된다.** 받아 온 값이 프롬프트나 단언에 섞이면, 같은
+# 코드가 날마다 다른 것을 검사한다.
+#
+# **그리고 다섯 창이 같이 죽는다.** yfinance 는 IP 단위로 레이트리밋을 걸고
+# (§7.7), 게이트를 돌릴 때마다 다섯 창이 같이 나가면 한 창이 걸릴 때 전부
+# 걸린다.
+#
+# 이걸 넣게 된 계기가 정확히 그 형태였다. `get_sector_changes` 가 빈 결과를
+# 주는지 재는 테스트에서 `get_close_df` 만 막았는데, 그 함수는 그걸 쓰지 않고
+# `_get_sector_etf_df_1mo` 를 쓴다. 그래서 **진짜 섹터 등락률을 받아 왔다.**
+# 단언이 `== {}` 라 실패로 드러났지, 조금만 느슨했으면 매 실행마다 조용히
+# 나가면서 통과했을 것이다.
+#
+# 막고 재봤더니 전체 스위트가 **바깥으로 18번** 나가고 있었고 그래도 전부
+# 통과했다 — 실패가 전부 폴백에 흡수돼서 아무도 몰랐다. 그래서 이 가드는
+# 지금 아무 테스트도 깨뜨리지 않으면서 그 부류를 통째로 막는다.
+#
+# localhost 는 연다. 실DB 테스트가 로컬 도커 postgres 를 쓴다.
+_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0", ""}
+
+
+class OutboundBlocked(RuntimeError):
+    """테스트가 바깥으로 연결을 시도했다."""
+
+
+def _host_of(address) -> str:
+    if isinstance(address, tuple) and address:
+        return str(address[0])
+    return str(address)
+
+
+_real_connect = socket.socket.connect
+_real_connect_ex = socket.socket.connect_ex
+
+
+def _guard(self, address, *args, **kwargs):
+    host = _host_of(address)
+    if host not in _LOCAL_HOSTS:
+        raise OutboundBlocked(
+            f"a test tried to reach {host}. Tests must not use the network: "
+            "the result stops being deterministic, and five windows running "
+            "the gate together will trip the same rate limit. Mock the entry "
+            "point this code path actually uses -- note that two functions "
+            "with similar names often do not share one. "
+            "(테스트가 바깥으로 나갔다.)"
+        )
+    return _real_connect(self, address, *args, **kwargs)
+
+
+def _guard_ex(self, address, *args, **kwargs):
+    host = _host_of(address)
+    if host not in _LOCAL_HOSTS:
+        raise OutboundBlocked(f"a test tried to reach {host}")
+    return _real_connect_ex(self, address, *args, **kwargs)
+
+
+def pytest_configure(config):
+    """**수집 전에** 건다.
+
+    autouse 픽스처로 하면 수집이 끝난 뒤에야 걸린다. 그런데 모듈 수준에서
+    무언가를 만드는 테스트 파일이 있으면(이 리포의 프롬프트 코퍼스가 그렇다)
+    그 호출은 import 시점, 즉 **픽스처보다 먼저** 일어난다. 실제로 그 코퍼스가
+    수집할 때마다 네이버에 붙고 있었고, 픽스처 방식으로는 그게 안 잡혔다.
+    """
+    socket.socket.connect = _guard
+    socket.socket.connect_ex = _guard_ex
+
+
+def pytest_unconfigure(config):
+    socket.socket.connect = _real_connect
+    socket.socket.connect_ex = _real_connect_ex
 
 # 원격이면 아무것도 하지 않는다. Neon 에는 실사용자 데이터가 있고
 # (users 12 · holdings 30 · reports 46) 역할 창이 붙을 곳이 아니다.
