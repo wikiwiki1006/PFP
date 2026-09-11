@@ -417,8 +417,11 @@ def _priced_holdings(
     sparse_df: pd.DataFrame | None,
     live: dict | None = None,
     now=None,
-) -> dict[str, PricedRow]:
-    """보유 종목의 현재가. `sparse_df` 로 값을 못 내는 티커는 **빼고** 돌려준다.
+    fallback_df: pd.DataFrame | None = None,
+) -> tuple[dict[str, PricedRow], set[str]]:
+    """보유 종목의 현재가와, 그중 **종가로 채운** 티커 집합.
+
+    어디서도 값을 못 내는 티커는 결과에서 빼고 돌려준다.
 
     `/metrics` 의 총자산과 `/holdings-detail` 의 행이 같은 가격을 쓰게 하려고
     한 곳에 둔다. 예전에는 총자산만 종가 프레임(`close_df.ffill().iloc[-1]`)에서
@@ -431,27 +434,43 @@ def _priced_holdings(
     한쪽만 실시간이 되면서 벌어진 것이므로, 값을 한 곳에서 만들어 다시 갈라질
     수 없게 한다. 두 함수가 같은 프레임·같은 `live`·같은 `now` 를 받으면
     티커별 가격이 정의상 동일하다.
+
+    `fallback_df` — 희소 프레임에 관측치가 없는 티커를 채울 **ffill 된 종가
+    프레임**. 없으면 그 티커는 결과에서 빠지고, 호출자가 가격 0 으로 떨어뜨린다
+    (거래정지·상장폐지·수집 실패 종목이 ₩0 행으로 표시되는 형태). 넘기면
+    마지막 확정 종가로 채워져 그 행도 실제 금액을 갖는다.
     """
     from backend.services.price_series import daily_change, last_price
 
     out: dict[str, PricedRow] = {}
-    if sparse_df is None or sparse_df.empty:
-        return out
+    filled: set[str] = set()
     live = live or {}
+    have_sparse = sparse_df is not None and not sparse_df.empty
+    have_fallback = fallback_df is not None and not fallback_df.empty
+    if not have_sparse and not have_fallback:
+        return out, filled
 
     for t in holdings:
         if t == "CASH":
             continue
-        dc = daily_change(sparse_df, t, live.get(t), now)
+        dc = daily_change(sparse_df, t, live.get(t), now) if have_sparse else None
         if dc is not None:
             out[t] = (dc.price, dc.prev_close, dc.chg_pct, dc.as_of, dc.is_live)
             continue
         # 관측치가 1개뿐이라 변동률을 못 구해도 가격은 확보한다 — 여기서
         # 빠뜨리면 시가총액·비중·손익이 전부 왜곡된다.
-        p = last_price(sparse_df, t, live.get(t), now)
+        p = last_price(sparse_df, t, live.get(t), now) if have_sparse else None
         if p:
             out[t] = (p, p, None, None, bool(live.get(t)))
-    return out
+            continue
+        if have_fallback and t in fallback_df.columns:
+            # 종가 프레임으로 채운 가격. 일변동률·기준일은 **모른다** —
+            # 0.0 을 넣으면 '보합'이 되므로 None 으로 남긴다 (§1.3).
+            fv = _safe_or(fallback_df[t].iloc[-1], 0.0)
+            if fv:
+                out[t] = (fv, fv, None, None, False)
+                filled.add(t)
+    return out, filled
 
 
 # ── 핵심 지표 계산 ─────────────────────────────────────────────────────────────
@@ -545,26 +564,30 @@ def calculate_metrics(
     # 종가에 머물러 화면 아래 보유 목록 합계와 어긋난다 (실측 2.4%).
     # `raw_df` 를 안 주는 호출자(analyst-feedback·리포트)는 종가 프레임으로
     # 폴백한다 — 그쪽은 비교할 표가 화면에 없다.
-    priced = _priced_holdings(holdings, raw_df, live, now)
-    unpriced = [t for t in holdings
-                if t != "CASH" and t not in priced and t in close_df.columns]
-    if priced and unpriced:
-        # 총자산에서 이 종목들을 빼면 자산이 줄어든 것처럼 보인다. 종가로
-        # 채우되, 그 사실을 남긴다 — `/holdings-detail` 은 같은 티커를 ₩0 으로
-        # 표시하므로 표 합계와 총자산이 이 금액만큼 어긋난다.
+    #
+    # 종가 프레임을 `fallback_df` 로 넘긴다 — 희소 프레임에 관측치가 없는
+    # 종목까지 총자산에 들어간다. 그걸 빼면 자산이 조용히 줄어든다.
+    priced, filled = _priced_holdings(holdings, raw_df, live, now,
+                                      fallback_df=price_df)
+    if filled and raw_df is not None and not raw_df.empty:
+        # `/holdings-detail` 이 종가 프레임을 받지 않으면 그 표는 이 종목을
+        # ₩0 행으로 표시하므로, 표 합계와 총자산이 이 금액만큼 어긋난다.
         logger.warning(
-            "실시간 프레임에 없는 보유 종목 %s — 총자산은 마지막 종가로 채웠다. "
-            "보유 목록 행은 0 으로 표시되므로 표 합계와 총자산이 그만큼 어긋난다.",
-            unpriced,
+            "실시간 프레임에 관측치가 없어 마지막 종가로 채운 보유 종목 %s — "
+            "`/holdings-detail` 이 종가 프레임을 받지 않는 동안 그 표는 이 종목을 "
+            "0 으로 표시하므로 표 합계와 총자산이 그만큼 어긋난다.",
+            sorted(filled),
         )
+
+    value_tickers = ([t for t in holdings if t != "CASH" and t in priced]
+                     if priced else stock_tickers)
 
     def _value_price(t):
         row = priced.get(t)
         return row[0] if row is not None else _price(t)
 
-    value_tickers = ([t for t in holdings if t != "CASH" and (t in priced or t in unpriced)]
-                     if priced else stock_tickers)
-    stock_equity = _safe_or(sum(_value_price(t) * holdings[t]["q"] for t in value_tickers), 0.0)
+    stock_equity = _safe_or(sum(_value_price(t) * holdings[t]["q"]
+                                for t in value_tickers), 0.0)
     stock_cost   = _safe_or(sum(_safe_or(holdings[t]["avg"], 0.0) * _safe_or(holdings[t]["q"], 0.0)
                                 for t in value_tickers), 0.0)
 
@@ -803,6 +826,7 @@ def get_holdings_detail(
     close_df: pd.DataFrame,
     live: dict | None = None,
     now=None,
+    fallback_df: pd.DataFrame | None = None,
 ) -> list[dict]:
     """보유 종목 상세. close_df 는 fill=False 로 받은 **희소(실제 관측치) 프레임**이어야 한다.
 
@@ -811,13 +835,20 @@ def get_holdings_detail(
       · 장 외 — 마지막 확정 거래일 종가 vs 그 전 거래일 종가
     주말 행은 여기서 제거하지 않는다 — 암호화폐·환율의 실제 주말 거래를 보존해야 하고,
     미국 주식의 비거래일 필터링은 primitive 가 캘린더 기준으로 수행한다.
+
+    `fallback_df` — 선택. `_portfolio_close_df` 로 만든 **ffill 된 2년 종가
+    프레임**을 넘기면, 희소 프레임에 최근 관측치가 없는 종목(거래정지·수집
+    실패)도 마지막 확정 종가로 값을 갖는다. 안 넘기면 그 종목은 지금처럼
+    가격 0 · 평가액 0 행이 된다 — `calculate_metrics` 는 이 프레임을 항상
+    넘기므로, 안 넘기는 동안은 그 종목 금액만큼 표 합계가 총자산보다 작다.
     """
-    if close_df.empty:
+    if close_df.empty and (fallback_df is None or fallback_df.empty):
         return []
 
     # 가격은 `calculate_metrics` 와 **같은 출처**에서 온다. 한쪽만 실시간이
     # 되면서 "총 자산" 과 이 표의 합계가 갈라진 적이 있다 (실측 2.4%).
-    ticker_px = _priced_holdings(holdings, close_df, live, now)
+    ticker_px, _ = _priced_holdings(holdings, close_df, live, now,
+                                    fallback_df=fallback_df)
 
     total_equity = sum(
         ticker_px.get(t, (0.0,))[0] * _safe_or(info.get("q", 0), 0.0)
