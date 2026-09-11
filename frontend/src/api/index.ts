@@ -6,7 +6,7 @@ import type {
   SectorWeights, Trade, TradeForm, MarketSnapshot, SectorData,
   MacroData, NewsItem, EarningsEvent,
   ScanResult, PairsSignal, MeanReversionSignal, MomentumSignal,
-  MarketRegime, OptimizationResult,
+  MarketRegime,
   MacroModes, MacroAnalysisResult, AnalystFeedback,
   DailyBriefResult, ReportFile, Industry, EquityReportResult, IndustryReportResult,
   MarketSituation, SignalScanResult, SignalScoreResult, TechnicalChartResult, PairsAutoResult,
@@ -206,12 +206,11 @@ export const getPairsAuto = async (ticker: string, thresholdPct = 5, topN = 5): 
   (await api.get('/api/signals/pairs-auto', { params: { ticker, threshold_pct: thresholdPct, top_n: topN } })).data
 
 // ── Optimizer ──────────────────────────────────────────────────────────────────
-export const runMaxSharpe = async (body?: object): Promise<OptimizationResult> =>
-  (await api.post('/api/optimizer/max-sharpe', body || {})).data
-
-export const runBlackLitterman = async (body?: object): Promise<OptimizationResult> =>
-  (await api.post('/api/optimizer/black-litterman', body || {})).data
-
+// `/api/optimizer/max-sharpe` · `/black-litterman` 의 래퍼가 여기 있었다.
+// 호출부가 0곳이었다 — 화면은 `/ai-optimize-job` 으로만 돈다.
+//
+// **엔드포인트는 살아 있다.** 여기서 지운 것은 프론트의 래퍼뿐이다.
+// 죽은 래퍼를 남기면 다음 사람이 그걸 보고 "이 경로는 쓰인다" 로 읽는다.
 export const runAIOptimize = async (body: {
   tickers?: string[]
   period?: string

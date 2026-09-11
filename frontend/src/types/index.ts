@@ -444,29 +444,16 @@ export interface PairsAutoResult {
 }
 
 // Optimizer Types
-export interface FrontierPoint {
-  return: number
-  volatility: number
-}
-
-export interface OptimizationResult {
-  weights: { [ticker: string]: number }
-  expected_return: number
-  volatility: number
-  /** null = 변동성이 0 이라 **정의되지 않음**. 0 이 아니다 — 0 은 "위험조정
-   *  수익이 없다" 는 판정이고 화면에서 최악으로 칠해진다.
-   *  sortino_ratio·max_drawdown 과 같은 규약이다. */
-  sharpe_ratio: number | null
-  method: string
-  frontier: FrontierPoint[]
-  equal_weight_sharpe: number
-  equal_weight_return: number
-  equal_weight_volatility: number
-  implied_returns?: { [ticker: string]: number }
-  posterior_returns?: { [ticker: string]: number }
-  views_applied?: boolean
-  has_views?: boolean
-}
+//
+// `OptimizationResult` 와 그것만 쓰던 `FrontierPoint` 가 여기 있었다.
+// `/api/optimizer/max-sharpe` · `/black-litterman` 응답의 선언인데 그 둘을
+// 부르는 화면이 없다 — 최적화 화면은 `AIOptimizationResult`(아래)를 쓰는
+// `/ai-optimize-job` 으로만 돈다.
+//
+// **엔드포인트는 살아 있다.** 그쪽 응답 계약은 백엔드에 남는다. 여기 두면
+// 아무도 검증하지 않는 선언이 되고, 검증되지 않는 선언은 조용히 낡는다 —
+// 실제로 `equal_weight_*` 셋이 서버는 null 을 낼 수 있게 바뀐 뒤에도
+// `number` 로 남아 있었고, 쓰는 곳이 없어서 아무도 몰랐다.
 
 // AI Portfolio Optimization Types
 export interface AIView {
