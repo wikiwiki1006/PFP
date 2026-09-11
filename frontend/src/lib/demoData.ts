@@ -184,27 +184,50 @@ export const DEMO_NEWS: NewsItem[] = [
  * 금액은 실제 한국 개인 계좌 규모(1.7억)로 두었다. 종목·평단은 실재 종목의
  * 대략적인 값이고, 미리보기용 예시임은 LockedPreview 가 밝힌다.
  */
+/* 숫자는 아래 보유 표에서 **계산해 넣었다.** 데모라도 불변식은 지킨다:
+ *
+ *   total_equity   == 증권 평가액 합 + 현금        170,895,000
+ *   total_cost     == qty × avg_cost 합             71,000,000
+ *   total_return_pct == 증권/원가 - 1                  121.68%
+ *   today_change_pct == 비중가중 chg_pct                 0.07%
+ *   change_counted == change_holdings == CASH 제외 종목 수   4
+ *
+ * 처음에는 이 값들을 눈대중으로 적고 `...DEMO_METRICS` 로 나머지를 상속했다.
+ * 그 결과 총 자산이 표와 1,505,000 어긋나고 원가가 두 배였으며, 수익률·
+ * 일변동·베타·알파가 전부 **미국 데이터에서 나온 수치**였다. 이 두 필드를
+ * 넣는 목적이 "소비자가 검산할 수 있게" 인데 데모가 그 검산을 통과 못 하면,
+ * 나중에 누가 자기 계산이 틀렸다고 읽는다. 흐림 뒤라 신호도 없다 (§1.3).
+ */
 const DEMO_METRICS_KR: PortfolioMetrics = {
   ...DEMO_METRICS,
-  total_equity:     172_400_000,
-  total_cost:       140_000_000,
+  total_equity:      170_895_000,
+  total_cost:         71_000_000,
+  total_return_pct:      121.68,
+  today_change_pct:        0.07,
   // stock_value·cash_value 는 서버가 주는데 PortfolioMetrics 에 선언이 없다
-  // (develop 에 넘겼다). 선언이 생기면 여기도 채운다 — 158,900,000 / 13,500,000.
+  // (develop 에 넘겼다). 선언이 생기면 157,395,000 / 13,500,000 을 넣는다.
+  portfolio_beta:          0.92,   // 코스피 대비
+  alpha_vs_benchmark:      6.40,
+  perf_1w:                 1.80,
+  perf_1m:                 4.20,
+  // 표는 CASH 제외 4종목이다. 미국 데모는 6종목이라 상속하면 표와 어긋난다.
+  change_counted:             4,
+  change_holdings:            4,
   benchmark:        '^KS11',
   benchmark_label:  '코스피',
 }
 
 const DEMO_HOLDINGS_DETAIL_KR: HoldingDetail[] = [
   { ticker: '005930.KS', name: '삼성전자',   qty: 200, avg_cost: 71_900,  current_price: 260_250,
-    market_value: 52_050_000, pnl: 37_670_000, pnl_pct: 261.96, sector: 'Technology',        weight: 30.2, chg_pct: -0.19 },
+    market_value: 52_050_000, pnl: 37_670_000, pnl_pct: 261.96, sector: 'Technology',        weight: 30.5, chg_pct: -0.19 },
   { ticker: '000660.KS', name: 'SK하이닉스', qty:  20, avg_cost: 245_000, current_price: 1_807_500,
-    market_value: 36_150_000, pnl: 31_250_000, pnl_pct: 637.76, sector: 'Technology',        weight: 21.0, chg_pct:  1.24 },
+    market_value: 36_150_000, pnl: 31_250_000, pnl_pct: 637.76, sector: 'Technology',        weight: 21.2, chg_pct:  1.24 },
   { ticker: '005380.KS', name: '현대차',     qty: 120, avg_cost: 198_500, current_price: 241_000,
-    market_value: 28_920_000, pnl:  5_100_000, pnl_pct:  21.41, sector: 'Consumer Cyclical', weight: 16.8, chg_pct:  0.62 },
+    market_value: 28_920_000, pnl:  5_100_000, pnl_pct:  21.41, sector: 'Consumer Cyclical', weight: 16.9, chg_pct:  0.62 },
   { ticker: '035420.KS', name: 'NAVER',      qty: 150, avg_cost: 186_000, current_price: 268_500,
-    market_value: 40_275_000, pnl: 12_375_000, pnl_pct:  44.35, sector: 'Communication',     weight: 23.4, chg_pct: -1.03 },
+    market_value: 40_275_000, pnl: 12_375_000, pnl_pct:  44.35, sector: 'Communication',     weight: 23.6, chg_pct: -1.03 },
   { ticker: 'CASH', qty: 13_500_000, avg_cost: 1, current_price: 1, market_value: 13_500_000,
-    pnl: 0, pnl_pct: 0, sector: 'Cash', weight: 7.8, chg_pct: 0 },
+    pnl: 0, pnl_pct: 0, sector: 'Cash', weight: 7.9, chg_pct: 0 },
 ]
 
 const DEMO_HOLDINGS_RAW_KR: HoldingsMap = {
@@ -216,10 +239,10 @@ const DEMO_HOLDINGS_RAW_KR: HoldingsMap = {
 }
 
 const DEMO_SECTOR_WEIGHTS_KR: SectorWeights = {
-  Technology:          51.2,
-  Communication:       23.4,
-  'Consumer Cyclical': 16.8,
-  Cash:                 7.8,
+  Technology:          51.7,   // 삼성전자 30.5 + SK하이닉스 21.2
+  Communication:       23.6,
+  'Consumer Cyclical': 16.9,
+  Cash:                 7.9,
 }
 
 /* ── 시장별 선택자 ────────────────────────────────────────────────────────────
