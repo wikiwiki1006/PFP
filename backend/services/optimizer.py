@@ -17,8 +17,12 @@ except ImportError:
     _HAS_PYPFOPT = False
 
 
-def _ratio_or_none(ratio: float | None, vol: float) -> "float | None":
-    """분모(변동성)가 너무 작으면 비율을 내보내지 않는다.
+def _ratio_or_none(ratio: float | None, vol: float) -> "tuple[float | None, str | None]":
+    """분모(변동성)가 너무 작으면 비율을 내보내지 않는다. `(값, 이유코드)`.
+
+    이유를 값과 **같은 자리에서** 만든다 — 호출부가 따로 판정하면 세 곳이
+    각자 다른 이유를 붙일 수 있고, 그게 이 파일에서 하한이 셋으로 갈렸던
+    원인이다.
 
     `vol > 0` 으로만 걸렀을 때 무엇이 나갔는지 실측했다. 매일 정확히 +0.05%
     오르는 결정론적 입력(연 +13.42%)의 동일비중 변동성은 **0 이 아니라
@@ -35,11 +39,15 @@ def _ratio_or_none(ratio: float | None, vol: float) -> "float | None":
 
     from backend.services.portfolio_calculator import MIN_VOL_FOR_RATIO
 
-    if ratio is None or vol is None:
-        return None
-    if not math.isfinite(float(vol)) or float(vol) <= MIN_VOL_FOR_RATIO:
-        return None
-    return None if not math.isfinite(float(ratio)) else float(ratio)
+    # 분모를 **먼저** 본다. 호출자가 이미 None 을 만들어 넘겼어도 이유는
+    # 분모에서 나오기 때문이다 (`_max_sharpe_numpy` 가 그 형태다).
+    if vol is None or not math.isfinite(float(vol)):
+        return None, "no_volatility"
+    if float(vol) <= MIN_VOL_FOR_RATIO:
+        return None, "no_volatility"
+    if ratio is None or not math.isfinite(float(ratio)):
+        return None, "not_finite"
+    return float(ratio), None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -51,6 +59,36 @@ def optimize_max_sharpe(
     risk_free_rate: float = 0.04,
     weight_bounds: tuple[float, float] = (0.0, 1.0),
 ) -> dict:
+    """과거 데이터 기반 Max Sharpe 최적화. `/api/optimizer/max-sharpe` 가 이걸 그대로 반환한다.
+
+    ## 반환 계약 — 어떤 필드가 언제 null 인가
+
+    **Pydantic 응답 모델이 없다** (`routers/optimizer.py` 에 `response_model`
+    이 없다). 그래서 이 docstring 이 유일한 계약이다. 프론트 타입
+    (`OptimizationResult`)은 호출부가 0곳이라 삭제됐으므로, 다음 소비자가
+    읽을 곳은 여기뿐이다.
+
+        sharpe_ratio          **nullable**. 분모(변동성)가
+                              `MIN_VOL_FOR_RATIO` 이하면 null.
+        sharpe_reason         null 이 아닐 때만 문자열:
+                              `"no_volatility"` · `"not_finite"`
+        equal_weight_sharpe   **nullable**. 위와 같은 규칙·같은 판정자.
+        equal_weight_sharpe_reason  같은 코드 집합.
+
+        weights · expected_return · volatility
+        equal_weight_return · equal_weight_volatility · method · frontier
+                              → **null 이 아니다.** 입력에 NaN/Inf 가 있으면
+                              pypfopt 가 `ValueError` 를 던져 응답 자체가
+                              만들어지지 않는다 (실측: 한 종목이 전부 NaN 인
+                              프레임 → `Problem data contains NaN or Inf`).
+                              즉 "값이 있으면 유한하다".
+
+    실측으로 확인한 null 경로 (결정론적 +0.05%/일 입력, 변동성 1.8e-15):
+        sharpe_ratio None · equal_weight_sharpe None · 나머지는 유한한 수
+
+    `sharpe_ratio` 가 nullable 이 된 것은 그 전에 **4.8e13** 이 측정값 얼굴로
+    나갔기 때문이다 — `_ratio_or_none` 의 docstring 에 그 실측이 있다.
+    """
     tickers   = list(daily_returns.columns)
     n         = len(tickers)
     mu_annual = daily_returns.mean().values * 252
@@ -65,31 +103,37 @@ def optimize_max_sharpe(
         cleaned   = ef.clean_weights()
         weights   = np.array([cleaned[t] for t in tickers])
         exp_ret, vol, sharpe = ef.portfolio_performance(risk_free_rate=risk_free_rate)
-        sharpe = _ratio_or_none(sharpe, vol)
+        sharpe, sharpe_reason = _ratio_or_none(sharpe, vol)
     else:
         method = "NumPy SLSQP 폴백"
         weights, exp_ret, vol, sharpe = _max_sharpe_numpy(
             mu_annual, cov_annual, risk_free_rate, weight_bounds
         )
+        # 폴백도 같은 판정을 통과시킨다 — 이유 코드가 경로에 따라 달라지면
+        # 소비자가 두 가지를 다뤄야 한다.
+        sharpe, sharpe_reason = _ratio_or_none(sharpe, vol)
 
     frontier = _compute_efficient_frontier(mu_annual, cov_annual, weight_bounds, n_points=40)
 
     eq_w      = np.full(n, 1.0 / n)
     eq_ret    = float(eq_w @ mu_annual)
     eq_vol    = float(np.sqrt(eq_w @ cov_annual @ eq_w))
-    # 동일비중 비교군의 샤프도 같은 규칙이다 (분모 0 → 정의되지 않음).
-    from backend.services.portfolio_calculator import MIN_VOL_FOR_RATIO
-    eq_sharpe = ((eq_ret - risk_free_rate) / eq_vol
-                 if eq_vol > MIN_VOL_FOR_RATIO else None)
+    # 동일비중 비교군의 샤프도 같은 규칙·같은 판정자를 쓴다.
+    eq_raw = (eq_ret - risk_free_rate) / eq_vol if eq_vol else None
+    eq_sharpe, eq_reason = _ratio_or_none(eq_raw, eq_vol)
 
     return {
         "weights":                 dict(zip(tickers, weights.tolist())),
         "expected_return":         exp_ret * 100,
         "volatility":              vol * 100,
         "sharpe_ratio":            sharpe,
+        # 샤프가 null 인 이유. `no_volatility` = 분모가 하한 이하,
+        # `not_finite` = 비율이 NaN/Inf. 값이 있으면 null.
+        "sharpe_reason":           sharpe_reason,
         "method":                  method,
         "frontier":                frontier,
         "equal_weight_sharpe":     eq_sharpe,
+        "equal_weight_sharpe_reason": eq_reason,
         "equal_weight_return":     eq_ret * 100,
         "equal_weight_volatility": eq_vol * 100,
     }
@@ -217,6 +261,27 @@ def optimize_black_litterman(
     tau: float = 0.05,
     weight_bounds: tuple[float, float] = (0.0, 1.0),
 ) -> dict:
+    """Black-Litterman + 국면 뷰. `/api/optimizer/black-litterman` 이 그대로 반환한다.
+
+    ## 반환 계약 — 어떤 필드가 언제 null 인가
+
+    `optimize_max_sharpe` 와 **같다** (응답 모델 없음 · 이 docstring 이 계약):
+
+        sharpe_ratio · sharpe_reason
+        equal_weight_sharpe · equal_weight_sharpe_reason
+                              → nullable. 분모가 `MIN_VOL_FOR_RATIO` 이하면
+                                null 이고 이유 코드가 `"no_volatility"`.
+
+        weights · expected_return · volatility · equal_weight_return
+        equal_weight_volatility · implied_returns · posterior_returns
+        views_applied · has_views · method · frontier
+                              → null 이 아니다 (NaN 입력은 `ValueError` 로
+                                응답 전에 끊긴다).
+
+    `has_views` 가 False 면 뷰 없이 시장균형(implied)만으로 계산한 결과다 —
+    `method` 문자열에도 `(View 없음→시장균형)` 이 붙는다. 그건 실패가 아니라
+    다른 계산이므로 값이 비지 않는다.
+    """
     tickers    = list(daily_returns.columns)
     n          = len(tickers)
     cov_annual = daily_returns.cov().values * 252
@@ -247,7 +312,7 @@ def optimize_black_litterman(
         cleaned   = ef.clean_weights()
         weights   = np.array([cleaned[t] for t in tickers])
         exp_ret, vol, sharpe = ef.portfolio_performance(risk_free_rate=risk_free_rate)
-        sharpe = _ratio_or_none(sharpe, vol)
+        sharpe, sharpe_reason = _ratio_or_none(sharpe, vol)
         posterior_arr = posterior_returns.values
     else:
         method = "NumPy Black-Litterman" + (" (View 없음→시장균형)" if not has_views else "")
@@ -257,14 +322,14 @@ def optimize_black_litterman(
         weights, exp_ret, vol, sharpe = _max_sharpe_numpy(
             posterior_arr, posterior_cov_arr, risk_free_rate, weight_bounds
         )
+        sharpe, sharpe_reason = _ratio_or_none(sharpe, vol)
 
     eq_w      = np.full(n, 1.0 / n)
     eq_ret    = float(eq_w @ posterior_arr)
     eq_vol    = float(np.sqrt(eq_w @ cov_annual @ eq_w))
-    # 동일비중 비교군의 샤프도 같은 규칙이다 (분모 0 → 정의되지 않음).
-    from backend.services.portfolio_calculator import MIN_VOL_FOR_RATIO
-    eq_sharpe = ((eq_ret - risk_free_rate) / eq_vol
-                 if eq_vol > MIN_VOL_FOR_RATIO else None)
+    # 동일비중 비교군의 샤프도 같은 규칙·같은 판정자를 쓴다.
+    eq_raw = (eq_ret - risk_free_rate) / eq_vol if eq_vol else None
+    eq_sharpe, eq_reason = _ratio_or_none(eq_raw, eq_vol)
     frontier  = _compute_efficient_frontier(posterior_arr, cov_annual, weight_bounds, n_points=40)
 
     return {
@@ -272,9 +337,13 @@ def optimize_black_litterman(
         "expected_return":         exp_ret * 100,
         "volatility":              vol * 100,
         "sharpe_ratio":            sharpe,
+        # 샤프가 null 인 이유 (값이 있으면 null). HRP 카드
+        # (`portfolio_optimizer`)와 같은 코드 집합을 쓴다.
+        "sharpe_reason":           sharpe_reason,
         "method":                  method,
         "frontier":                frontier,
         "equal_weight_sharpe":     eq_sharpe,
+        "equal_weight_sharpe_reason": eq_reason,
         "equal_weight_return":     eq_ret * 100,
         "equal_weight_volatility": eq_vol * 100,
         "implied_returns":         dict(zip(tickers, (pi * 100).tolist())),
