@@ -281,7 +281,13 @@ def _gather_fundamentals(tickers: list[str]) -> dict:
                 "peg_ratio":        _round_or_none(info.get("pegRatio")),
                 "ev_ebitda":        _round_or_none(info.get("enterpriseToEbitda")),
                 "price_to_sales":   _round_or_none(info.get("priceToSalesTrailing12Months")),
-                "div_yield_pct":    _pct(info.get("dividendYield")),
+                # yfinance 의 dividendYield 는 **이미 퍼센트**다. 실측:
+                #   AAPL 0.34 · 005930.KS 0.56
+                # `_pct` 로 또 100 을 곱하면 34%·56% 가 됐다. 크기로 단위를
+                # 추측하지 않는다 — 같은 info dict 안에서 필드마다 단위가 다르고
+                # (payoutRatio 0.1204·profitMargins 0.276 은 분수), 크기 휴리스틱은
+                # 저수익률 종목에서 틀린다.
+                "div_yield_pct":    _round_or_none(info.get("dividendYield"), 2),
                 "market_cap_b":     _round_or_none((info.get("marketCap") or 0) / 1e9, 1),
                 # ── 성장 & 수익성 ────────────────────────────────
                 "rev_growth_yoy":   _pct(info.get("revenueGrowth")),
@@ -295,6 +301,9 @@ def _gather_fundamentals(tickers: list[str]) -> dict:
                 "eps_trailing":     _round_or_none(info.get("trailingEps")),
                 "eps_forward":      _round_or_none(info.get("forwardEps")),
                 # ── 재무 건전성 ──────────────────────────────────
+                # debtToEquity 도 퍼센트다 (실측: AAPL 78.445 = 0.78배,
+                # 005930.KS 3.868 = 0.039배). 값은 그대로 두고 프롬프트에서
+                # 단위를 붙인다 — `_build_ticker_section` 참고.
                 "debt_to_equity":   _round_or_none(info.get("debtToEquity")),
                 "current_ratio":    _round_or_none(info.get("currentRatio")),
                 "quick_ratio":      _round_or_none(info.get("quickRatio")),
@@ -434,7 +443,11 @@ def _build_ticker_section(t: str, ps: dict, f: dict, market: str) -> str:
 
     # 재무 건전성
     fin = []
-    if f.get("debt_to_equity") is not None: fin.append(f"D/E {f['debt_to_equity']:.1f}")
+    if f.get("debt_to_equity") is not None:
+        # 단위를 붙이지 않으면 모델이 배수로 읽는다 — AAPL 78.4 는 78.4배가 아니라
+        # 78.4%(0.78배)이고 삼성전자 3.9 는 0.039배다. 라벨이 없으면 "극단적
+        # 레버리지" 로 서술된다.
+        fin.append(f"D/E {f['debt_to_equity']:.1f}%")
     if f.get("current_ratio") is not None:  fin.append(f"유동비율 {f['current_ratio']:.1f}x")
     if f.get("short_pct_float") is not None: fin.append(f"공매도 {f['short_pct_float']:.1f}%")
     if f.get("beta") is not None:            fin.append(f"베타 {f['beta']:.2f}")

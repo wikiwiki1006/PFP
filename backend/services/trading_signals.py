@@ -649,8 +649,25 @@ def compute_macro_spread_levels() -> dict:
         hy_spread   = float(hy_series.iloc[-1])
         source = "FRED"
     except Exception:
-        rate_series = pd.Series([0.5])
-        hy_series   = pd.Series([3.5])
+        # FRED 를 못 받았다. 값은 지어내되 **확신은 지어내지 않는다.**
+        #
+        # 예전에는 한 점짜리 시리즈(`pd.Series([0.5])`)를 백분위 함수에 넘겼다.
+        # `(0.5 < 0.5).sum() / 1 * 100` = **0.0** 이라 "과거 10년 대비 백분위 0%"
+        # 가 화면에 떴다 — 즉 "10년 중 최저" 라는 최대 확신이다. 게다가 금리차는
+        # Low=빨강(역전 위험), HY 는 Low=초록(안전)이라 **서로 모순된 신호**를
+        # 동시에 냈다.
+        #
+        # 빈 시리즈를 넘기면 `_percentile_rank` 가 문서화된 중립값 50 을 주고
+        # 둘 다 Normal(주황)이 된다. 여전히 지어낸 값이지만 방향을 단정하지
+        # 않는다. **제대로 고치려면 값과 백분위를 None 으로 내보내야 하고**,
+        # 그건 `MarketSituationPanel.tsx:51,54` 가 `percentile.toFixed(0)` 를
+        # 직접 불러서 프론트 수정이 함께 필요하다.
+        logger.warning(
+            "FRED 매크로 스프레드 조회 실패 — 중립값으로 표시한다 (source=fallback). "
+            "화면은 이 표시를 읽지 않으므로 사용자에게는 실측값처럼 보인다.",
+            exc_info=True,
+        )
+        rate_series = hy_series = pd.Series(dtype=float)
         rate_spread, hy_spread = 0.5, 3.5
         source = "fallback"
 

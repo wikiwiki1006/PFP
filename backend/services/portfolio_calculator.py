@@ -527,8 +527,18 @@ def calculate_metrics(
     # 에쿼티 곡선의 마지막 값으로 회복한다. 수량이 NaN 이면 합이 NaN 이 되고
     # 그 경로로 넘어간다. (그 회복이 있어서 "수량 NaN → 총수익률 -100%" 는
     # 일어나지 않는다. 의심해서 실측으로 확인했다.)
-    total_equity = _safe_or(sum(_price(t) * holdings[t]["q"] for t in stock_tickers) + cash_val, 0.0)
-    total_cost   = _safe_or(sum(_safe_or(holdings[t]["avg"], 0.0) * _safe_or(holdings[t]["q"], 0.0) for t in stock_tickers) + cash_val, 0.0)
+    # 주식만 본 평가액·원가. 수익률은 이 쌍으로 계산한다 — 현금을 분모에 넣으면
+    # "누적 수익" 이 계좌 전체 수익률이 되어 현금 비중만큼 희석된다. 곡선 기준
+    # 경로는 TWRR 로 현금흐름을 보정해 현금의 기회비용을 수익률에 반영하지
+    # 않으므로, 폴백에 현금을 넣으면 **같은 필드가 경로에 따라 다른 정의**가 된다.
+    # (현금 절반을 들고 있던 사용자는 실제 +0.08% 를 +0.04% 로 봤다.)
+    stock_equity = _safe_or(sum(_price(t) * holdings[t]["q"] for t in stock_tickers), 0.0)
+    stock_cost   = _safe_or(sum(_safe_or(holdings[t]["avg"], 0.0) * _safe_or(holdings[t]["q"], 0.0)
+                                for t in stock_tickers), 0.0)
+
+    # 응답의 `total_equity` 는 현금을 포함한 **총자산**이다 (화면 라벨도 그렇다).
+    total_equity = _safe_or(stock_equity + cash_val, 0.0)
+    total_cost   = stock_cost
 
     # 보유 종목이 없어도 equity curve 마지막 값을 현재 자산으로 사용
     # (전량 매도 후 현금 보유 또는 CASH 항목 없는 경우 대응)
@@ -544,9 +554,11 @@ def calculate_metrics(
         eq_first = float(eq_meaningful.iloc[0])
         total_rtn = _num_or_none((total_equity / eq_first - 1) * 100)
     else:
-        # 원가도 0 이면 기준점이 없다 — 0% 는 "본전" 이라는 단정이다.
-        total_rtn = (_num_or_none((total_equity / total_cost - 1) * 100)
-                     if total_cost else None)
+        # 주식 평가액 대 주식 원가. 분자에도 현금을 넣지 않는다 — 한쪽만 빼면
+        # 현금을 수익으로 세어 수익률이 폭증한다 (현금 절반이면 +99%).
+        # 원가가 0 이면 기준점이 없다 — 0% 는 "본전" 이라는 단정이다.
+        total_rtn = (_num_or_none((stock_equity / stock_cost - 1) * 100)
+                     if stock_cost else None)
 
     # 1D 변화 — 종목별 '마지막 두 실제 관측치' 합산이 1순위.
     # 에쿼티 커브의 위치 기반 차분(iloc[-1]-iloc[-2])은 마지막 두 행이
@@ -609,18 +621,17 @@ def calculate_metrics(
             return None
         return (cur / base - 1) * 100
 
-    # 벤치마크는 시장이 정한다. `MarketSpec.indices` 의 **첫 항목**이 그 시장의
-    # 기준 지수라고 markets.py 가 정의한다 (US `^GSPC` · KR `^KS11`).
+    # 벤치마크는 시장이 정한다 (US `^GSPC` · KR `^KS11`). 어느 지수가 기준인지
+    # 아는 코드는 `markets.benchmark_for` 하나다.
     #
     # 지금 KR 에서는 이 값이 None 이 된다 — `/metrics` 프레임을 만드는
     # `routers/portfolio.py` 가 `["^GSPC", "^VIX"]` 를 시장과 무관하게 넣고
     # `include_market=False` 로 불러서, `^KS11` 열이 아예 오지 않는다.
     # 그 라우터가 시장 기준지수를 함께 실어 주면 값이 돌아온다. 그때까지는
     # '—' 가 맞다 — S&P 대비 0.2306 을 "베타" 라고 보여주는 것보다 정직하다.
-    from backend.services.markets import get_market
-    beta = calculate_portfolio_beta(
-        holdings, close_df, next(iter(get_market(market).indices)),
-    )
+    from backend.services.markets import benchmark_for, get_market
+    bench = benchmark_for(market)
+    beta = calculate_portfolio_beta(holdings, close_df, bench)
     # `.get()` 의 기본값 18.0(VIX 장기 평균)은 **열이 없을 때만** 쓰인다.
     # 열은 있는데 값이 전부 NaN 이면 NaN 이 그대로 나오고, ffill 도 전량 NaN 열은
     # 채우지 못한다 — yfinance 가 ^VIX 를 빈 열로 주는 일이 있다. 그러면 폴백을
@@ -628,8 +639,14 @@ def calculate_metrics(
     # 바꿔 주므로 요청이 깨지지는 않는다. 그 안전망이 이 누락을 가려 왔다.)
     vix  = _num_or_none(curr.get("^VIX"))
 
-    alpha = 0.0
-    if "^GSPC" in close_df.columns:
+    # 알파도 시장 기준 지수 대비다. 예전에는 `"^GSPC"` 가 하드코딩돼 한국
+    # 포트폴리오의 알파가 S&P500 대비로 나갔고, 응답 키 이름까지
+    # `alpha_vs_sp500` 이라 계산을 고쳐도 이름이 거짓말을 계속했다.
+    #
+    # 초기값을 `0.0` 에서 `None` 으로 바꾼다. 기준 지수 열이 없으면 알파는
+    # 계산 불가인데 `0.0` 은 "시장과 정확히 같았다" 는 단정이다 (§1.3).
+    alpha = None
+    if bench in close_df.columns:
         try:
             # 에쿼티 곡선은 첫 거래 이전 구간이 0 이므로 iloc[0] 으로 나누면 inf 가 되고,
             # NaN 검사(a_val == a_val)는 inf 를 잡지 못해 alpha 가 항상 null 로 나갔다.
@@ -641,7 +658,7 @@ def calculate_metrics(
             eq_w  = equity_curve.loc[start:]
             base  = float(eq_w.iloc[0])
 
-            b_sp = close_df["^GSPC"].reindex(equity_curve.index).ffill().bfill().loc[start:]
+            b_sp = close_df[bench].reindex(equity_curve.index).ffill().bfill().loc[start:]
             b_valid = b_sp.dropna()
             if base > 0 and not b_valid.empty and float(b_valid.iloc[0]) != 0:
                 p_last = float(eq_w.iloc[-1]) / base - 1
@@ -658,15 +675,25 @@ def calculate_metrics(
         # 계산 불가는 null 로 내려간다 — `_round_keep_none` 이 None 을 통과시킨다.
         # 0 으로 바꾸면 '보합'·'본전'·'변동성 낮음' 이라는 단정이 된다 (§1.3).
         "total_return_pct":  _round_keep_none(total_rtn, 4),
-        "today_change_val":  round(today_chg_val, 2),
+        # `today_change_val` 키는 뺐다. 프론트 계약(types·demoData)에서 develop 이
+        # 제거했고 백엔드 소비자도 없는데, 관측치가 한 개뿐이면 `0.0` 을 지어내
+        # 내보내고 있었다. 아무도 읽지 않는 값을 위해 위장을 유지할 이유가 없다.
+        # 내부 변수는 남는다 — 폴백 분기가 `today_chg_val is None` 으로 갈린다.
         "today_change_pct":  _round_keep_none(today_chg_pct, 4),
         "as_of":             as_of_str,
         "market_open":       _market_open_flag(market),
+        # 베타·알파가 무엇에 대비한 값인지 응답에 담는다. 화면이 "베타" 라고만
+        # 쓰면 사용자는 벤치마크를 모르고, 한국 포트폴리오에 S&P500 대비 값이
+        # 나가도 알아챌 수 없다. 라벨이 이름을 붙일 수 있어야 한다.
+        "benchmark":         bench,
+        "benchmark_label":   get_market(market).indices.get(bench, bench),
         "portfolio_beta":    _round_keep_none(beta, 4),
         "vix":               _round_keep_none(vix, 2),
         "perf_1w":           _round_keep_none(_perf(5), 4),
         "perf_1m":           _round_keep_none(_perf(21), 4),
-        "alpha_vs_sp500":    _round_keep_none(alpha, 4),
+        # 키 이름에 벤치마크를 박지 않는다 — `alpha_vs_sp500` 은 계산을 고쳐도
+        # 이름이 거짓말을 계속했다. 무엇 대비인지는 `benchmark` 가 말한다.
+        "alpha_vs_benchmark": _round_keep_none(alpha, 4),
     }
 
 
