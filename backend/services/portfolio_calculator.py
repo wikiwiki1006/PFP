@@ -870,6 +870,19 @@ def build_return_pct_curve(
     이 방식은 외부 현금흐름이 있는 날에도 수익률 왜곡(스파이크) 없이
     순수 운용 성과만 추적한다.
     반환: (return_pct, holdings_by_date, initial_equity, cash_events, equity)
+
+    ## `holdings_by_date` 의 계약
+
+    `holdings[].price is None` 은 **그 종목이 그날 취득원가로 대체 평가됐다**는
+    뜻이다 (`_price_or_cost`). 시세를 모르는 날이고, `return_pct` 도 None 이다.
+
+    그래서 `equity` 와 `return_pct` 는 그 날짜에 **관측이 아니라 원가**를
+    반영한다. 한 날짜의 모든 종목이 `price is None` 이면 그 날 포트폴리오
+    가치는 관측된 적이 없다 — 소비자는 그 사실을 이 필드로만 알 수 있다
+    (`return_pct_to_records` 가 그 날짜를 레코드에서 빼는 근거이기도 하다).
+
+    별도 coverage 필드를 두지 않는 이유: 그 사실이 이미 여기 있다. 파생 필드를
+    만들면 같은 사실이 두 곳에 생기고 한쪽만 갱신되는 형태가 된다.
     """
     if close_df.empty:
         return _empty_curve(), {}, 0.0, {}, _empty_curve()
@@ -1143,6 +1156,22 @@ def return_pct_to_records(
         if pd.isna(pct):
             continue
         date_str = date_strs[i]
+
+        # 보유는 있는데 **관측된 가격이 하나도 없는 날**은 레코드로 내보내지
+        # 않는다. `_price_or_cost` 가 그 날을 취득원가로 평가하므로 곡선이
+        # 평평해지고, TWRR 은 그 평평함을 정직하게 0% 로 읽는다. 결과는
+        # "변동 없음" 으로 그려지는 관측 아닌 포인트다.
+        #
+        # 실측: KR 포트폴리오의 앞 71포인트가 `port=0.0` 으로 그려졌다. 같은
+        # 구간에서 벤치마크 선은 움직여서(그쪽은 데이터가 있다) 포트폴리오가
+        # 3개월간 정체한 것처럼 보였다 — 실제로는 시세를 모르는 구간이다.
+        #
+        # 하나라도 관측된 날은 남긴다. 부분 관측을 버리면 실제 관측이 있는 날을
+        # 버리게 되고, 그건 같은 오류의 반대 방향이다. 몇 개 미만이면 못 믿는가는
+        # 표시 계층이 판단한다 — 종목별 `price` 가 레코드에 그대로 실려 있다.
+        rows_today = holdings_by_date.get(date_str) or []
+        if rows_today and all(r.get("price") is None for r in rows_today):
+            continue
 
         bench_pct = None
         if b_vals is not None and bench_first_val:
