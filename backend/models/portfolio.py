@@ -14,27 +14,10 @@ class HoldingItem(BaseModel):
     date: Optional[str] = Field(default=None, description="CASH 최초 입금 날짜 (YYYY-MM-DD)")
 
 
-class Holdings(BaseModel):
-    holdings: dict[str, HoldingItem]
-
-    @classmethod
-    def from_raw(cls, raw: dict) -> "Holdings":
-        data = raw.get("my_holdings", raw)
-        return cls(holdings={k: HoldingItem(**v) for k, v in data.items()})
-
-class TradeType(str):
-    ADD = "ADD"
-    SOLD = "SOLD"
-    UPDATE = "UPDATE"
-
-
-class TradeRecord(BaseModel):
-    date: str = Field(..., description="거래일 (YYYY-MM-DD)")
-    ticker: str
-    type: str = Field(..., description="ADD | SOLD | UPDATE")
-    q: float = Field(..., description="수량")
-    price: Optional[float] = None
-    memo: Optional[str] = None
+# Holdings · TradeType · TradeRecord 도 지웠다. 셋 다 미사용이다.
+#
+# Holdings.from_raw 는 `raw.get("my_holdings", raw)` 로 pfp/data/holdings.json
+# 을 읽던 시절의 유물이다. 그 파일 경로는 99181ab 에서 걷어냈다.
 
 
 class AddTradeRequest(BaseModel):
@@ -53,36 +36,19 @@ class UpdateHoldingRequest(BaseModel):
     date: Optional[str] = None   # CASH DEPOSIT/WITHDRAW 날짜 (YYYY-MM-DD)
 
 
-class PortfolioMetrics(BaseModel):
-    total_equity: float
-    total_cost: float
-    total_return_pct: float
-    today_change_val: float
-    today_change_pct: float
-    portfolio_beta: float
-    vix: float
-    # 포트폴리오가 조회 기간보다 짧으면 None (0.0 으로 위장하지 않는다)
-    perf_1w: Optional[float] = None
-    perf_1m: Optional[float] = None
-    alpha_vs_sp500: Optional[float] = None
-
-
-class EquityCurvePoint(BaseModel):
-    date: str
-    portfolio: float
-    sp500: Optional[float] = None
-    nasdaq: Optional[float] = None
-
-
-class HoldingDetail(BaseModel):
-    ticker: str
-    avg: float
-    shares: float
-    price: float
-    chg_pct: float
-    pnl_pct: float
-    value: float
-    weight_pct: float
+# PortfolioMetrics · EquityCurvePoint · HoldingDetail 을 지웠다.
+#
+# 셋 다 어디서도 import 되지 않았다. 라우터는 이 파일에서 HoldingItem ·
+# AddTradeRequest · UpdateHoldingRequest · PortfolioSetupRequest 넷만 쓴다.
+#
+# 안 쓰이는 것보다 **틀린 채로 안 쓰이는 것**이 문제였다. PortfolioMetrics 는
+# total_return_pct·today_change_pct·vix 를 `float` 로 선언하고 있었는데, 셋 다
+# 지금은 None 이 올 수 있다. response_model 로 붙어 있었다면 그 변경들이 전부
+# 500 이 됐을 것이다 — 안 쓰여서 안 터졌고, 안 쓰여서 아무도 갱신하지 않았다.
+# 죽은 페이지는 최소한 build 를 깨서 존재를 알렸는데 이건 그것도 안 한다.
+#
+# 응답 계약을 강제하고 싶으면 response_model 을 실제로 붙여야 한다. 그건
+# 별도 작업이다 — 지금은 nullable 전환이 진행 중이라 시점이 나쁘다.
 
 
 class SetupHolding(BaseModel):

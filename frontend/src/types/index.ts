@@ -4,7 +4,6 @@ export interface PortfolioMetrics {
   total_cost: number
   /** TWRR 보정에 실패하면 null (보정 전 값은 추가 입금 시 왜곡돼 있어 쓰지 않는다) */
   total_return_pct: number | null
-  today_change_val: number
   /** null = 전일 종가를 못 구해 계산 불가. 0%(보합)와 구분해야 한다. */
   today_change_pct: number | null
   portfolio_beta: number
