@@ -96,11 +96,6 @@ def test_the_filename_pattern_carries_no_user_identifier(two_users):
     )
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "reports.filename 이 전역 UNIQUE 인데 라우터가 만드는 이름에 사용자 "
-    "식별자가 없다. 같은 날 두 번째 사용자의 저장이 첫 사용자의 행 내용을 "
-    "덮고, 소유자는 첫 사용자로 남는다. 고칠 자리가 backend/db/ 와 "
-    "backend/routers/ 라 이 창 소유가 아니다 — 파일 위 설명 참고."))
 def test_one_users_report_never_lands_in_another_users_row(two_users):
     """같은 날 같은 종류를 만들어도 서로의 내용을 받지 않는다.
 
@@ -123,27 +118,6 @@ def test_one_users_report_never_lands_in_another_users_row(two_users):
         "Bob's report vanished from his own list -- the row kept Alice as "
         "owner, so Bob can neither see nor read what he generated."
     )
-
-
-def test_the_collision_is_real_and_this_is_what_it_does(two_users):
-    """지금 동작을 그대로 적어 둔다 — 위 xfail 이 무엇을 기다리는지.
-
-    xfail 만 두면 "언젠가 고쳐질 것" 이라는 표시뿐이고, **무엇이 일어나는지**
-    는 실패 메시지를 읽어야만 안다. 고쳐지는 순간 이 검사도 같이 빨개져서
-    둘을 함께 지우게 한다.
-    """
-    filename = "daily_brief_2026-09-11.md"
-    first = rr.save_report(filename, "앨리스의 보유·손익", report_type="daily_brief",
-                           user_id=ALICE, scope="private")
-    second = rr.save_report(filename, "밥의 보유·손익", report_type="daily_brief",
-                            user_id=BOB, scope="private")
-
-    assert first == second, "전제: 같은 행을 덮는다"
-    assert _rows(filename) == [(ALICE, "밥의 보유·손익")], (
-        f"the collision no longer behaves this way: {_rows(filename)} -- "
-        "update or delete this note together with the xfail above."
-    )
-    assert rr.list_reports(BOB) == [], "밥에게는 아무것도 안 남는다"
 
 
 def test_different_filenames_keep_both_reports(two_users):

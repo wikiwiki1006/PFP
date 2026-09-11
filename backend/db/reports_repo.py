@@ -47,12 +47,18 @@ def save_report(
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
+                # 충돌 대상이 scope 마다 다르다 (schema.py 의 부분 유니크 참고).
+                # shared 는 전역 한 행을 공유하고, private 는 사용자·시장별로
+                # 갈린다. 하나로 쓰면 private 저장이 남의 행을 덮는다.
+                conflict = ("(market, filename) WHERE scope = 'shared'"
+                            if scope == "shared"
+                            else "(user_id, market, filename) WHERE scope <> 'shared'")
                 cur.execute(
-                    """INSERT INTO reports
+                    f"""INSERT INTO reports
                            (user_id, report_type, filename, content, metadata, scope,
                             subject_key, market)
                        VALUES(%s,%s,%s,%s,%s,%s,%s,%s)
-                       ON CONFLICT(filename) DO UPDATE
+                       ON CONFLICT {conflict} DO UPDATE
                        SET content=EXCLUDED.content,
                            metadata=EXCLUDED.metadata,
                            scope=EXCLUDED.scope,

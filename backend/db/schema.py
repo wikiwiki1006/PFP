@@ -251,6 +251,36 @@ CREATE INDEX IF NOT EXISTS idx_reports_user_type
 --   subject_key     : 재사용 판정 키. 종목=티커, 산업=industry_id. 그 외 NULL.
 ALTER TABLE reports ADD COLUMN IF NOT EXISTS scope       TEXT DEFAULT 'private';
 ALTER TABLE reports ADD COLUMN IF NOT EXISTS subject_key TEXT;
+
+-- filename 의 전역 UNIQUE 를 **scope 별 부분 유니크**로 바꾼다.
+--
+-- 라우터가 만드는 이름에는 사용자 식별자가 없다:
+--     daily_brief_{date}.md            macro_{date}_{event_slug}.json
+-- 그래서 같은 날 두 번째 사용자의 저장이 첫 사용자의 행을 덮었다.
+-- `ON CONFLICT(filename) DO UPDATE` 가 user_id 는 안 바꾸므로
+-- **행은 첫 사용자 것으로 남고 내용만 두 번째 사용자 것이 된다.** 실측:
+--
+--     A 저장 → id=91  user_id=A  content='A 의 보유·손익'
+--     B 저장 → id=91  user_id=A  content='B 의 보유·손익'   ← A 가 B 의 손익을 연다
+--
+-- 일일 브리핑은 그 사용자의 보유와 손익을 담는다. 그리고 B 는 자기 리포트를
+-- 목록에서 보지도 못한다 (list_reports 는 작성자 본인 것만 돌려준다).
+-- 날짜가 바뀌는 것 말고는 막는 게 없었다 — 엣지 케이스가 아니라 정상 경로다.
+--
+-- scope='shared'(종목·산업 리서치)의 전역 유일성은 **의도된 설계**다.
+-- 같은 대상이면 누가 만들었든 같은 결과이므로 한 행을 공유해 중복 생성과
+-- 비용을 막는다. 그래서 그쪽은 그대로 두고 private 만 사용자별로 가른다.
+--
+-- market 도 키에 넣는다. `daily_brief_{date}.md` 에는 시장이 없어서 같은
+-- 사용자의 미국·한국 브리핑이 같은 날 서로를 덮었다 (§1.1).
+--
+-- 기존 행은 전부 filename 이 유일하므로 더 넓은 키에서도 유일하다 —
+-- 제약을 넓히는 것이라 이관이 필요 없다.
+ALTER TABLE reports DROP CONSTRAINT IF EXISTS reports_filename_key;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_shared_filename
+    ON reports(market, filename) WHERE scope = 'shared';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_private_filename
+    ON reports(user_id, market, filename) WHERE scope <> 'shared';
 CREATE INDEX IF NOT EXISTS idx_reports_shared_lookup
     ON reports(report_type, subject_key, created_at DESC)
     WHERE scope = 'shared';
