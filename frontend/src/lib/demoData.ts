@@ -22,6 +22,8 @@ import { getMarket } from './market'
 
 export const DEMO_METRICS: PortfolioMetrics = {
   total_equity:     128_450,
+  stock_value:      118_197,   // 보유 표의 증권 6종 합
+  cash_value:        10_253,   // 표의 CASH 행
   total_cost:       104_200,
   total_return_pct: 23.27,
   today_change_pct: 1.06,
@@ -201,11 +203,11 @@ export const DEMO_NEWS: NewsItem[] = [
 const DEMO_METRICS_KR: PortfolioMetrics = {
   ...DEMO_METRICS,
   total_equity:      170_895_000,
+  stock_value:       157_395_000,   // 보유 표의 증권 4종 합
+  cash_value:         13_500_000,   // 표의 CASH 행
   total_cost:         71_000_000,
   total_return_pct:      121.68,
   today_change_pct:        0.07,
-  // stock_value·cash_value 는 서버가 주는데 PortfolioMetrics 에 선언이 없다
-  // (develop 에 넘겼다). 선언이 생기면 157,395,000 / 13,500,000 을 넣는다.
   portfolio_beta:          0.92,   // 코스피 대비
   alpha_vs_benchmark:      6.40,
   perf_1w:                 1.80,
