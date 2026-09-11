@@ -170,7 +170,7 @@ def test_portfolio_total_equals_sum_of_parts():
         index=pd.to_datetime(idx),
     )
     holdings = {"AAA": {"q": 10}, "BBB": {"q": 20}, "CASH": {"q": 1000.0}}
-    val, pct, as_of = portfolio_daily_change(holdings, df, now=_et(2026, 8, 3, 8, 0))
+    val, pct, as_of = portfolio_daily_change(holdings, df, now=_et(2026, 8, 3, 8, 0))[:3]
 
     expected_val = 10 * (110.0 - 100.0) + 20 * (49.0 - 50.0)   # +100 - 20 = +80
     assert val == pytest.approx(expected_val, abs=0.01)
@@ -186,7 +186,7 @@ def test_portfolio_ignores_uncomputable_ticker_but_counts_its_value():
         index=pd.to_datetime(["2026-07-30", "2026-07-31"]),
     )
     holdings = {"AAA": {"q": 10}, "NEW": {"q": 5}, "CASH": {"q": 0}}
-    val, pct, _ = portfolio_daily_change(holdings, df, now=_et(2026, 8, 3, 8, 0))
+    val, pct, _ = portfolio_daily_change(holdings, df, now=_et(2026, 8, 3, 8, 0))[:3]
     assert val == pytest.approx(100.0, abs=0.01)          # AAA 만 기여
     # 분모에는 NEW 의 보유가치(5×200=1000)도 포함된다
     assert pct == pytest.approx(100.0 / (1000.0 + 1000.0) * 100, abs=0.01)
@@ -194,7 +194,7 @@ def test_portfolio_ignores_uncomputable_ticker_but_counts_its_value():
 
 def test_portfolio_empty_returns_none_not_zero():
     df = pd.DataFrame({"AAA": [100.0]}, index=pd.to_datetime(["2026-07-31"]))
-    val, pct, _ = portfolio_daily_change({"AAA": {"q": 10}}, df, now=_et(2026, 8, 3, 8, 0))
+    val, pct, _ = portfolio_daily_change({"AAA": {"q": 10}}, df, now=_et(2026, 8, 3, 8, 0))[:3]
     assert val is None and pct is None
 
 
