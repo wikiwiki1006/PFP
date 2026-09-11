@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { getMarketSituation } from '@/api'
+import { getMarket } from '@/lib/market'
 import InfoTooltip from './InfoTooltip'
 import type { MarketSituationMetric } from '@/types'
 
@@ -80,8 +81,12 @@ function MetricCard({
 }
 
 export default function MarketSituationPanel() {
+  // 키에 시장이 들어가야 한다 (§1.1) — 자세한 이유는 TradeSignalsPanel 의
+  // 같은 자리에 적었다. 여기는 staleTime 이 한 시간이라 한 번 섞이면 오래 간다.
+  // 그리고 두 시장의 응답 모양이 아예 다르다 (미국은 값, 한국은
+  // available:false + 사유) — 섞이면 한국 화면에 미국 금리차가 그려진다.
   const q = useQuery({
-    queryKey: ['timing-market-situation'],
+    queryKey: ['timing-market-situation', getMarket()],
     queryFn: getMarketSituation,
     staleTime: 3600_000,
   })

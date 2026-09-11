@@ -16,7 +16,17 @@ export interface PortfolioMetrics {
   stock_value: number
   cash_value: number
   total_cost: number
-  /** TWRR 보정에 실패하면 null (보정 전 값은 추가 입금 시 왜곡돼 있어 쓰지 않는다) */
+  /** 원가 기준 수익률. `stock_value / total_cost - 1` 로 재현된다.
+   *
+   *  null = 취득원가가 0 이라 기준점이 없음 (portfolio_calculator:640).
+   *  0% 는 "본전" 이라는 단정이므로 그 자리에 쓰지 않는다.
+   *
+   *  **매도로 실현한 손익은 들어오지 않는다** — 매도 대금은 현금으로 가고
+   *  현금은 이 계산에서 빠진다. 그건 realized_* 필드가 답할 문제다.
+   *
+   *  (예전 주석은 "TWRR 보정에 실패하면 null" 이었다. 그 덮어쓰기는
+   *  6ceb29e 에서 지웠는데 주석만 남아 있었다 — 없어진 동작을 설명하는
+   *  주석은 틀린 코드보다 오래 산다.) */
   total_return_pct: number | null
   /** null = 전일 종가를 못 구해 계산 불가. 0%(보합)와 구분해야 한다. */
   today_change_pct: number | null
