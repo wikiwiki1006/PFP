@@ -588,8 +588,9 @@ export interface TickerDetailQuant {
   factors?: { momentum?: number; trend?: number; quality?: number; value?: number }
   /** 한국어 국면 라벨 */
   regime: string
-  /** 'Bull' | 'Sideways' | 'Bear' */
-  regime_code?: string
+  /** 'Bull' | 'Sideways' | 'Bear'. null = 국면 계산 실패 (f13dec1 이후) —
+   *  regime 은 그때 '계산 불가' 문자열이 된다. */
+  regime_code?: string | null
   /** 효율성 비율 (0~1) */
   regime_er?: number | null
   optimizer: {
