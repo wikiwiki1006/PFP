@@ -48,6 +48,30 @@ class JobCancelled(Exception):
     """
 
 
+class _Anonymous:
+    """`owner` 자리에 쓰는 '로그인하지 않은 호출자' 표식.
+
+    `None` 을 재사용할 수 없다. `None` 은 이미 **"소유자 검사를 하지 마"**
+    (내부 호출·정리 작업)라는 뜻이고, 그 한 값이 두 뜻을 갖는 동안
+    **비로그인 호출자가 검사 면제 경로를 탔다** — 남의 잡을 읽고 취소할 수
+    있었다 (`/api/optimizer/ai-optimize-job/{id}` 가 `optional_user` 다).
+
+    빈 문자열이나 `"anonymous"` 같은 문자열도 안 된다. `user_id` 컬럼에
+    그대로 저장될 수 있고, 그러면 그 값을 가진 '사용자' 가 생긴다.
+    객체 식별자라 DB 에 새어 들어갈 자리가 없다.
+    """
+    __slots__ = ()
+    def __repr__(self) -> str:      # 로그에 <object at 0x…> 로 찍히지 않게
+        return "ANONYMOUS"
+
+
+#: 소유자 인자의 세 번째 상태. `None`(검사 안 함) · `ANONYMOUS` · uid 문자열.
+ANONYMOUS = _Anonymous()
+
+#: `owner` 인자가 받는 것. 세 상태를 한 자리에 담는다.
+Owner = Optional[str] | _Anonymous
+
+
 def _db():
     """DB 모듈. 사용할 수 없으면 None."""
     try:
@@ -124,11 +148,35 @@ class JobStore:
 
     # ── 조회 ────────────────────────────────────────────────────────────────
 
-    def get(self, job_id: str, owner: Optional[str] = None) -> Optional[dict]:
+    @staticmethod
+    def _visible(job_owner: Optional[str], owner: "Owner") -> bool:
+        """이 호출자에게 이 잡이 보이는가.
+
+        DB 경로와 메모리 경로가 **같은 규칙**을 써야 해서 한 곳에 둔다.
+        갈라 두면 한쪽만 고쳐진다 — 실제로 익명 결함이 양쪽에 똑같이 있었다.
+
+            owner is None        소유자 검사 안 함 (내부 호출·정리) → 전부
+            owner is ANONYMOUS   비로그인 호출자                  → 무주공산만
+            owner == uid         로그인 호출자                    → 자기 것 + 무주공산
+
+        무주공산(`job_owner is None`)이 로그인·비로그인 모두에게 보이는 것은
+        의도다. 비로그인 최적화 잡이 거기 들어가고, 그 사용자가 자기 잡의
+        진행 상황을 봐야 한다.
+        """
+        if owner is None:
+            return True
+        if owner is ANONYMOUS:
+            return job_owner is None
+        return job_owner in (None, owner)
+
+    def get(self, job_id: str, owner: "Owner" = None) -> Optional[dict]:
         """상태 반환. 없거나 소유자가 다르면 None.
 
         소유자가 다를 때도 None 을 돌려준다 — 403 으로 구분해 주면 "그 잡은
         존재한다"는 사실이 새어나가므로, 없는 것과 똑같이 취급한다.
+
+        `owner` 는 **세 상태**다 (`_visible` 참고). 비로그인 호출자는 `None`
+        이 아니라 `ANONYMOUS` 를 넘겨야 한다.
         """
         db = _db()
         if db is None:
@@ -151,7 +199,7 @@ class JobStore:
         if not r:
             return None
         status, result, message, user_id, cancelled = r
-        if owner is not None and user_id not in (None, owner):
+        if not self._visible(user_id, owner):
             return None
 
         payload = result if isinstance(result, dict) else (
@@ -163,12 +211,12 @@ class JobStore:
             out["message"] = message
         return out
 
-    def _mem_get(self, job_id: str, owner: Optional[str]) -> Optional[dict]:
+    def _mem_get(self, job_id: str, owner: "Owner") -> Optional[dict]:
         with self._lock:
             j = self._jobs.get(job_id)
             if not j:
                 return None
-            if owner is not None and j.get("_owner") not in (None, owner):
+            if not self._visible(j.get("_owner"), owner):
                 return None
             return {k: v for k, v in j.items() if k not in ("_ts", "_owner")}
 
@@ -216,8 +264,12 @@ class JobStore:
 
     # ── 취소 ────────────────────────────────────────────────────────────────
 
-    def cancel(self, job_id: str, owner: Optional[str] = None) -> Optional[str]:
-        """실행 중이면 취소 처리. 이전 상태를 반환하고, 잡이 없거나 남의 것이면 None."""
+    def cancel(self, job_id: str, owner: "Owner" = None) -> Optional[str]:
+        """실행 중이면 취소 처리. 이전 상태를 반환하고, 잡이 없거나 남의 것이면 None.
+
+        소유자 판정은 아래 `get()` 하나를 지난다 — 취소에 따로 규칙을 두면
+        읽기와 쓰기의 권한이 갈린다. 읽을 수 없는 잡은 취소도 못 한다.
+        """
         cur = self.get(job_id, owner=owner)
         if cur is None:
             return None
