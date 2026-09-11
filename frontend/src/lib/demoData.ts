@@ -24,9 +24,15 @@ export const DEMO_METRICS: PortfolioMetrics = {
   total_equity:     128_450,
   stock_value:      118_197,   // 보유 표의 증권 6종 합
   cash_value:        10_253,   // 표의 CASH 행
-  total_cost:       104_200,
-  total_return_pct: 23.27,
-  today_change_pct: 1.06,
+  // 아래 보유 표에서 계산해 넣었다. 한국 데모가 같은 자리에서 틀려 있었고
+  // (집계가 표와 안 맞았다) 미국 쪽도 같았다 — 표 안쪽은 일관된데
+  // (stock_value - total_cost == pnl 합) 집계 셋이 표와 무관한 값이었다.
+  //   total_cost        104,200 → 102,069   (2,131 차이)
+  //   total_return_pct    23.27% →   15.80%
+  //   today_change_pct     1.06% →    0.69%  (비중가중)
+  total_cost:       102_069,
+  total_return_pct: 15.80,
+  today_change_pct: 0.69,
   portfolio_beta:   1.14,
   vix:              16.8,
   perf_1w:          2.41,
