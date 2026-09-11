@@ -280,6 +280,39 @@ def test_an_unknown_tier_is_silently_treated_as_basic(two_users):
     )
 
 
+# ── 공용 리포트: 등급이 저장 키에 들어가 있다 ──────────────────────────────────
+#
+# `find_fresh_shared_report` 는 `model_tier` 를 **신원의 일부로** 다룬다 —
+# 심층을 요청한 사람에게 기본을 주지 않는다. 한동안 저장 키는
+# `(market, filename)` 뿐이었고 파일명 `lens_{ticker}_{date}.md` 에는 등급이
+# 없어서, **조회가 다르다고 보는 둘이 한 행을 썼다.** 그래서 남의 기본
+# 리포트가 내 심층 리포트를 덮었다 — 심층은 하루 한 번 제한이 걸리는
+# 기능이라 그날치 결과가 사라졌다.
+#
+# 지금은 공용 유니크 인덱스가 `COALESCE(metadata->>'model_tier','basic')` 을
+# 포함한다. **조회가 이미 쓰던 식을 저장이 그대로 쓴다** — 신원의 정의가
+# 한 곳에만 있다. 파일명에 등급을 넣는 안은 프론트가 파일명을 파싱해
+# 제목을 만들기 때문에 버려졌다(표시 문자열에 정체성을 심는 형태가 된다).
+
+def test_a_basic_report_does_not_overwrite_a_deep_one(two_users):
+    """등급이 다르면 서로를 덮지 않는다 — 조회가 그 둘을 다르게 보므로."""
+    fn = "lens_AAPL_2026-09-11.md"          # 라우터가 만드는 실제 형식
+    rr.save_report(fn, "심층 리서치", report_type="equity_research",
+                   metadata={"model_tier": "deep"}, user_id=ALICE,
+                   scope="shared", subject_key="AAPL")
+    rr.save_report(fn, "기본 리서치", report_type="equity_research",
+                   metadata={"model_tier": "basic"}, user_id=BOB,
+                   scope="shared", subject_key="AAPL")
+
+    assert rr.find_fresh_shared_report("equity_research", "AAPL",
+                                       model_tier="deep") is not None, (
+        "a basic report overwrote a deep one -- the lookup treats the two "
+        "tiers as different products, so they must not share one row. Deep "
+        "runs are quota-limited, so someone else's basic request destroys "
+        "that day's deep result."
+    )
+
+
 def test_a_shared_report_does_not_cross_markets(two_users):
     """한국 리포트가 미국 요청에 나오면 안 된다 (§1.1).
 

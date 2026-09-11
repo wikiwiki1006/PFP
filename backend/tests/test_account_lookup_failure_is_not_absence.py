@@ -65,6 +65,17 @@ def broken_db(monkeypatch):
 
 
 @pytest.fixture
+def broken_db_pool(monkeypatch):
+    """풀 고갈 — 이 리포가 **503 으로 번역할 줄 아는** 실패다."""
+    from backend.db import PoolExhausted
+
+    monkeypatch.setattr(users_repo, "is_available", lambda: True)
+    monkeypatch.setattr(users_repo, "get_conn",
+                        lambda *a, **kw: (_ for _ in ()).throw(
+                            PoolExhausted("커넥션 풀이 가득 찼습니다")))
+
+
+@pytest.fixture
 def firebase_account(monkeypatch):
     """Firebase 에 그 이메일 계정이 **있다**. 삭제 호출을 기록만 하고 막는다."""
     deleted: list[str] = []
@@ -110,6 +121,33 @@ def test_a_database_outage_does_not_delete_a_real_auth_account(broken_db, fireba
         f"failed: {firebase_account} -- a failed read is not a missing row, "
         "and this deletion cannot be undone. "
         "(DB 를 못 읽은 것과 계정이 없는 것은 다르다.)"
+    )
+
+
+# ── 이 리포는 이미 "다시 시도하면 되는 실패" 를 알고 있다 ──────────────────────
+#
+# `backend/db` 에 `DBBusy` 와 `PoolExhausted` 가 있고, `main.py` 의 핸들러가
+# 그 계열을 **503 + 메시지**로 번역한다. 즉 "지금은 못 읽었다" 를 사용자에게
+# 전할 통로가 이미 깔려 있다.
+#
+# 그런데 `find_by_email` 의 `except Exception` 이 그걸 **삼킨다.** 풀 고갈은
+# 부하가 몰릴 때 나고, 부하가 몰릴 때는 가입도 몰린다 — 즉 이 경로가 제일
+# 많이 불리는 순간에 제일 잘 터진다.
+#
+# 그래서 고치는 방법으로 파일 맨 위에 적어 둔 둘 중, **첫 번째가 이 리포에
+# 맞다**: 반환값을 넓히는 대신 이 계열을 그냥 올려보내면 된다. 호출부 다섯
+# 곳을 하나도 안 고치고 전부 옳아진다 (자세한 근거는 pfp-11 에게 보낸 보고).
+
+def test_a_retryable_failure_is_swallowed_here(broken_db_pool):
+    """풀 고갈처럼 **앱이 이미 번역할 줄 아는 실패**도 여기서 사라진다.
+
+    `PoolExhausted` 는 `main.py` 가 503 으로 바꿔 "잠시 후 다시" 를 보낼 수
+    있는 예외다. 여기서 삼키면 그 신호가 "그런 계정 없음" 이 되고, 위
+    검사가 보여주듯 그 다음은 삭제다.
+    """
+    assert users_repo.find_by_email(EMAIL) is None, (
+        "if this now raises, the swallow is gone -- update the note above and "
+        "the two fix options at the top of this file."
     )
 
 

@@ -8,6 +8,11 @@
 그 안의 오타가 안 보이는 것(이미 세 번 났다), 그리고 **폴백이 돌려주는 값이
 실제로 무엇인지 아무도 확인한 적이 없다**는 것. 후자가 이 파일의 초점이다 —
 계산 불가를 `0` 으로 돌려주면 화면은 그것을 측정값으로 그린다 (§1.3).
+
+위 개수는 **처음 감사할 때의 것**이고 지금 이 파일의 내용과 다르다.
+`factor_analysis` 를 덮던 네 검사를 지웠다 — 그 함수가 삭제됐기 때문이다
+(호출자 0곳. 라우터가 부르던 `factor_analysis` 는 `services/optimizer.py`
+쪽의 **이름만 같은 다른 함수**다).
 """
 from __future__ import annotations
 
@@ -266,55 +271,3 @@ def test_the_money_totals_survive_every_one_of_those_failures():
                 f"{damaged.get(key)!r} vs {baseline[key]!r} -- the money "
                 "totals come from quantities and prices alone."
             )
-
-
-
-@pytest.mark.parametrize("close_df, returns, why", [
-    (pd.DataFrame({"AAPL": [1.0] * 180}, index=_IDX),
-     pd.Series(np.random.default_rng(0).normal(0, 0.01, 180), index=_IDX),
-     "벤치마크 열이 없다"),
-    (pd.DataFrame({"^GSPC": np.linspace(4000.0, 4400.0, 180)}, index=_IDX),
-     pd.Series(np.random.default_rng(0).normal(0, 0.01, 30), index=_IDX[:30]),
-     "겹치는 구간이 60일 미만이다"),
-    (pd.DataFrame({"^GSPC": ["x"] * 180}, index=_IDX),
-     pd.Series(np.random.default_rng(0).normal(0, 0.01, 180), index=_IDX),
-     "벤치마크를 숫자로 읽을 수 없다"),
-])
-def test_factor_analysis_returns_empty_not_zeros(close_df, returns, why):
-    """재지 못하면 빈 dict 다. 0 으로 채운 dict 가 아니다.
-
-    `{"market_beta": 0.0, "r_squared": 0.0}` 은 "시장과 무관하고 설명력이
-    없다" 는 측정 결과처럼 읽힌다. 빈 dict 만이 "재지 못했다" 를 말한다.
-    """
-    out = pc.factor_analysis(returns, close_df)
-
-    assert out == {}, (
-        f"{why}: got {out!r} -- zeros read as a measurement of no exposure. "
-        "(계산 불가를 0 으로 채우면 측정값처럼 보인다.)"
-    )
-
-
-def test_factor_analysis_measures_when_it_can():
-    """대조군 — 데이터가 충분하면 실제 값이 나온다.
-
-    한동안 **어떤 입력으로도** 빈 dict 가 나왔다. 첫 줄이
-    `close_df.get("^GSPC") or close_df.get("SPY")` 였는데 `Series or Series`
-    는 ValueError 를 던지고, 그걸 이 함수 자신의 바깥 `except` 가 삼켰다 —
-    벤치마크를 찾아놓고 같은 식에서 버린 것이다. (`SPY` 폴백은 그래서 작성
-    이후 한 번도 도달된 적이 없었다.)
-
-    그동안 위의 '빈 dict 여야 한다' 검사 세 개는 **전부 통과했지만 아무것도
-    증명하지 못했다** — 함수가 판단해서 비운 것인지 애초에 아무것도 못 하는
-    것인지 구별되지 않았다. 이 대조군만이 그 둘을 갈랐다. 고쳐진 지금도
-    같은 이유로 남는다.
-    """
-    rng = np.random.default_rng(1)
-    mkt = pd.Series(rng.normal(0, 0.01, 180), index=_IDX)
-    close_df = pd.DataFrame({"^GSPC": 4000.0 * (1 + mkt).cumprod()}, index=_IDX)
-    port = mkt * 1.2 + rng.normal(0, 0.001, 180)
-
-    out = pc.factor_analysis(port, close_df)
-
-    assert out, "충분한 데이터인데 빈 dict 가 나왔다 — 위 검사들이 무의미해진다"
-    assert set(out) >= {"alpha_annualized", "market_beta", "r_squared"}
-    assert 0.9 < out["market_beta"] < 1.5, f"market_beta={out['market_beta']}"
