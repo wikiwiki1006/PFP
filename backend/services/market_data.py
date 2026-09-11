@@ -92,6 +92,8 @@ SNAPSHOT_TICKERS = [
     "CL=F",     # WTI Crude Oil
 ]
 
+from backend.services.markets import MARKETS
+
 ALWAYS_FETCH = [
     "^GSPC", "^IXIC", "^KS11", "^KQ11", "^N225",
     "XLK", "XLF", "XLE", "XLY", "XLV", "XLI", "XLB",
@@ -113,7 +115,26 @@ GICS_SECTOR_ETFS = [
     ("REAL_ESTATE",       "XLRE"),
 ]
 
-SECTOR_ETF_TICKERS = [etf for _, etf in GICS_SECTOR_ETFS]
+# 예약 수집 대상은 **모든 시장**의 섹터 ETF 다.
+#
+# 예전에는 GICS_SECTOR_ETFS(미국) 만 담았다. 그래서 스케줄러·기동 프리패치·
+# repair 스크립트 중 어느 것도 한국 섹터 ETF 를 수집하지 않았고, 한국
+# 매크로 시나리오는 섹터 데이터를 **한 번도 받은 적이 없다.** 실측:
+#
+#     pfp_main           KR 섹터 ETF 9/9종   ← 오늘 온디맨드로 들어온 것
+#     pfp_reportmanage   0/9종
+#     postgres(템플릿)    0/9종
+#
+# `pfp_main` 에만 있는 이유는 온디맨드 조회(get_close_df → save_prices_to_db)
+# 가 넣었기 때문이지 예약 수집이 넣은 것이 아니다. 그래서 그 창에서는
+# 정상으로 보이고 다른 창에서는 비어 있었다 — 창별 DB 가 증상을 갈랐다.
+#
+# MARKETS 에서 파생시키면 시장을 추가할 때 여기를 고칠 필요가 없다.
+# 배치에 시장이 섞이는 것은 문제없다 — save_prices_to_db 가 티커별로
+# 캘린더 가드를 건다 (§1.6).
+SECTOR_ETF_TICKERS = sorted({
+    etf for spec in MARKETS.values() for _, etf in spec.sector_etfs
+})
 
 
 def sector_etfs_for(market: str = "US") -> list[tuple[str, str]]:
