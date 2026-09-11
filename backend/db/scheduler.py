@@ -99,9 +99,51 @@ def _universe_for(market: str) -> list[str]:
                 # 반환값을 버리지 않는다. 빈 유니버스로 내려가면 이번 주기의
                 # 수집·스캔·페어가 전부 조용히 "대상 없음" 이 된다.
                 logger.warning("한국 유니버스 재생성 실패 %s — 이번 주기는 대상이 없다", res)
+        # 캐시에 중복이 남아 있을 수 있다. 만드는 쪽은 고쳤지만 TTL 이 7일이라
+        # 그 전에 저장된 목록은 그대로 돌아온다. 중복은 yfinance 프레임의
+        # 중복 열이 되어 매매신호 스캔을 죽였다 — 여기서 접고 사실을 남긴다.
+        if u and len(u) != len(set(u)):
+            dups = sorted({t for t in u if u.count(t) > 1})
+            logger.warning("한국 유니버스 캐시에 중복 %d개 — 접어서 쓴다 (%s). "
+                           "캐시가 만료되면 사라진다.", len(dups), dups[:10])
+            u = list(dict.fromkeys(u))
         return u
     from backend.services.trading_signals import get_sp500_universe
     return get_sp500_universe()
+
+
+def _held_tickers(market: str) -> list[str]:
+    """사용자가 실제로 보유한 종목. **유니버스 밖이어도 시세는 갱신돼야 한다.**
+
+    스캔 유니버스는 S&P500 / KOSPI200·KOSDAQ150 이다. 그 밖의 종목을 가진
+    사용자는 수집 대상이 아예 아니어서 일봉이 그 자리에 멈춘다. 현재가는
+    live_quotes 가 요청마다 받아오므로 총자산은 맞지만, **자산곡선·기간
+    수익률·베타는 멈춘 종가로 계산되고 화면은 그걸 측정값으로 그린다.**
+
+    운영에서 실제로 그랬다 (2026-09-11 확인):
+        207940.KS  삼성바이오로직스  최신 09-09   ← 유니버스에서 밀려남
+        AB                          최신 09-03
+        CIFR                        최신 08-25   ← 17일
+    새로고침 버튼(refresh_user_prices)은 사용자가 누를 때만 돈다.
+
+    조회가 실패하면 빈 목록을 준다 — 유니버스 수집까지 막을 이유가 없다.
+    다만 조용히 넘어가지 않는다(§1.3).
+    """
+    from backend.db import is_available, get_conn
+    if not is_available():
+        logger.warning("[%s] DB 미연결 — 보유 종목을 수집 대상에 넣지 못한다", market)
+        return []
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT ticker FROM holdings "
+                "WHERE market=%s AND ticker <> 'CASH' AND ticker <> ''",
+                (market,),
+            )
+            return [r[0] for r in cur.fetchall() if r[0]]
+    except Exception as e:
+        logger.warning("[%s] 보유 종목 조회 실패 — 유니버스만 수집한다: %s", market, e)
+        return []
 
 
 def _pairs_targets(market: str, universe: list[str]) -> list[str]:
@@ -504,13 +546,26 @@ def _update_daily_prices(max_tickers: int | None = None, market: str = "US") -> 
     stamp_key = "sp500_price_update_last" if market == "US" else f"price_update_last:{market}"
 
     universe = _universe_for(market)
-    if not universe:
-        logger.warning(f"[{market}] 유니버스가 비어 있어 가격 수집을 건너뛴다")
+    # 보유 종목을 **수집 대상에만** 더한다. 스캔 유니버스는 그대로 둔다 —
+    # 남의 소형주가 매매신호 스캔에 섞이면 그 스캔이 무엇을 훑은 것인지가
+    # 달라진다. 여기서 필요한 것은 "그 종목의 일봉이 갱신되는가" 뿐이다.
+    held  = _held_tickers(market)
+    extra = [t for t in held if t not in set(universe)]
+    if extra:
+        logger.info("[%s] 유니버스 밖 보유 종목 %d개를 수집에 포함: %s",
+                    market, len(extra), extra[:10])
+    targets = list(dict.fromkeys(list(universe) + extra))
+    if not targets:
+        logger.warning(f"[{market}] 유니버스가 비어 있고 보유 종목도 없어 가격 수집을 건너뛴다")
         return {"stale": 0, "processed": 0, "remaining": 0, "scan_refreshed": False}
+    if not universe:
+        # 유니버스만 비면 수집은 보유 종목으로 이어간다. 스캔·페어는 아래에서
+        # 어차피 유니버스를 다시 읽으므로 이 주기에는 대상이 없다.
+        logger.warning(f"[{market}] 유니버스가 비어 있다 — 보유 {len(extra)}종목만 수집한다")
 
     stale = sorted(
-        set(get_stale_tickers(universe, max_age_hours=20))
-        | set(get_volume_stale_tickers(universe))
+        set(get_stale_tickers(targets, max_age_hours=20))
+        | set(get_volume_stale_tickers(targets))
     )
     if not stale:
         save_common(
@@ -528,7 +583,7 @@ def _update_daily_prices(max_tickers: int | None = None, market: str = "US") -> 
         stale = stale[:max_tickers]
     logger.info(
         f"[{market}] 가격+거래량 수집 시작: {len(stale)}/{total_stale}개 처리 "
-        f"(전체 유니버스 {len(universe)})"
+        f"(대상 {len(targets)} = 유니버스 {len(universe)} + 보유 {len(extra)})"
     )
     _yf_log = _logging.getLogger("yfinance")
     _prev = _yf_log.level
