@@ -216,7 +216,12 @@ function OptCard({
             {[
               { label: `기대수익 · ${card.basis}`, value: `${(mode.expected_return * 100).toFixed(1)}%`, color: '#10b981' },
               { label: '변동성',   value: `${(mode.volatility * 100).toFixed(1)}%`,      color: '#ef4444' },
-              { label: '샤프비율', value: mode.sharpe_ratio.toFixed(2),                   color: card.color },
+              // 변동성이 0 이면 샤프는 정의되지 않는다. `?? 0` 으로 메우면
+              // "위험조정수익 0" 이라는 판정이 되고, 이 칸은 그걸 카드 색으로
+              // 칠해 근거 있는 결론처럼 보인다. 값이 없으면 색도 중립이다.
+              { label: '샤프비율',
+                value: mode.sharpe_ratio != null ? mode.sharpe_ratio.toFixed(2) : '—',
+                color: mode.sharpe_ratio != null ? card.color : '#64748b' },
             ].map(({ label, value, color }) => (
               <div key={label} className="bg-[#0b0f1a] rounded p-2 text-center">
                 <p className="text-[9px] text-[#64748b] mb-0.5 whitespace-nowrap">{label}</p>
@@ -374,7 +379,11 @@ function FrontierChart({
     .map(p => ({
       vol: p.volatility * 100,
       ret: p.return * 100,
-      sharpe: p.volatility > 0 ? (p.return - RISK_FREE) / p.volatility : 0,
+      // 변동성이 0 이면 샤프는 **정의되지 않는다.** 0 으로 두면 이 점이
+      // 최소값이 되어 색 정규화의 바닥을 끌어내리고(옆 점들이 실제보다 좋게
+      // 보인다) 그 구간 자체는 빨강 — '최악' 으로 칠해진다. 서버 필드에서
+      // 고친 것과 같은 형태가 여기 화면 계산에도 있었다.
+      sharpe: p.volatility > 0 ? (p.return - RISK_FREE) / p.volatility : null,
     }))
 
   const strategies = ([
@@ -385,6 +394,9 @@ function FrontierChart({
   ] as const).flatMap(({ key, label, color }) => {
     const m = modes[key]
     if (!m) return []
+    // 점은 vol·ret 으로 찍히므로 샤프가 없어도 **위치는 정확하다.** 점을
+    // 빼면 그 전략이 프론티어 어디에 있는지를 잃는데, 그건 샤프와 무관하게
+    // 잰 값이다. 그래서 점은 남기고 라벨만 '—' 로 간다.
     return [{ vol: m.volatility * 100, ret: m.expected_return * 100, sharpe: m.sharpe_ratio, label, color }]
   })
 
@@ -400,9 +412,13 @@ function FrontierChart({
   const xS = (v: number) => ((v - vMin) / (vMax - vMin)) * iW
   const yS = (r: number) => iH - ((r - rMin) / (rMax - rMin)) * iH
 
-  const sharpes = curve.map(p => p.sharpe)
+  // 정규화 범위는 **잰 값들로만** 만든다. 정의되지 않은 점을 섞으면 그 점이
+  // 최소값이 되어 나머지 구간이 실제보다 좋은 색을 받는다.
+  const sharpes = curve.map(p => p.sharpe).filter((s): s is number => s != null)
   const sMin = Math.min(...sharpes), sMax = Math.max(...sharpes)
-  const segColor = (s: number) => {
+  const segColor = (s: number | null) => {
+    // 못 구한 구간은 회색이다. 빨강은 '나쁘다' 는 판정이라 '모른다' 와 다르다.
+    if (s == null || !sharpes.length) return '#64748b'
     const t = sMax > sMin ? (s - sMin) / (sMax - sMin) : 0.5
     if (t > 0.66) return '#10b981'
     if (t > 0.33) return '#3b82f6'
@@ -484,7 +500,7 @@ function FrontierChart({
               <text x={cx} y={cy - 14} textAnchor="middle"
                 fill={color} fontSize={10} fontWeight="700">{label}</text>
               <text x={cx} y={cy - 25} textAnchor="middle"
-                fill="#64748b" fontSize={8.5}>Sharpe {sharpe.toFixed(2)}</text>
+                fill="#64748b" fontSize={8.5}>Sharpe {sharpe != null ? sharpe.toFixed(2) : '—'}</text>
             </g>
           ))}
         </g>

@@ -169,17 +169,11 @@ def test_the_empty_benchmark_matches_what_the_calculator_would_say(empty_account
 # 비어 있지 않아서 안 보인다.
 #
 # 지금 빠진 것을 적어 둔다. 채워지면 이 목록을 지우라고 요구한다.
-_KNOWN_MISSING = {
-    "market_open": "장 개폐는 보유와 무관한 시장 상태다 — 빈 계정에서도 답이 있다",
-    # d833be9 이 추가한 베타 근거. 빈 계정에서는 0 / 0 / None 이 맞다
-    # (센 종목이 없다는 사실이고, 비중은 분모가 없어 값이 없다).
-    # 빈 응답 조립은 routers/portfolio.py 라 develop 이 채운다 — 채워지면
-    # 아래 test_the_missing_list_does_not_outlive_the_gap 이 이 줄을 지우라고
-    # 요구한다.
-    "beta_counted": "agent/develop 이 채운다 — 빈 계정에서는 0",
-    "beta_holdings": "같은 자리 — 빈 계정에서는 0",
-    "beta_value_share": "같은 자리 — 분모가 없어 None",
-}
+# 비어 있는 것이 정상이다. 네 항목(market_open · beta_counted ·
+# beta_holdings · beta_value_share)이 여기 있었고 routers/portfolio.py 가
+# 채웠다 — 아래 test_the_missing_list_does_not_outlive_the_gap 이 지우라고
+# 요구해서 지웠다. 원장이 제 역할을 한 자리다.
+_KNOWN_MISSING: dict[str, str] = {}
 
 
 def test_no_new_field_goes_missing_from_the_empty_response(empty_account):

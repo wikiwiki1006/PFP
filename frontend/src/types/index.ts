@@ -453,7 +453,10 @@ export interface OptimizationResult {
   weights: { [ticker: string]: number }
   expected_return: number
   volatility: number
-  sharpe_ratio: number
+  /** null = 변동성이 0 이라 **정의되지 않음**. 0 이 아니다 — 0 은 "위험조정
+   *  수익이 없다" 는 판정이고 화면에서 최악으로 칠해진다.
+   *  sortino_ratio·max_drawdown 과 같은 규약이다. */
+  sharpe_ratio: number | null
   method: string
   frontier: FrontierPoint[]
   equal_weight_sharpe: number
@@ -492,7 +495,10 @@ export interface OptimizationMode {
   weights: { [ticker: string]: number }
   expected_return: number
   volatility: number
-  sharpe_ratio: number
+  /** null = 변동성이 0 이라 **정의되지 않음**. 0 이 아니다 — 0 은 "위험조정
+   *  수익이 없다" 는 판정이고 화면에서 최악으로 칠해진다.
+   *  sortino_ratio·max_drawdown 과 같은 규약이다. */
+  sharpe_ratio: number | null
   // 확장 리스크 지표 (역사 데이터 기반)
   sortino_ratio?: number
   max_drawdown?: number

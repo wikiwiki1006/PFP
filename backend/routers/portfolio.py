@@ -31,6 +31,8 @@ from backend.services.portfolio_calculator import (
     build_return_pct_curve,
     return_pct_to_records,
     realized_pnl_from_log,
+    portfolio_beta_detail,
+    _market_open_flag,
 )
 
 # ─── 시세·현금·섹터 로직은 services 로 분리 ──────────────────────────────────
@@ -865,6 +867,11 @@ def get_metrics(_auth: dict = Depends(current_user), market: str = Depends(marke
         from backend.services.markets import benchmark_for, get_market
         _bench = benchmark_for(market)
         _rp = realized_pnl_from_log([])
+        # 베타 근거도 같은 방식이다 — 빈 보유·빈 프레임으로 정상 경로 함수를
+        # 그대로 부른다. 실측으로 counted 0 · holdings 0 · value_share None 이
+        # 나오는데, 그 값을 여기 적어 두면 계산이 바뀔 때 이 세 줄만 옛 답을
+        # 계속 말한다.
+        _bd = portfolio_beta_detail({}, pd.DataFrame(), _bench)
         # 보유가 없는 것은 **새 사용자의 정상 상태**다 (§1.3 마지막 항목).
         # 예전에는 400 을 던졌는데, 그러면 서버가 정상 상태를 클라이언트
         # 오류라고 부르고 그 사용자는 화면을 열 때마다 콘솔에 400 을 둘씩
@@ -910,6 +917,12 @@ def get_metrics(_auth: dict = Depends(current_user), market: str = Depends(marke
                 "realized_pnl_pct":    _rp.pct,
                 "realized_pnl_reason": _rp.reason,
                 "realized_sales":      _rp.sales,
+                "beta_counted":        _bd.counted,
+                "beta_holdings":       _bd.holdings_n,
+                "beta_value_share":    _bd.value_share,
+                # 장 개폐는 보유와 무관하게 시장이 정한다. 빈 계정이라고
+                # 시장이 닫혀 있는 것은 아니다.
+                "market_open":         _market_open_flag(market),
             },
             # 벤치마크는 보유와 무관하게 시장이 정한다. 빈 포트폴리오라고
             # 라벨까지 지울 이유가 없다 — 차트 범례가 '벤치마크' 로 떨어진다.
@@ -976,6 +989,21 @@ def get_metrics(_auth: dict = Depends(current_user), market: str = Depends(marke
     # (현금에 남고 현금은 이 계산에서 빠진다). 매도가 많은 사용자에게는 누적
     # 수익이 과소 표시된다. 그 답은 실현손익 별도 필드지, 옆 두 숫자와 기준이
     # 다른 필드가 아니다.
+    # `calculate_metrics` 는 프레임이 비었거나 **행이 2개 미만**이면 `{}` 를
+    # 돌려준다 (portfolio_calculator:697·703). 위의 `close_df.empty` 가드는
+    # 그중 앞의 절반만 막는다 — 행이 정확히 1개면 통과해서 `{}` 가 200 으로
+    # 나간다.
+    #
+    # 그러면 화면이 **아무 말 없이 빈다.** 프론트는 `isError` 도 아니고
+    # `is_empty` 도 아니라서 오류도 "보유 없음" 도 못 띄우고, 지표 바의
+    # 게이트(`typeof m.total_equity === 'number'`)만 조용히 거짓이 된다.
+    # 실패가 성공처럼 보이는 자리다 (§1.3).
+    #
+    # 바로 위 `close_df.empty` 와 같은 답을 준다 — 원인이 같기 때문이다
+    # (지표를 낼 만큼의 가격 이력이 없다).
+    if not metrics:
+        raise HTTPException(status_code=400, detail="가격 데이터 부족")
+
     return metrics
 
 
