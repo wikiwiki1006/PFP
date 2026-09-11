@@ -260,8 +260,12 @@ export interface SignalScanPick {
   /** 당일 MACD 히스토그램 */
   macd_hist: number
   macd_hist_prev: number
-  /** 항목별 배점 (수급 /40, 모멘텀 /30, 추세 /30) */
-  components: { volume: number; momentum: number; trend: number }
+  /** 항목별 배점 (수급 /40, 모멘텀 /30, RSI /30).
+   *
+   *  세 번째는 **RSI 점수**다. 예전 키가 `trend` 여서 화면에 "추세" 로
+   *  그려졌는데, 점수 공식에 추세 항목은 아예 없다 — s_vol·s_mom·s_rsi 셋이다.
+   *  `trend` 는 서버가 호환을 위해 같은 값으로 당분간 함께 보낸다. */
+  components: { volume: number; momentum: number; rsi: number; trend?: number }
   reason: string
   /** 종목명. 한국 시장에서만 채워진다 — 코드만으로는 회사를 알 수 없어서다. */
   name?: string

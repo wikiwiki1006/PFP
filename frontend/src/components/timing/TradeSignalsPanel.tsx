@@ -49,7 +49,7 @@ function PickRow({
       <div className="mt-1.5 space-y-1">
         <ScoreBar label="수급"   value={p.components.volume}   max={40} color={color} />
         <ScoreBar label="모멘텀" value={p.components.momentum} max={30} color={color} />
-        <ScoreBar label="추세"   value={p.components.trend}    max={30} color={color} />
+        <ScoreBar label="RSI"    value={p.components.rsi}      max={30} color={color} />
       </div>
     </button>
   )
@@ -108,7 +108,7 @@ function TickerScoreCard({ ticker }: { ticker: string }) {
             <div className="space-y-1">
               <ScoreBar label="수급"   value={side.components.volume}   max={40} color={color} />
               <ScoreBar label="모멘텀" value={side.components.momentum} max={30} color={color} />
-              <ScoreBar label="추세"   value={side.components.trend}    max={30} color={color} />
+              <ScoreBar label="RSI"    value={side.components.rsi}      max={30} color={color} />
             </div>
           </div>
         )
