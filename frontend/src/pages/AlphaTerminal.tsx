@@ -666,12 +666,17 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
   }, [bm])
 
   // ── 매매 / 입출금 포인트 dot 렌더러 ────────────────────────────────────────
+  // recharts 가 이 렌더러의 반환을 **배열로** 그린다. key 가 없으면 React 가
+  // 위치로 매칭해 이전 포인트의 DOM 을 재사용한다 — 시장을 전환하거나 구간을
+  // 바꿔 포인트 집합이 달라질 때 엉뚱한 자리에 마커가 남는다.
+  // 날짜가 포인트의 고유 식별자다.
   const tradeDot = (props: any) => {
     const { cx, cy, payload } = props
+    const k = `dot-${payload?.date ?? `${cx}-${cy}`}`
     const hasCashFlow = payload?.cash_flow != null
     const hasTrades   = payload?.trades?.length > 0
 
-    if (!hasCashFlow && !hasTrades) return <g />
+    if (!hasCashFlow && !hasTrades) return <g key={k} />
 
     // 입출금 이벤트: 다이아몬드 ◆ (입금=amber, 출금=rose)
     if (hasCashFlow) {
@@ -679,7 +684,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
       const color     = isDeposit ? '#f59e0b' : '#f43f5e'
       const s = 6  // 반지름
       return (
-        <g>
+        <g key={k}>
           <polygon
             points={`${cx},${cy - s} ${cx + s},${cy} ${cx},${cy + s} ${cx - s},${cy}`}
             fill={color} opacity={0.9}
@@ -697,7 +702,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
     const hasSell = payload.trades.some((t: any) => t.type === 'SOLD' || t.type === 'SELL')
     const color   = hasBuy && hasSell ? '#f59e0b' : hasBuy ? '#10b981' : '#ef4444'
     return (
-      <g>
+      <g key={k}>
         <circle cx={cx} cy={cy} r={6}  fill="#0b1220" stroke={color} strokeWidth={1.5} />
         <circle cx={cx} cy={cy} r={3}  fill={color} />
       </g>
