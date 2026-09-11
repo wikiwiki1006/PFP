@@ -177,7 +177,7 @@ def pairs_signal(
 
     return {
         "current_z":      round(result["current_z"], 4),
-        "current_signal": str(result["current_signal"]) if result["current_signal"] else None,
+        "current_signal": _signal_or_none(result["current_signal"]),
         "beta":           round(result["beta"], 4),
         "correlation":    round(result["correlation"], 4),
         "is_valid_pair":  result["is_valid_pair"],
@@ -202,7 +202,7 @@ def mean_reversion(
     result = mean_reversion_signal(close_df[ticker].dropna(), window=window, n_std=n_std)
 
     return {
-        "current_signal": str(result["current_signal"]) if result["current_signal"] else None,
+        "current_signal": _signal_or_none(result["current_signal"]),
         "current_price":  round(float(result["current_price"]), 2),
         "upper_band":     round(float(result["upper_band"].iloc[-1]), 2),
         "lower_band":     round(float(result["lower_band"].iloc[-1]), 2),
@@ -210,6 +210,42 @@ def mean_reversion(
         "pct_b":          round(float(result.get("pct_b", 0.5)), 4),
         "current_z":      round(float(result.get("current_z", 0.0)), 4),
     }
+
+
+def _volume_for(ticker: str) -> Optional[pd.Series]:
+    """DB 의 일별 거래량. 없으면 None.
+
+    예전에는 호출부가 `volume=None` 을 하드코딩했다. 그러면 서비스 쪽이
+    `breakout_vol = pd.Series(True, ...)` 로 채워 **거래량 조건이 항상 참**이
+    되고, 응답에는 `volume_surge: true` · `volume_ratio: 1.0` 이 측정값인 척
+    나갔다 — docstring 은 "거래량 급증" 을 조건으로 내걸고 있는데도.
+
+    데이터는 있었다. 같은 순간 /signals/signal-score 는 같은 종목에
+    volume_ratio 0.18 을 준다. 이 경로만 안 쓰고 있었다.
+    """
+    from backend.db.market_cache import get_volume_from_db
+    vol_df = get_volume_from_db([ticker], period="1y")
+    if vol_df is None or ticker not in getattr(vol_df, "columns", []):
+        return None
+    s = vol_df[ticker].dropna()
+    return s if not s.empty else None
+
+
+def _signal_or_none(v) -> Optional[str]:
+    """신호 이름. 값이 없거나 NaN 이면 None.
+
+    `str(v) if v else None` 이었다. **float('nan') 은 truthy** 라 그 가드를
+    통과하고 `str(nan)` = "nan" 이 프론트로 나갔다 — 화면이 그걸 신호 이름으로
+    받는다.
+    """
+    if v is None:
+        return None
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return str(v) or None
 
 
 @router.get("/momentum")
@@ -226,12 +262,12 @@ def momentum_breakout(
         raise HTTPException(status_code=400, detail=f"{ticker} 데이터 없음")
 
     price  = close_df[ticker].dropna()
-    result = momentum_breakout_signal(price, volume=None, lookback=lookback)
+    result = momentum_breakout_signal(price, volume=_volume_for(ticker), lookback=lookback)
 
     resistance = result["resistance"].iloc[-1]
 
     return {
-        "current_signal":    str(result["current_signal"]) if result["current_signal"] else None,
+        "current_signal":    _signal_or_none(result["current_signal"]),
         "current_price":     round(float(result["current_price"]), 2),
         "resistance":        round(float(resistance), 2) if not pd.isna(resistance) else None,
         "is_breakout_today": bool(result["is_breakout_today"]),
@@ -254,7 +290,7 @@ def multi_signal(
 
     price = close_df[ticker].dropna()
     mr    = mean_reversion_signal(price)
-    mb    = momentum_breakout_signal(price, volume=None)
+    mb    = momentum_breakout_signal(price, volume=_volume_for(ticker))
 
     mr_signal = mr["current_signal"]
     mb_signal = mb["current_signal"]
@@ -266,12 +302,12 @@ def multi_signal(
     return {
         "ticker": ticker,
         "mean_reversion": {
-            "current_signal": str(mr_signal) if mr_signal else None,
+            "current_signal": _signal_or_none(mr_signal),
             "current_z":      round(float(mr["current_z"]), 4),
             "pct_b":          round(float(mr.get("pct_b", 0.5)), 4),
         },
         "momentum": {
-            "current_signal":    str(mb_signal) if mb_signal else None,
+            "current_signal":    _signal_or_none(mb_signal),
             "is_breakout_today": bool(mb["is_breakout_today"]),
         },
         "signals_agree": agreement,
