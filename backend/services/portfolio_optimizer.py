@@ -156,12 +156,17 @@ def _compute_extended_metrics(
         # 이 파이프라인은 벤치마크를 **항상** 요청하므로, 없다는 것은 수집 실패다.
         beta_reason = "no_benchmark"
     else:
+        # 판정 기준은 `portfolio_calculator` 에 한 곳으로 모았다. 예전에는 이
+        # 자리가 30일·1e-8, 종목 상세가 60일·1e-12 로 갈려 있었다.
+        from backend.services.portfolio_calculator import (
+            BETA_MIN_OVERLAP, BETA_MIN_VARIANCE,
+        )
         aligned = pd.concat([port_ret, benchmark_returns.rename("bench")], axis=1).dropna()
-        if len(aligned) < 30:
+        if len(aligned) < BETA_MIN_OVERLAP:
             beta_reason = "insufficient_overlap"
         else:
             cov_mat = aligned.cov().values
-            if cov_mat[1, 1] > 1e-8:
+            if cov_mat[1, 1] > BETA_MIN_VARIANCE:
                 beta = float(cov_mat[0, 1] / cov_mat[1, 1])
             else:
                 # 지수 수익률의 분산이 0 — 같은 값이 반복되는 프레임이다.

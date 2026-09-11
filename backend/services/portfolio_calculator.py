@@ -334,6 +334,33 @@ def _trades_by_chart_date(trade_markers, chart_dates: list[str]) -> dict:
 
 # ── 포트폴리오 베타 ────────────────────────────────────────────────────────────
 
+# ── 베타의 판정 기준 — **단일 출처** ──────────────────────────────────────────
+#
+# 세 곳이 같은 베타를 계산하면서 기준이 달랐다. 실측으로 드러난 결과:
+# 관측치 45일 종목 하나를 포트폴리오 베타는 2.036 으로, 종목 상세는 '—' 로 줬다.
+# **같은 데이터에 두 화면이 다르게 답하는 것 자체가 결함**이다 (응답이 자기
+# 자신과 모순될 이유가 없다). 그래서 값을 여기 한 곳에 둔다 —
+# `markets.benchmark_for` 가 지수 선택 규칙을 한 곳에 둔 것과 같은 이유다.
+#
+#   portfolio_calculator.portfolio_beta_detail        (포트폴리오 베타)
+#   quant_metrics.compute_optimizer_context           (종목 상세 베타)
+#   portfolio_optimizer._compute_extended_metrics     (최적화 카드 베타)
+#
+# 60일: 30일은 **오차가 큰 추정치를 확정된 측정값으로** 화면에 내보낸다.
+# 45일 관측으로 만든 베타는 틀린 값이 아니라 신뢰구간이 넓은 값인데, 화면은
+# 그걸 숫자 하나로 그린다 — §1.3 이 막으려는 방향과 반대다. 엄격해지는 비용
+# (지금 값이 보이던 일부가 '—' 가 된다)은 `beta_counted`·`beta_holdings`·
+# `beta_value_share` 가 빠진 양을 응답에 싣게 되면서 사라졌다.
+#
+# 1e-12: 실데이터에서 두 하한(1e-8·1e-12)은 **출력이 같다** — 200종목 × 창
+# 3개 = 600개 표본 전부 분산이 1e-8 을 넘었고 최솟값이 2.902e-05(USDKRW=X)로
+# 하한의 약 3,000배다. 차이가 나는 것은 "60일 중 한 번만 1틱 움직인 계열"
+# (분산 1.7e-10) 같은 입력인데 실데이터에 없다. 그래서 값의 우열이 아니라
+# 일관성으로 정했다 (셋 중 둘이 이미 1e-12).
+BETA_MIN_OVERLAP = 60      # 벤치마크와 겹치는 최소 관측일
+BETA_MIN_VARIANCE = 1e-12  # 벤치마크 수익률 분산의 하한 (이하면 베타 정의 안 됨)
+
+
 class PortfolioBeta(NamedTuple):
     """포트폴리오 베타와 **그 값이 무엇을 덮는지**.
 
@@ -391,7 +418,7 @@ def portfolio_beta_detail(
             return PortfolioBeta(None, 0, len(stock_tickers), None)
         mkt_ret = close_df[benchmark].pct_change().dropna()
         mkt_var = mkt_ret.var()
-        if mkt_var <= 1e-12:
+        if mkt_var <= BETA_MIN_VARIANCE:
             return PortfolioBeta(None, 0, len(stock_tickers), None)
 
         if not stock_tickers:
@@ -411,13 +438,13 @@ def portfolio_beta_detail(
                 px_t = 0.0
             all_values.append(px_t * _safe_or(holdings[t]["q"], 0.0))
             beta_t = None
-            if len(common) < 30:
+            if len(common) < BETA_MIN_OVERLAP:
                 beta_t = None
             else:
                 # 공분산과 분산을 같은 표본(common)에서 계산해야 베타가 성립한다.
                 # 분모만 전체 벤치마크 구간을 쓰면 표본이 어긋나 베타가 왜곡된다.
                 mv = float(mkt_ret.loc[common].var())
-                if mv > 1e-12:
+                if mv > BETA_MIN_VARIANCE:
                     cov = np.cov(s_ret.loc[common], mkt_ret.loc[common])[0, 1]
                     beta_t = cov / mv
                     if math.isfinite(beta_t):

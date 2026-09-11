@@ -332,15 +332,21 @@ def compute_optimizer_context(
     # 무관하게 그 하나만 봤다. 한국 종목의 베타가 S&P 대비로 나갔다 —
     # 계산은 맞고 질문이 틀렸는데 맞는 답처럼 보인다.
     from backend.services.markets import benchmark_for
+    # 판정 기준은 `portfolio_calculator` 에 한 곳으로 모았다 — 예전에는 이
+    # 자리가 60일, 포트폴리오 베타가 30일이라 같은 종목을 두 화면이 다르게
+    # 판정했다 (관측치 45일 종목: 2.036 vs '—').
+    from backend.services.portfolio_calculator import (
+        BETA_MIN_OVERLAP, BETA_MIN_VARIANCE,
+    )
     bench = benchmark_for(market)
     beta = None
     try:
         if bench in close_df.columns:
             mkt = close_df[bench].pct_change().dropna()
             common = rets.index.intersection(mkt.index)
-            if len(common) >= 60:
+            if len(common) >= BETA_MIN_OVERLAP:
                 mv = float(mkt.loc[common].var())
-                if mv > 1e-12:
+                if mv > BETA_MIN_VARIANCE:
                     beta = round(float(np.cov(rets[ticker].loc[common], mkt.loc[common])[0, 1] / mv), 3)
     except Exception:
         # 이 블록은 예외 없이도 None 이 된다 (기준 지수 없음 · 공통 구간 60일
