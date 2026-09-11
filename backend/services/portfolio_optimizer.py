@@ -839,24 +839,50 @@ def _run_pypfopt(
     tgt_ret = _attach_ext(_opt(ret_bl, S, "efficient_return", effective_target))
 
     # ── Step 4: 효율적 프론티어 (30개 점 + 최소분산 꼭짓점) ──────────────────
+    #
+    # 곡선이 짧아지는 길이 **셋**이고 예전에는 하나만 로그에 남았다:
+    #   ① 루프가 예외로 죽는다              → except 가 로그를 남겼다
+    #   ② 어떤 목표수익에서 해가 없다        → `if pt:` 가 조용히 건너뛴다
+    #   ③ 최소분산~최대수익 구간이 없다      → 루프가 아예 안 돈다 (꼭짓점 1점)
+    #
+    # 셋 다 **절반짜리 곡선이 화면에서 전체 효율적 프론티어로 그려지는** 결과가
+    # 되고, 응답만 보면 짧아진 것이 데이터 한계인지 계산 실패인지 구별되지
+    # 않는다. 위장하는 값이 0 이 아니라 **그럴듯한 곡선**이라 의심을 안 받는다.
+    # 로그는 사후 추적용이고, 화면이 "일부 구간만 계산됨" 을 말하려면 응답이
+    # 그 사실을 들고 있어야 한다 — `posterior_source` 와 같은 방식으로 싣는다.
+    FRONTIER_POINTS = 30
     frontier: list[dict] = []
+    frontier_requested = (1 if _mv else 0)
+    frontier_reason: str | None = None
     try:
         if _mv:
             frontier.append({"return": _mv["expected_return"], "volatility": _mv["volatility"]})
         if r_hi > r_mv + 1e-3:
-            for tr in np.linspace(r_mv + 1e-3, r_hi, 30):
+            frontier_requested += FRONTIER_POINTS
+            gaps = 0
+            for tr in np.linspace(r_mv + 1e-3, r_hi, FRONTIER_POINTS):
                 pt = _opt(ret_bl, S, "efficient_return", tr)
                 if pt:
                     frontier.append({"return": pt["expected_return"], "volatility": pt["volatility"]})
+                else:
+                    gaps += 1
+            if gaps:
+                # `_opt` 가 점마다 로그를 남기지만, **곡선이 짧아졌다는 사실**은
+                # 아무도 세지 않았다. 여기서 세서 응답에 싣는다.
+                frontier_reason = "solver_gaps"
+                logger.warning("효율적 프론티어 %d/%d 점에서 해를 찾지 못했다 — "
+                               "곡선이 그만큼 짧아진다", gaps, FRONTIER_POINTS)
+        elif _mv:
+            # 최소분산 지점과 최대수익 지점이 사실상 같다 — 그릴 곡선이 없다.
+            # 실패가 아니라 입력의 성질이므로 이유를 구별해 싣는다.
+            frontier_reason = "no_return_span"
     except Exception:
-        # 루프 중간에 죽으면 그때까지 쌓인 점이 남는다. 그 절반짜리 곡선이
-        # 화면에서는 **전체 효율적 프론티어**로 그려진다 — 짧아진 것이
-        # 데이터 한계인지 계산 실패인지 구별되지 않는다.
-        #
-        # 지우지 않는다. 점 몇 개라도 있는 것이 없는 것보다 낫고, 몇 개까지
-        # 만들어졌는지가 로그에 남으면 그 판단을 사람이 할 수 있다.
-        logger.warning("효율적 프론티어 생성 실패 — %d개 점까지만 만들어졌다 "
-                       "(곡선이 잘린 채 그려진다)", len(frontier), exc_info=True)
+        # 루프 중간에 죽으면 그때까지 쌓인 점이 남는다. 지우지 않는다 — 점
+        # 몇 개라도 있는 것이 없는 것보다 낫다. 대신 절단 사실을 응답에 싣는다.
+        frontier_reason = "exception"
+        logger.warning("효율적 프론티어 생성 실패 — %d/%d개 점까지만 만들어졌다 "
+                       "(곡선이 잘린 채 그려진다)", len(frontier),
+                       frontier_requested, exc_info=True)
 
     # 상관관계
     corr = daily_rets_raw.corr()
@@ -878,6 +904,14 @@ def _run_pypfopt(
         # 어떤 값으로도 재현할 수 없었다 (실측 차이 15.1pp). 함께 싣는다.
         "historical_returns": {t: round(float(mu_hist.get(t, 0.0)), 4) for t in tickers},
         "frontier":   frontier,
+        # 곡선이 요청한 만큼 만들어졌는가. `frontier` 만 보면 짧은 곡선과
+        # 온전한 곡선이 구별되지 않는다 — 화면은 둘 다 '효율적 프론티어' 로
+        # 그린다. 이유 코드는 `no_return_span`(구간이 없다) ·
+        # `solver_gaps`(일부 점에 해가 없다) · `exception`(중간에 죽었다).
+        "frontier_complete":  frontier_reason is None,
+        "frontier_points":    len(frontier),
+        "frontier_requested": frontier_requested,
+        "frontier_reason":    frontier_reason,
         "correlation": {
             "tickers": list(corr.index),
             "matrix":  [[round(float(v), 3) for v in row] for row in corr.values],
@@ -1015,6 +1049,12 @@ def run_ai_optimization(
         "posterior_source":       opt["posterior_source"],
         "historical_returns":     opt["historical_returns"],
         "frontier":               opt["frontier"],
+        # 절단 사실을 파이프라인 응답에도 싣는다 — 라우터는 이 함수만 부르므로
+        # 여기서 빠뜨리면 `posterior_source` 처럼 클라이언트에 도달하지 않는다.
+        "frontier_complete":      opt["frontier_complete"],
+        "frontier_points":        opt["frontier_points"],
+        "frontier_requested":     opt["frontier_requested"],
+        "frontier_reason":        opt["frontier_reason"],
         "correlation":            opt["correlation"],
         "data_period":            auto_period,
         # 베타가 무엇 대비인지 응답이 말한다. 화면이 "베타" 라고만 쓰면
