@@ -247,7 +247,12 @@ type CurvePoint = {
   total_equity?: number
   cash_flow?: number   // 양수=입금, 음수=출금
   trades: { ticker: string; type: string; q: number; price: number }[]
-  holdings: { ticker: string; return_pct: number; price: number }[]
+  // return_pct·price 는 null 일 수 있다. 시세 이력이 시작되기 전(상장 전·
+  // 백필 불가 구간)에는 값이 없다. 예전에는 가격을 0 으로 채워
+  // (0/avg - 1)*100 = **-100%** 를 보고했다 — 유한한 값이라 NaN 가드에
+  // 걸리지 않는다. 0 은 '보합'이라는 오해지만 -100% 는 '전액 손실'이라는
+  // 확신이라 더 나쁘다.
+  holdings: { ticker: string; return_pct: number | null; price: number | null }[]
 }
 
 /**
@@ -573,7 +578,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
             {d.holdings.map((h, i) => (
               <div key={i} className="flex items-center justify-between gap-3 mt-0.5">
                 <span className="text-[11px] text-[#cbd5e1] truncate">{displayTicker(h.ticker, names)}</span>
-                <span className="font-mono text-[11px]" style={{ color: h.return_pct >= 0 ? '#10b981' : '#ef4444' }}>
+                <span className="font-mono text-[11px]" style={{ color: chgColor(h.return_pct) }}>
                   {fp(h.return_pct, 2)}
                 </span>
               </div>
