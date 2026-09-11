@@ -145,6 +145,7 @@ def fetch_top_by_marketcap() -> tuple[list[str], dict[str, str]]:
 
     universe: list[str] = []
     names: dict[str, str] = {}
+    seen: set[str] = set()
     for board, suffix, want in _NAVER_BOARDS:
         picked: list[str] = []
         page = 1
@@ -170,6 +171,15 @@ def fetch_top_by_marketcap() -> tuple[list[str], dict[str, str]]:
                     continue
                 if _is_common_stock(code):
                     ticker = f"{code}{suffix}"
+                    # 페이지 사이에 중복이 생긴다. 이 API 는 시총 내림차순으로
+                    # **실시간 정렬**하므로, page 1 을 받고 page 2 를 받는 사이에
+                    # 순위가 바뀐 종목이 양쪽에 들어온다. 운영 캐시가 350종목인데
+                    # 고유는 348 이었고, 그 중복이 yfinance 프레임의 **중복 열**이
+                    # 되어 매매신호 스캔을 20분마다 죽이고 있었다
+                    # (close_df[c] 가 Series 가 아니라 DataFrame 이 된다).
+                    if ticker in seen:
+                        continue
+                    seen.add(ticker)
                     picked.append(ticker)
                     names[ticker] = name
             page += 1

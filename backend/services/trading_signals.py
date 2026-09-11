@@ -577,6 +577,18 @@ def sma_macd_rsi_scan(
         return empty
 
     close_df = close_df.sort_index()
+    # 중복 열을 먼저 접는다. 유니버스에 같은 티커가 두 번 들어오면 yfinance
+    # 프레임의 열 이름이 중복되고, 그러면 close_df[c] 가 Series 가 아니라
+    # DataFrame 이라 아래 int(...) 가 TypeError 로 터진다 — 스캔 전체가 죽는다.
+    # 실제로 한국 유니버스가 그 상태였고 20분마다 실패하고 있었다.
+    #
+    # 만드는 쪽(korea_universe)도 고쳤지만 여기서도 접는다. 이 함수는 유니버스
+    # 말고도 여러 곳에서 프레임을 받고, 운영 캐시에 이미 들어간 중복은 캐시가
+    # 만료될 때까지 계속 들어온다.
+    if close_df.columns.has_duplicates:
+        dups = close_df.columns[close_df.columns.duplicated()].unique().tolist()
+        logger.warning("스캔 입력에 중복 열 %d개 — 첫 열만 쓴다: %s", len(dups), dups[:10])
+        close_df = close_df.loc[:, ~close_df.columns.duplicated()]
     valid = [c for c in close_df.columns if int(close_df[c].notna().sum()) >= min_history]
     if not valid:
         return empty
