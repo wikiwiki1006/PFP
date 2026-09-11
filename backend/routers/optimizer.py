@@ -25,8 +25,6 @@ from backend.services.optimizer import (
     optimize_max_sharpe,
     optimize_black_litterman,
     build_regime_views,
-    factor_analysis,
-    generate_proxy_factors,
 )
 
 router = APIRouter(prefix="/api/optimizer", tags=["optimizer"])
@@ -92,12 +90,6 @@ class BlackLittermanRequest(BaseModel):
     risk_aversion:   float = 2.5
 
 
-class FactorAnalysisRequest(BaseModel):
-    tickers: Optional[list[str]] = None
-    weights: Optional[dict[str, float]] = None
-    period:  str = "1y"
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # 최적화 엔드포인트
 # ══════════════════════════════════════════════════════════════════════════════
@@ -141,29 +133,6 @@ def black_litterman(req: BlackLittermanRequest, _auth: Optional[dict] = Depends(
         risk_free_rate=req.risk_free_rate,
         risk_aversion=req.risk_aversion,
     )
-
-
-@router.post("/factor-analysis")
-def run_factor_analysis(req: FactorAnalysisRequest, _auth: Optional[dict] = Depends(optional_user), market: str = Depends(market_param)):
-    """Fama-French 스타일 4팩터 분석 (대용 팩터 자동 생성)."""
-    tickers = _resolve_tickers(req.tickers, _auth, market)
-
-    daily_returns = _fetch_returns(tickers, req.period)
-
-    # 보유 비중 결정
-    if req.weights:
-        w = np.array([req.weights.get(t, 1.0 / len(daily_returns.columns))
-                      for t in daily_returns.columns])
-    else:
-        w = np.full(len(daily_returns.columns), 1.0 / len(daily_returns.columns))
-    w /= w.sum()
-
-    port_returns  = (daily_returns.values @ w)
-    market_ret    = daily_returns.mean(axis=1).values
-    factor_df     = generate_proxy_factors(market_ret, len(port_returns))
-
-    return factor_analysis(port_returns, factor_df)
-
 
 
 # ══════════════════════════════════════════════════════════════════════════════

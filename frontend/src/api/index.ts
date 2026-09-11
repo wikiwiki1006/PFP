@@ -4,9 +4,9 @@ import { getMarket } from '@/lib/market'
 import type {
   PortfolioMetrics, EquityCurvePoint, HoldingsMap, HoldingDetail,
   SectorWeights, Trade, TradeForm, MarketSnapshot, SectorData,
-  MacroData, NewsItem, EarningsEvent, CorrelationMatrix,
+  MacroData, NewsItem, EarningsEvent,
   ScanResult, PairsSignal, MeanReversionSignal, MomentumSignal,
-  MarketRegime, OptimizationResult, FactorAnalysisResult,
+  MarketRegime, OptimizationResult,
   MacroModes, MacroAnalysisResult, AnalystFeedback,
   DailyBriefResult, ReportFile, Industry, EquityReportResult, IndustryReportResult,
   MarketSituation, SignalScanResult, SignalScoreResult, TechnicalChartResult, PairsAutoResult,
@@ -156,11 +156,6 @@ export const getMarketNews = async (tickers: string[]): Promise<NewsItem[]> =>
 export const getEarnings = async (tickers: string[]): Promise<EarningsEvent[]> =>
   (await api.get('/api/market/earnings', { params: { tickers: tickers.join(',') } })).data
 
-export const getCorrelation = async (tickers?: string[], period = '1y'): Promise<CorrelationMatrix> =>
-  (await api.get('/api/market/correlation', {
-    params: tickers?.length ? { tickers: tickers.join(','), period } : { period },
-  })).data
-
 export const getIndexPrices = async (ticker: string, period = '2y'): Promise<{ date: string; close: number }[]> => {
   const data = (await api.get('/api/market/prices', { params: { tickers: ticker, period } })).data
   return (data[0]?.series as { date: string; close: number }[]) || []
@@ -216,9 +211,6 @@ export const runMaxSharpe = async (body?: object): Promise<OptimizationResult> =
 
 export const runBlackLitterman = async (body?: object): Promise<OptimizationResult> =>
   (await api.post('/api/optimizer/black-litterman', body || {})).data
-
-export const runFactorAnalysis = async (body?: object): Promise<FactorAnalysisResult> =>
-  (await api.post('/api/optimizer/factor-analysis', body || {})).data
 
 export const runAIOptimize = async (body: {
   tickers?: string[]

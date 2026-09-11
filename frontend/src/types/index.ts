@@ -208,12 +208,6 @@ export interface EarningsEvent {
   div_yield: string | null
 }
 
-export interface CorrelationMatrix {
-  tickers: string[]
-  labels?: string[]
-  matrix: number[][]
-}
-
 // Signals Types
 export interface SignalPick {
   ticker: string
@@ -441,20 +435,6 @@ export interface OptimizationResult {
   posterior_returns?: { [ticker: string]: number }
   views_applied?: boolean
   has_views?: boolean
-}
-
-export interface FactorAnalysisResult {
-  alpha: number
-  betas: {
-    Market: number
-    SMB: number
-    HML: number
-    MOM: number
-    [key: string]: number
-  }
-  r_squared: number
-  factor_contribution: { [key: string]: number }
-  residual_vol: number
 }
 
 // AI Portfolio Optimization Types

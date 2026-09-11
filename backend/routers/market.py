@@ -167,58 +167,6 @@ def earnings_dividends(
     return get_earnings_dividends(ticker_list)
 
 
-_TICKER_LABELS: dict[str, str] = {
-    "^GSPC":    "S&P 500",
-    "^IXIC":    "NASDAQ",
-    "^KS11":    "KOSPI",
-    "^KQ11":    "KOSDAQ",
-    "XLK":      "Technology",
-    "XLF":      "Financials",
-    "XLC":      "Communication",
-    "XLY":      "Cons. Disc",
-    "XLV":      "Healthcare",
-    "XLI":      "Industrials",
-    "XLP":      "Cons. Staples",
-    "XLE":      "Energy",
-    "XLU":      "Utilities",
-    "XLB":      "Materials",
-    "XLRE":     "Real Estate",
-    "^VIX":     "VIX",
-    "^TNX":     "10Y Bond",
-    "^IRX":     "3M Bond",
-    "GC=F":     "Gold",
-    "BTC-USD":  "Bitcoin",
-    "CL=F":     "Crude Oil",
-    "USDKRW=X": "USD/KRW",
-    "SPY":      "S&P ETF",
-    "QQQ":      "NASDAQ ETF",
-}
-
-
-@router.get("/correlation")
-def correlation_matrix(
-    tickers: Optional[str] = Query(default=None, description="콤마 구분 티커 (없으면 시장 지수 기본값)"),
-    period: str = Query(default="1y"),
-):
-    """지정 자산들의 수익률 상관관계 행렬."""
-    DEFAULT_TICKERS = ["^GSPC", "^IXIC", "XLK", "XLF", "XLE", "^VIX", "^TNX", "GC=F", "BTC-USD", "CL=F"]
-    ticker_list = (
-        [t.strip().upper() for t in tickers.split(",") if t.strip()]
-        if tickers else DEFAULT_TICKERS
-    )
-
-    close_df = get_close_df(ticker_list, period=period, ttl=300)
-    avail = [t for t in ticker_list if t in close_df.columns]
-    if len(avail) < 2:
-        return {"error": "상관관계 계산에 필요한 데이터 부족"}
-
-    corr = close_df[avail].pct_change().corr()
-    return {
-        "tickers": avail,
-        "labels":  [_TICKER_LABELS.get(t, t) for t in avail],
-        "matrix":  [[round(corr.iloc[i, j], 4) for j in range(len(avail))] for i in range(len(avail))],
-    }
-
 @router.get("/ticker-names")
 def ticker_names(tickers: str = "", market: str = Depends(market_param)):
     """티커 → 표시용 이름 사전.
