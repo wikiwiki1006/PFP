@@ -276,9 +276,20 @@ ALTER TABLE reports ADD COLUMN IF NOT EXISTS subject_key TEXT;
 --
 -- 기존 행은 전부 filename 이 유일하므로 더 넓은 키에서도 유일하다 —
 -- 제약을 넓히는 것이라 이관이 필요 없다.
+--
+--- 공용 키에는 분석 등급도 들어간다. `lens_{ticker}_{date}.md` 는 분 단위라
+--- 등급을 담지 않아서, 같은 분에 들어온 남의 **기본** 요청이 내 **심층** 행을
+--- 덮었다. 심층은 `deep_analysis_usage` 로 하루 한 번이고 할당량은 저장 전에
+--- 소비되므로, 그날치 심층이 통째로 사라진 뒤 다시 받지도 못한다.
+--- 조회(`find_fresh_shared_report`)는 이미 등급을 정체성에 넣고 있었다 —
+--- 저장 키만 몰랐다. 같은 식을 써서 두 사본을 맞춘다.
 ALTER TABLE reports DROP CONSTRAINT IF EXISTS reports_filename_key;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_shared_filename
-    ON reports(market, filename) WHERE scope = 'shared';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_shared_filename_tier
+    ON reports(market, filename, (COALESCE(metadata->>'model_tier', 'basic')))
+    WHERE scope = 'shared';
+--- 넓은 키를 먼저 만들고 좁은 옛 키를 지운다. 남겨 두면 옛 키가 먼저 걸려
+--- 유니크 위반이 나고 저장이 실패한다.
+DROP INDEX IF EXISTS idx_reports_shared_filename;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_private_filename
     ON reports(user_id, market, filename) WHERE scope <> 'shared';
 CREATE INDEX IF NOT EXISTS idx_reports_shared_lookup

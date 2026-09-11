@@ -50,7 +50,12 @@ def save_report(
                 # 충돌 대상이 scope 마다 다르다 (schema.py 의 부분 유니크 참고).
                 # shared 는 전역 한 행을 공유하고, private 는 사용자·시장별로
                 # 갈린다. 하나로 쓰면 private 저장이 남의 행을 덮는다.
-                conflict = ("(market, filename) WHERE scope = 'shared'"
+                # shared 키의 등급 식은 find_fresh_shared_report 의 WHERE 절과
+                # 글자 그대로 같아야 한다 — 저장과 조회가 같은 정체성을 써야
+                # 남의 기본 리포트가 내 심층 행을 덮지 않는다.
+                conflict = ("(market, filename,"
+                            " (COALESCE(metadata->>'model_tier', 'basic')))"
+                            " WHERE scope = 'shared'"
                             if scope == "shared"
                             else "(user_id, market, filename) WHERE scope <> 'shared'")
                 cur.execute(
