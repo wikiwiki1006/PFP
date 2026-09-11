@@ -1136,12 +1136,11 @@ def return_pct_to_records(
         records.append({
             "date":         date_str,
             "port":         round(float(pct), 2),
-            # TODO(pfp-61 프론트 착륙 후): 키 이름을 `benchmark_pct` 로.
-            # `sp` 는 `alpha_vs_sp500` 과 같은 문제다 — 다만 지금 바꾸면
-            # `AlphaTerminal.tsx` 가 `d.sp` 를 여섯 곳에서 읽어 비교선이
-            # 사라진다. 그 사이 `sp` 가 거짓이 되지는 않는다: 프레임에 아직
-            # `^KS11` 이 없어 KR 은 None 이고, US 는 실제로 S&P 500 이다.
-            "sp":           bench_pct,
+            # 키 이름에 벤치마크를 박지 않는다 — `sp` 는 `alpha_vs_sp500` 과
+            # 같은 문제였다. 계산을 고쳐도 이름이 거짓말을 계속한다.
+            # 무엇 대비인지는 `/metrics` 의 `benchmark`·`benchmark_label` 이
+            # 말한다 (같은 화면이 그 응답도 받는다).
+            "benchmark_pct": bench_pct,
             "total_equity": eq_val,
             "cash_flow":    cf_val,
             "trades":       trade_by_date.get(date_str, []),

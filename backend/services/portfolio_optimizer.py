@@ -663,11 +663,17 @@ def _run_pypfopt(
         ret_bl = bl.bl_returns()
         # 폴백 기본값 0.0 (편향 중립)
         posterior_returns = {t: round(float(ret_bl.get(t, mu_hist.get(t, 0.0))), 4) for t in tickers}
+        posterior_source = "black_litterman"
     except Exception as e:
         logger.warning("Black-Litterman 실패 — 사후 수익률을 과거 평균으로 대체",
                        exc_info=True)
         ret_bl = mu_hist
         posterior_returns = {t: round(float(mu_hist.get(t, 0.0)), 4) for t in tickers}
+        # BL 이 실패하면 `posterior_returns` 는 **사후 분포가 아니라 과거 평균**
+        # 이다. 값은 크게 달라진다 (실측: T0 이 +0.0345 → -0.0974). 예전에는
+        # 응답에 그 사실이 없어서, AI 뷰가 반영된 값과 과거 평균이 같은 이름으로
+        # 나갔다 — 프롬프트도 그걸 'AI 사후 수익률' 로 읽는다.
+        posterior_source = "historical_mean"
 
     def _opt(mu: pd.Series, cov: pd.DataFrame, method: str, target: float | None = None) -> dict | None:
         try:
@@ -816,6 +822,13 @@ def _run_pypfopt(
         },
         "effective_target_return": round(effective_target, 4),
         "posterior_returns": posterior_returns,
+        # 어느 수익률 벡터로 만든 값인지 응답이 말한다. BL 이 실패하면
+        # `posterior_returns` 가 과거 평균으로 바뀌는데 이름은 그대로였다.
+        "posterior_source": posterior_source,
+        # `max_sharpe_hist` 는 사후 수익률이 아니라 **과거 평균**으로 최적화한다.
+        # 그 벡터가 응답에 없어서 그 모드의 `expected_return` 을 응답 안의
+        # 어떤 값으로도 재현할 수 없었다 (실측 차이 15.1pp). 함께 싣는다.
+        "historical_returns": {t: round(float(mu_hist.get(t, 0.0)), 4) for t in tickers},
         "frontier":   frontier,
         "correlation": {
             "tickers": list(corr.index),
