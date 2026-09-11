@@ -1423,7 +1423,17 @@ function HistoryTab() {
       {histQ.isLoading && (
         <div className="text-center text-[#64748b] py-8 text-sm">로딩 중...</div>
       )}
-      {!histQ.isLoading && rows.length === 0 && (
+      {/* 조회 실패와 "저장된 게 없음" 을 구분한다. isError 를 안 보면 서버가
+          죽어도 "레포트 없음" 이 뜨고, 사용자는 자기가 만든 것이 사라진 줄
+          안다 — 기다려야 하는 상황을 빈 목록으로 읽는다.
+          같은 파일의 주식·산업 탭은 이미 이렇게 갈라져 있었다. 이 탭만
+          빠져 있었고, 여기가 **세 목록을 다 보여주는 탭**이라 가장 넓다. */}
+      {histQ.isError && (
+        <div className="text-center text-[#ef4444] py-8 text-sm">
+          {(histQ.error as any)?.response?.data?.detail ?? '레포트 목록을 불러오지 못했습니다.'}
+        </div>
+      )}
+      {!histQ.isLoading && !histQ.isError && rows.length === 0 && (
         <div className="text-center text-[#64748b] py-8 text-sm">저장된 레포트 없음</div>
       )}
 
