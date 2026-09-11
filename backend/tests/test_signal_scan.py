@@ -111,6 +111,15 @@ def test_scores_and_shape_are_well_formed():
         # 'trend' 는 과도기 키다. 값이 RSI 점수인데 프론트가 "추세" 막대로
         # 그리고 있어서, develop 이 components.rsi 로 옮기기 전까지만 함께 나간다.
         assert set(p["components"]) == {"volume", "momentum", "rsi", "trend"}
+        # 중복이 **의도된 것**임을 여기서 못 박는다. 둘이 갈라지는 순간
+        # 화면의 "추세" 막대와 실제 RSI 점수가 다른 값을 그리게 되는데,
+        # 키 집합만 보는 단언으로는 그 순간이 안 보인다.
+        assert p["components"]["trend"] == p["components"]["rsi"], (
+            f"trend={p['components']['trend']} but rsi={p['components']['rsi']} -- "
+            "'trend' exists only as an alias of the RSI score until the "
+            "frontend moves to components.rsi. Once they differ, the bar "
+            "labelled 추세 is showing something else again."
+        )
         assert 0.0 <= p["components"]["volume"] <= 40.0
         assert -10.0 <= p["components"]["trend"] <= 30.0
         assert isinstance(p["reason"], str) and p["reason"]
