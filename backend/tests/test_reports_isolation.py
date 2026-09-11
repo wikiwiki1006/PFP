@@ -132,6 +132,48 @@ def test_different_filenames_keep_both_reports(two_users):
     assert [n["name"] for n in rr.list_reports(BOB)] == [f"{_PREFIX}b.md"]
 
 
+# ── 덮어쓴 공용 리포트의 작성자는 **먼저 만든 사람**으로 남는다 ───────────────
+#
+# `ON CONFLICT ... DO UPDATE` 가 `user_id` 는 안 바꾼다. 그래서 같은 키로
+# 덮어쓰면 행은 첫 작성자 것으로 남고 내용만 두 번째 것이 된다.
+#
+# **`user_id=EXCLUDED.user_id` 를 넣고 싶어진다** — "더 정확한 값" 으로
+# 보이기 때문이다. 넣지 않는 이유 둘:
+#
+#   ① 넣으면 첫 작성자의 목록에서 그 항목이 **사라진다**(`list_reports` 는
+#      작성자로 거른다). 지금은 항목이 남되 내용이 남의 것이다. 둘 다
+#      틀렸지만 **후자는 본인이 눈치챌 수 있고 전자는 못 챈다.** 틀렸을 때
+#      누가 알아차리는가가 기준이다 (§1.3).
+#   ② `user_id` 는 소유자가 아니라 **작성자**다. `list_reports` 가 그것을
+#      "내가 무엇을 분석했는가" 로 쓰고, 탈퇴 시 `__deleted__` 로 익명화하는
+#      것도 작성자 의미다. 마지막에 덮은 사람으로 바꾸면 그 의미가 깨진다.
+#
+# 제대로 고치려면 공용 리포트를 목록에서 작성자로 묶지 않거나, 작성자를
+# 여럿 담아야 한다. 그 전까지 지금 동작을 여기 못 박는다 — 근거가 주석뿐이면
+# 다음 사람이 ①의 유혹에 그대로 넘어간다.
+
+def test_overwriting_a_shared_report_keeps_the_first_author(two_users):
+    """덮어써도 작성자는 먼저 만든 사람이다.
+
+    바꾸면 첫 작성자의 목록에서 항목이 조용히 사라진다 — 신호가 없는 쪽이
+    더 나쁘다. 위 설명 참고.
+    """
+    fn = f"{_PREFIX}shared_same_tier.md"
+    for uid, body in ((ALICE, "앨리스가 먼저"), (BOB, "밥이 나중")):
+        rr.save_report(fn, body, report_type="equity_research",
+                       metadata={"model_tier": "basic"}, user_id=uid,
+                       scope="shared", subject_key="AAPL")
+
+    assert _rows(fn) == [(ALICE, "밥이 나중")], (
+        f"the author changed on overwrite: {_rows(fn)} -- making the last "
+        "writer the author removes the entry from the first author's list "
+        "with no signal at all. See the note above before changing this."
+    )
+    assert [n["name"] for n in rr.list_reports(ALICE)] == [fn], (
+        "첫 작성자의 목록에서 항목이 사라졌다 — 그게 이 검사가 막는 것이다"
+    )
+
+
 # ── 소유자 검사 (§1.2) ─────────────────────────────────────────────────────────
 
 def test_a_private_report_is_not_readable_by_another_user(two_users):
