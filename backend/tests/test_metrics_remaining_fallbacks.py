@@ -202,7 +202,10 @@ _FAILURES = [
                  id="일변동-primitive-실패"),
     pytest.param(_make_the_benchmark_unreadable,
                  {"alpha_vs_benchmark", "portfolio_beta",
-                  "benchmark", "benchmark_label"},
+                  "benchmark", "benchmark_label",
+                  # 베타 근거 셋. 베타를 못 구하면 "몇 종목을 셌나" 도 0 이
+                  # 되는 것이 맞다 — 이 셋은 베타 계산의 산출물이다.
+                  "beta_counted", "beta_holdings", "beta_value_share"},
                  id="벤치마크-판독-실패"),
 ]
 
