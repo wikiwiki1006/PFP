@@ -1079,7 +1079,7 @@ def parse_portfolio_actions(raw_text: str) -> list[dict] | None:
 def get_ai_analyst_feedback(
     vix: "float | None",
     portfolio_beta: "float | None",
-    today_chg_pct: float,
+    today_chg_pct: "float | None",
     sector_summary: str,
     is_portfolio_sectors: bool = False,
 ) -> str:
@@ -1102,6 +1102,13 @@ def get_ai_analyst_feedback(
     beta_line = (f"- 포트폴리오 베타: {portfolio_beta:.2f}"
                  if portfolio_beta is not None else
                  "- 포트폴리오 베타: 산출 불가 (베타는 언급하지 말 것)")
+    # 변동률도 같다. `+0.00%` 는 '보합' 이라는 관측이지 '모름' 이 아니다 —
+    # 모델은 그걸 근거로 "오늘은 큰 움직임이 없었다" 를 쓴다 (§1.3a).
+    # 그리고 `float` 로 선언해 둔 탓에 `None` 이 오면 여기서 TypeError 가 나고
+    # 이 라우트에는 try/except 가 없어 그대로 500 이 됐다.
+    chg_line = (f"- 오늘 포트폴리오 변동률: {today_chg_pct:+.2f}%"
+                if today_chg_pct is not None else
+                "- 오늘 포트폴리오 변동률: 산출 불가 (오늘 등락은 언급하지 말 것)")
 
     if is_portfolio_sectors:
         prompt = f"""다음 데이터를 바탕으로 투자자에게 3~4문장(120자 이내)의 포트폴리오 섹터 분석 피드백을 한국어로 작성해줘.
@@ -1109,7 +1116,7 @@ def get_ai_analyst_feedback(
 
 {vix_line}
 {beta_line}
-- 오늘 포트폴리오 변동률: {today_chg_pct:+.2f}%
+{chg_line}
 - 보유 섹터 비중 및 오늘 변동: {sector_summary}
 
 출력은 텍스트 3~4문장만, 따옴표나 마크다운 없이. 보유 섹터를 중심으로 분석할 것."""
@@ -1119,7 +1126,7 @@ def get_ai_analyst_feedback(
 
 {vix_line}
 {beta_line}
-- 오늘 포트폴리오 변동률: {today_chg_pct:+.2f}%
+{chg_line}
 - 주도 섹터(1일): {sector_summary}
 
 출력은 텍스트 1~2문장만, 따옴표나 마크다운 없이."""
