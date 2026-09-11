@@ -598,8 +598,26 @@ npx firebase-tools deploy --only hosting
 ## 9. 작업 방식
 
 - **브라우저로 확인한다.** 코드만 봐서는 안 보이는 버그가 반복해서 나왔다
-  (전환 시 재조회 0건, 5일 묵은 지수, 잘못된 기본 지수). Playwright 는
-  npx 캐시에 있다: `NODE_PATH=$(find ~/.npm/_npx -maxdepth 4 -type d -name playwright | head -1 | xargs dirname)`
+  (전환 시 재조회 0건, 5일 묵은 지수, 잘못된 기본 지수).
+
+  Playwright 는 `frontend` 의 devDependency 다. **브라우저 바이너리는 받지
+  않는다** — 설치된 Chrome 을 채널로 쓴다. `npx playwright install` 은
+  수백 MB 를 받고 공유 node_modules 를 건드리므로 하지 마라.
+
+  ```bash
+  cd frontend && node -e "
+    const { chromium } = require('playwright');
+    (async () => {
+      const b = await chromium.launch({ channel: 'chrome', headless: true });
+      const p = await b.newPage();
+      await p.goto('http://localhost:3000/');
+      await p.screenshot({ path: 'shot.png', fullPage: true });
+      await b.close();
+    })();"
+  ```
+  Chrome 이 없는 머신이면 `channel: 'msedge'` 로 바꾼다. 예전 문서에는
+  `~/.npm/_npx` 에서 찾으라고 적혀 있었는데 그건 mac 세션 기준이었고
+  이 Windows 머신에는 없다.
 - **일괄 치환은 구문을 깨뜨린다.** 정규식으로 여러 파일을 고칠 때 다중 행
   import 안쪽에 줄이 끼거나 중첩 괄호가 어긋나는 사고가 반복됐다. 바꾼 뒤
   `python -c "import ast; ast.parse(open(f).read())"` 로 확인한다.
