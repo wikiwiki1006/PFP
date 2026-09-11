@@ -13,25 +13,34 @@
         return None
 
 즉 **DB 가 잠깐 끊긴 동안 들어온 가입 시도가 실사용자의 인증 계정을
-지운다.** 지워지면 그 사람은 로그인할 수 없고, 되돌릴 방법도 없다. 이메일만
-알면 누구나 그 시도를 할 수 있으므로 인증도 필요 없다.
+지웠다.** 지워지면 그 사람은 로그인할 수 없고, 되돌릴 방법도 없다. 이메일만
+알면 누구나 그 시도를 할 수 있으므로 인증도 필요 없었다.
 
 CLAUDE.md §1.3(c) 그대로다 — 실패한 경로의 반환값이 정상 경로의 반환값과
-구별되지 않는다. 같은 리포의 `services/auth.py:is_registered` 는 이미 그
-구분을 한다: DB 를 못 읽었을 뿐이고 캐시가 유효하면 통과시키고, 근거가 전혀
-없을 때만 막는다. 한쪽은 알고 한쪽은 모른다.
+구별되지 않는다.
 
-## 이 파일의 상태
+## 지금은 못 읽으면 올려보낸다
 
-아래 검사는 **지금 빨갛다.** 고칠 자리가 둘 다 내 소유가 아니라
-(`backend/routers/auth.py` · `backend/db/users_repo.py`) xfail(strict) 로
-둔다. 고쳐지면 XPASS 로 뒤집혀 이 표시를 떼라고 요구한다 — 통과하는데
-xfail 로 남아 있는 것도 실패로 잡힌다.
+`find_by_email` 은 세 가지를 **다르게** 말한다:
 
-고치는 방법은 둘 중 하나다.
-  · `find_by_email` 이 "없음"(None)과 "못 읽음"을 구별해서 돌려준다.
-  · `_reconcile_account` 가 DB 를 못 읽었을 때는 정리하지 않고 5xx 로 멈춘다.
-    (이미 인증 계정 삭제에 실패했을 때 그렇게 한다 — 같은 판단이다.)
+    이메일이 없다      → None      (입력이 없는 것. 진짜 "없음")
+    읽었는데 행이 없다  → None      (진짜 "없음")
+    못 읽었다          → DBBusy    (판단 불가)
+
+`DBBusy` 는 `main.py` 의 핸들러가 **503 + 메시지**로 번역한다. 그래서
+호출부 다섯 곳을 하나도 안 고치고 전부 옳아진다 — `_reconcile_account` 는
+삭제 대신 503 으로 멈추고, `/email-available` 은 "사용 가능" 대신 "확인할
+수 없음", 소셜 가입은 중복 검사를 건너뛰는 대신 503 이 된다.
+
+**두 번째 방법(`_reconcile_account` 만 멈추기)은 왜 아니었나**: 그러면
+`/email-available` 과 소셜 가입이 조용히 틀린 채로 남는다. 다섯 중 셋이
+읽기 실패에 대해 틀렸고, 셋이 서로 다른 대응을 필요로 했다.
+
+**`is_registered` 방식은 왜 아니었나**: 그 함수의 근거는 uid 로 걸린
+캐시인데 여기는 이메일로 찾는다 — 두 번째 근거가 없다. 그리고
+`is_registered` 는 실패 시 **닫히지만**(거절) 이 경로는 실패 시
+**파괴적**이다(삭제). 안전한 기본값이 "캐시를 믿기" 가 아니라 "아무것도
+하지 않고 알리기" 다.
 """
 from __future__ import annotations
 
@@ -95,26 +104,31 @@ def firebase_account(monkeypatch):
 
 
 def test_the_lookup_really_does_fail(broken_db):
-    """전제 — 이 조건에서 `find_by_email` 이 `None` 을 돌려준다.
+    """전제 — 이 조건에서 조회가 실제로 실패한다.
 
     이게 없으면 아래 검사는 조회가 멀쩡히 성공한 상태를 재고 있을 수 있다.
     그러면 "계정이 안 지워졌다" 는 결과가 **버그가 없어서가 아니라 조건을
     못 만들어서** 나온 것이 된다.
     """
-    assert users_repo.find_by_email(EMAIL) is None
+    from backend.db import DBBusy
+
+    with pytest.raises(DBBusy):
+        users_repo.find_by_email(EMAIL)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "조회 실패와 계정 없음이 같은 None 이라, DB 가 끊긴 동안의 가입 시도가 "
-    "실사용자의 인증 계정을 지운다. 고칠 자리가 routers/auth.py 와 "
-    "db/users_repo.py 라 이 창 소유가 아니다 — 파일 맨 위 설명 참고."))
 def test_a_database_outage_does_not_delete_a_real_auth_account(broken_db, firebase_account):
     """DB 를 못 읽었다는 이유로 인증 계정을 지우면 안 된다.
 
     지워진 사람은 로그인할 수 없고 되돌릴 방법이 없다. 이메일만 알면
     인증 없이도 이 경로를 부를 수 있다.
+
+    멈추는 방식은 **예외로 올라가는 것**이다 — 조용히 None 을 돌려주고
+    말면 호출부가 "정리할 것이 없었다" 로 읽어 아무 기록도 안 남는다.
     """
-    auth_mod._reconcile_account(EMAIL)
+    from backend.db import DBBusy
+
+    with pytest.raises(DBBusy):
+        auth_mod._reconcile_account(EMAIL)
 
     assert firebase_account == [], (
         f"a real user's auth account was deleted because the database lookup "
@@ -124,31 +138,28 @@ def test_a_database_outage_does_not_delete_a_real_auth_account(broken_db, fireba
     )
 
 
-# ── 이 리포는 이미 "다시 시도하면 되는 실패" 를 알고 있다 ──────────────────────
+# ── 실패의 종류가 달라도 결론은 하나다 ────────────────────────────────────────
 #
-# `backend/db` 에 `DBBusy` 와 `PoolExhausted` 가 있고, `main.py` 의 핸들러가
-# 그 계열을 **503 + 메시지**로 번역한다. 즉 "지금은 못 읽었다" 를 사용자에게
-# 전할 통로가 이미 깔려 있다.
+# 풀 고갈(`PoolExhausted`)과 연결 끊김(`psycopg2.OperationalError`)은 다른
+# 예외지만 이 함수에서는 같은 뜻이다 — **못 읽었다.** 읽는 데 성공했는데
+# 행이 없으면 그건 `except` 가 아니라 `if r else None` 으로 나간다. 즉
+# `except` 에 도달했다는 것 자체가 "판단 불가" 이므로, 종류를 가리지 않고
+# 같은 신호로 올린다.
 #
-# 그런데 `find_by_email` 의 `except Exception` 이 그걸 **삼킨다.** 풀 고갈은
-# 부하가 몰릴 때 나고, 부하가 몰릴 때는 가입도 몰린다 — 즉 이 경로가 제일
-# 많이 불리는 순간에 제일 잘 터진다.
-#
-# 그래서 고치는 방법으로 파일 맨 위에 적어 둔 둘 중, **첫 번째가 이 리포에
-# 맞다**: 반환값을 넓히는 대신 이 계열을 그냥 올려보내면 된다. 호출부 다섯
-# 곳을 하나도 안 고치고 전부 옳아진다 (자세한 근거는 pfp-11 에게 보낸 보고).
+# 좁게(`DBBusy` 만) 잡으면 **가장 흔한 실패가 그대로 남는다** — 연결 끊김은
+# `DBBusy` 가 아니라 `psycopg2.OperationalError` 다. 그게 바로 이 파일이
+# 막으려는 조건이다.
 
-def test_a_retryable_failure_is_swallowed_here(broken_db_pool):
-    """풀 고갈처럼 **앱이 이미 번역할 줄 아는 실패**도 여기서 사라진다.
+def test_every_kind_of_read_failure_is_reported(broken_db_pool):
+    """풀 고갈도, 연결 끊김도, 같은 "못 읽었다" 로 올라온다.
 
-    `PoolExhausted` 는 `main.py` 가 503 으로 바꿔 "잠시 후 다시" 를 보낼 수
-    있는 예외다. 여기서 삼키면 그 신호가 "그런 계정 없음" 이 되고, 위
-    검사가 보여주듯 그 다음은 삭제다.
+    한 종류만 올리면 나머지는 계속 "그런 계정 없음" 이 되고, 위 검사가
+    보여주듯 그 다음은 삭제다.
     """
-    assert users_repo.find_by_email(EMAIL) is None, (
-        "if this now raises, the swallow is gone -- update the note above and "
-        "the two fix options at the top of this file."
-    )
+    from backend.db import DBBusy
+
+    with pytest.raises(DBBusy):
+        users_repo.find_by_email(EMAIL)
 
 
 def test_a_reachable_database_leaves_the_account_alone(firebase_account, monkeypatch):
