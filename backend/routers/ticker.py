@@ -263,14 +263,26 @@ def get_ticker_detail(
         pass
 
     def _fmt_cap(v) -> str:
+        """시가총액. 통화는 **응답에서** 읽는다 (§1.4).
+
+        'USD' 가 하드코딩돼 있었다. 삼성전자 시가총액 1,709조원이
+        `1705.7T USD` 로 표시됐다 — 1,709조 달러다. info 안에 이미
+        currency='KRW' 가 있는데 보지 않았다.
+
+        시장이 아니라 응답에서 읽는 이유는 해외 상장·ADR 때문이다. 시장이
+        KR 이어도 통화가 USD 인 종목이 있다.
+
+        구간·자릿수를 여기서 다시 구현하지 않는다. report_writer._fmt_amount
+        가 단일 출처이고, 원화를 조·억으로 끊는 규칙도 거기 있다 — 'B'(십억)
+        는 원화에 쓰지 않는 단위라 숫자가 맞아도 달러로 오해된다.
+        """
         if not v:
             return "N/A"
-        v = float(v)
-        if v >= 1e12:
-            return f"{v/1e12:.1f}T USD"
-        if v >= 1e9:
-            return f"{v/1e9:.1f}B USD"
-        return f"{v/1e6:.0f}M USD"
+        from backend.services.report_writer import _fmt_amount
+        currency = (info.get("financialCurrency")
+                    or info.get("currency")
+                    or "USD")
+        return _fmt_amount(v, currency)
 
     # ── 수익률 ──────────────────────────────────────────────────────────────
     def _perf(n: int) -> Optional[float]:
@@ -307,8 +319,17 @@ def get_ticker_detail(
     # 배당수익률이 없는 것과 0% 인 것은 다르다. yfinance 가 필드를 안 주면
     # '무배당' 이 아니라 '모름' 이다 — 0.0 으로 채우면 배당주를 무배당으로
     # 오해하고 후보에서 빼게 된다. 바로 옆 pe 는 이미 None 을 쓴다.
-    _dy = _safe(info.get("dividendYield"), None)
-    div_yield = None if _dy is None else round(_dy * 100, 2)
+    # yfinance 의 dividendYield 는 **이미 퍼센트**다. 실측:
+    #   AAPL      0.34  (실제 약 0.4%)
+    #   005930.KS 0.56  (실제 약 1.5%)
+    # 여기서 *100 을 하면 애플이 배당수익률 34% 로 화면에 뜬다. 예전
+    # yfinance 는 분수를 줬고 그때는 *100 이 맞았다 — 라이브러리 계약이
+    # 바뀌었는데 코드가 안 따라갔다.
+    #
+    # 주의: 같은 info dict 안에서도 필드마다 단위가 다르다. payoutRatio
+    # (0.1204 = 12%)·profitMargins(0.276 = 27.6%)·returnOnEquity 는 여전히
+    # 분수다. "yfinance 비율은 전부 퍼센트" 로 일반화하면 안 된다.
+    div_yield = _safe(info.get("dividendYield"), None)
 
     result = {
         "ticker":  sym,
