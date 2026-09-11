@@ -99,23 +99,73 @@ def test_trim_leaves_a_non_datetime_index_alone():
     assert _trim_to_session(pd.DataFrame(), "US").empty
 
 
+# 측정값 모양의 필드. 이름으로 파생시킨다 — 손으로 나열하면 지표가 하나
+# 늘 때마다 낡는다.
+_MEASUREMENT_NAMES = {"portfolio_beta", "alpha_vs_benchmark"}
+
+# 재지 못한 자리에 실리면 **단정**이 되는 값들.
+#   0.0     화면에서 '보합'
+#   -100.0  '전액 손실'
+_FILLER_CLAIMS = (0.0, -100.0)
+
+
+def _measurements(out: dict) -> dict:
+    return {k: v for k, v in out.items()
+            if k in _MEASUREMENT_NAMES or k.endswith("_pct")}
+
+
 @pytest.mark.parametrize("df, why", [
-    (pd.DataFrame(), "빈 프레임"),
+    (pd.DataFrame(), "가격 조회 실패 — `get_close_df` 가 맨 DataFrame 을 준다"),
     (pd.DataFrame({"AAPL": [100.0]}, index=pd.bdate_range("2026-09-07", periods=1)),
-     "행이 하나뿐 — 변동을 계산할 수 없다"),
+     "행이 하나뿐 — 창 파생값을 계산할 수 없다"),
 ])
-def test_metrics_returns_nothing_rather_than_zeros(df, why):
-    """계산할 수 없으면 빈 dict 다. 0 으로 채운 dict 가 아니다.
+def test_an_unmeasurable_metric_is_not_filled_in(df, why):
+    """잴 수 없는 자리를 **채우지 않는다.**
 
-    `{"total_return_pct": 0.0, ...}` 를 돌려주면 화면은 '보합' 을 그린다.
-    빈 dict 는 호출자가 "값이 없다" 를 알아볼 수 있는 유일한 형태다 (§1.3).
+    예전에는 이 검사가 `out == {}` 를 요구했다. 그건 관심사가 아니라
+    **구현 형태**였고, 더 나은 형태로 가는 길을 막고 있었다 — 키를 다 내고
+    값을 `None` 으로 두면 "없음" 과 "실패" 를 필드 단위로 구별할 수 있다.
+    CLAUDE.md §1.3 은 오히려 `{}` 를 경계한다: *"`{}` 를 돌려주면 '없음' 과
+    '조회 실패' 가 같아진다."*
+
+    이 검사가 진짜 지키는 것은 **채우지 마라** 다. `0.0` 은 '보합' 으로,
+    `-100.0` 은 '전액 손실' 로 그려진다 — 둘 다 재지 못한 것과는 다른
+    단정이다. 반대로 **잴 수 있는 값은 숫자로 나와도 된다**: 행이 하나여도
+    평가액·원가는 나오고 그 둘의 비율은 진짜 측정값이다.
+
+    그래서 `{}` 든 `{"x": None}` 이든 `{"total_return_pct": -39.54}` 든
+    통과하고, 채움값이 하나라도 실리면 실패한다.
     """
-    out = calculate_metrics(_HOLDINGS, df, pd.Series(dtype=float))
+    out = calculate_metrics(_HOLDINGS, df, build_equity_curve(_HOLDINGS, _BUY, df))
 
-    assert out == {}, (
-        f"{why}: got {out!r} -- an uncomputable metric set must come back "
-        "empty, not filled with zeros that render as 'flat'. "
-        "(계산 불가를 0 으로 채우면 보합으로 보인다.)"
+    filled = {k: v for k, v in _measurements(out).items() if v in _FILLER_CLAIMS}
+    assert not filled, (
+        f"{why}: {filled!r} -- these render as claims, not as 'not measured'. "
+        "0.0 reads as 'flat', -100.0 as 'total loss'. "
+        "(재지 못한 자리를 채우면 화면은 그걸 잰 값으로 그린다.)"
+    )
+
+
+def test_a_price_fetch_failure_does_not_take_the_endpoint_down():
+    """가격을 하나도 못 받아도 **예외가 새지 않는다.**
+
+    `get_close_df` 는 실패하면 맨 `pd.DataFrame()` 을 준다 — DatetimeIndex 가
+    아니라 RangeIndex 다. 곡선 쪽은 빈 경우에도 DatetimeIndex 를 주므로
+    (`build_equity_curve` 의 이른 반환) 모양이 **둘로 갈린다.**
+
+    여기서 예외가 새면 `/metrics` 가 500 이 되고, 화면은 "보유 없음" 도
+    오류도 못 띄운다. yfinance 한 번 흔들릴 때마다 그렇게 된다.
+    """
+    empty = pd.DataFrame()
+    assert not isinstance(empty.index, pd.DatetimeIndex), (
+        "전제: 가격 조회 실패는 DatetimeIndex 가 아닌 프레임을 준다"
+    )
+
+    out = calculate_metrics(_HOLDINGS, empty,
+                            build_equity_curve(_HOLDINGS, _BUY, empty))
+
+    assert isinstance(out, dict), (
+        f"a failed price fetch did not produce a metric set: {out!r}"
     )
 
 
