@@ -17,6 +17,31 @@ except ImportError:
     _HAS_PYPFOPT = False
 
 
+def _ratio_or_none(ratio: float | None, vol: float) -> "float | None":
+    """분모(변동성)가 너무 작으면 비율을 내보내지 않는다.
+
+    `vol > 0` 으로만 걸렀을 때 무엇이 나갔는지 실측했다. 매일 정확히 +0.05%
+    오르는 결정론적 입력(연 +13.42%)의 동일비중 변동성은 **0 이 아니라
+    1.803e-15** 다 — 부동소수 잡음이다. `> 0` 을 통과해서
+    `equal_weight_sharpe = 47,693,150,800,467.95` 가 응답에 실렸다.
+
+    즉 이 자리의 위장은 두 방향이었다: 분모가 **정확히** 0 이면 `0.0`
+    (화면에서 '위험조정수익 없음' = 최악으로 읽힌다), 잡음만큼 양수면
+    천문학적 숫자가 측정값인 얼굴로 나간다. 둘 다 하한 하나로 막힌다.
+
+    하한은 `portfolio_calculator.MIN_VOL_FOR_RATIO` 한 곳에서 읽는다.
+    """
+    import math
+
+    from backend.services.portfolio_calculator import MIN_VOL_FOR_RATIO
+
+    if ratio is None or vol is None:
+        return None
+    if not math.isfinite(float(vol)) or float(vol) <= MIN_VOL_FOR_RATIO:
+        return None
+    return None if not math.isfinite(float(ratio)) else float(ratio)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 1. Max Sharpe Ratio 최적화
 # ══════════════════════════════════════════════════════════════════════════════
@@ -40,6 +65,7 @@ def optimize_max_sharpe(
         cleaned   = ef.clean_weights()
         weights   = np.array([cleaned[t] for t in tickers])
         exp_ret, vol, sharpe = ef.portfolio_performance(risk_free_rate=risk_free_rate)
+        sharpe = _ratio_or_none(sharpe, vol)
     else:
         method = "NumPy SLSQP 폴백"
         weights, exp_ret, vol, sharpe = _max_sharpe_numpy(
@@ -51,7 +77,10 @@ def optimize_max_sharpe(
     eq_w      = np.full(n, 1.0 / n)
     eq_ret    = float(eq_w @ mu_annual)
     eq_vol    = float(np.sqrt(eq_w @ cov_annual @ eq_w))
-    eq_sharpe = (eq_ret - risk_free_rate) / eq_vol if eq_vol > 0 else 0.0
+    # 동일비중 비교군의 샤프도 같은 규칙이다 (분모 0 → 정의되지 않음).
+    from backend.services.portfolio_calculator import MIN_VOL_FOR_RATIO
+    eq_sharpe = ((eq_ret - risk_free_rate) / eq_vol
+                 if eq_vol > MIN_VOL_FOR_RATIO else None)
 
     return {
         "weights":                 dict(zip(tickers, weights.tolist())),
@@ -71,7 +100,7 @@ def _max_sharpe_numpy(
     cov: np.ndarray,
     rf: float,
     bounds: tuple[float, float],
-) -> tuple[np.ndarray, float, float, float]:
+) -> "tuple[np.ndarray, float, float, float | None]":
     n = len(mu)
     lo, hi = bounds
 
@@ -104,7 +133,12 @@ def _max_sharpe_numpy(
 
     ret    = float(w @ mu)
     vol    = float(np.sqrt(w @ cov @ w))
-    sharpe = (ret - rf) / vol if vol > 0 else 0.0
+    # 변동성 0 이면 샤프는 정의되지 않는다 — `0.0` 은 화면에서 최악으로
+    # 읽히는데 실제로는 위험이 없다는 뜻이다. 하한은 한 곳에서 읽는다.
+    # (위 `neg_sharpe` 의 `1e6` 과 랜덤 탐색의 `-inf` 는 **최적화 목적함수의
+    # 벌점**이라 그대로 둔다 — 보고되는 값이 아니다.)
+    from backend.services.portfolio_calculator import MIN_VOL_FOR_RATIO
+    sharpe = (ret - rf) / vol if vol > MIN_VOL_FOR_RATIO else None
     return w, ret, vol, sharpe
 
 
@@ -213,6 +247,7 @@ def optimize_black_litterman(
         cleaned   = ef.clean_weights()
         weights   = np.array([cleaned[t] for t in tickers])
         exp_ret, vol, sharpe = ef.portfolio_performance(risk_free_rate=risk_free_rate)
+        sharpe = _ratio_or_none(sharpe, vol)
         posterior_arr = posterior_returns.values
     else:
         method = "NumPy Black-Litterman" + (" (View 없음→시장균형)" if not has_views else "")
@@ -226,7 +261,10 @@ def optimize_black_litterman(
     eq_w      = np.full(n, 1.0 / n)
     eq_ret    = float(eq_w @ posterior_arr)
     eq_vol    = float(np.sqrt(eq_w @ cov_annual @ eq_w))
-    eq_sharpe = (eq_ret - risk_free_rate) / eq_vol if eq_vol > 0 else 0.0
+    # 동일비중 비교군의 샤프도 같은 규칙이다 (분모 0 → 정의되지 않음).
+    from backend.services.portfolio_calculator import MIN_VOL_FOR_RATIO
+    eq_sharpe = ((eq_ret - risk_free_rate) / eq_vol
+                 if eq_vol > MIN_VOL_FOR_RATIO else None)
     frontier  = _compute_efficient_frontier(posterior_arr, cov_annual, weight_bounds, n_points=40)
 
     return {
