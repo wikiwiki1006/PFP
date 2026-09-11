@@ -9,6 +9,8 @@ from __future__ import annotations
 import logging
 import math
 
+from typing import NamedTuple
+
 import numpy as np
 import pandas as pd
 
@@ -406,6 +408,126 @@ def calculate_portfolio_beta(
         return None
 
 
+# ── 실현손익 (매도로 확정된 손익) ──────────────────────────────────────────────
+
+class RealizedPnL(NamedTuple):
+    """매도로 확정된 손익. `pnl is None` 은 **계산 불가**이고 `0.0` 은 '실현한 게 없다'."""
+    pnl:    float | None
+    cost:   float | None    # 매도된 주식의 취득원가 합 (pnl 의 분모)
+    pct:    float | None
+    reason: str | None      # pnl 이 None 인 이유 코드. 값이 있으면 None
+    sales:  int             # 실제로 계산에 들어간 매도 건수
+
+
+# 실현손익을 계산할 수 없는 이유. 문장이 아니라 코드로 싣는다 — 문구는 표시
+# 계층의 결정이다.
+_RPNL_NO_LOG      = "no_trade_log"       # 호출자가 이력을 주지 않았다 (없는 것과 다르다)
+_RPNL_NO_BASIS    = "no_cost_basis"      # 매수 기록 없이 매도가 있다 (원가를 모른다)
+_RPNL_NO_SELL_PX  = "missing_sale_price" # 매도 단가가 비어 있다
+_RPNL_NO_BUY_PX   = "missing_buy_price"  # 매수 단가가 비어 있어 평단을 못 만든다
+
+
+def realized_pnl_from_log(trade_log: list | None) -> RealizedPnL:
+    """매매 이력을 재생해 **확정된** 손익을 낸다.
+
+    `total_return_pct` 는 취득원가 대비 현재 평가액이라 **매도로 실현한 손익이
+    들어오지 않는다** (현금에 남고, 현금은 그 계산에서 빠진다). 매도 이력이
+    많은 사용자에게는 "누적 수익" 이 과소 표시된다. 그 답이 이 필드다 — 옆의
+    두 숫자와 기준이 다른 필드를 만드는 것이 아니라, 빠진 조각을 따로 싣는다.
+
+    평단은 매도 시점마다 달라지므로 이력을 순서대로 재생해야 한다. 관례는
+    `cash_ledger._recalc_holding` 과 같은 **이동평균**이다:
+      · 매수 — 수량·원가 누적
+      · 매도 — 그 시점 평단으로 손익 확정, 원가를 매도 비율만큼 차감
+      · UPDATE — 수량 정정. **주당 평단을 보존한다** (`build_equity_curve` ·
+        `build_return_pct_curve` 와 같은 관례).
+
+    세 상태를 구별한다 (`calculate_metrics` 의 `trade_log` 와 같은 규약):
+        None    호출자가 안 알려줬다 → pnl None + reason `no_trade_log`
+        []      이력이 실제로 없다   → pnl 0.0 (실현한 게 없다는 뜻이다)
+        [...]   재생한다
+    """
+    if trade_log is None:
+        return RealizedPnL(None, None, None, _RPNL_NO_LOG, 0)
+
+    # 날짜·id 순. 순서가 틀리면 평단이 틀린다 (`cash_ledger` 와 같은 정렬).
+    trades = sorted(trade_log, key=lambda t: (str(t.get("date", "")), t.get("id", 0)))
+
+    qty: dict[str, float] = {}
+    cost: dict[str, float] = {}
+    no_px: set[str] = set()      # 매수 단가가 비어 평단을 못 만든 종목
+    realized = 0.0
+    realized_cost = 0.0
+    sales = 0
+    reason: str | None = None
+
+    for tr in trades:
+        ticker = str(tr.get("ticker", "")).upper()
+        if not ticker or ticker == "CASH":
+            continue                      # 입·출금은 실현손익이 아니다
+        ttype = str(tr.get("type", "")).upper()
+        try:
+            q = float(tr.get("q") or 0)
+        except (TypeError, ValueError):
+            continue
+        raw_px = tr.get("price")
+        # `or 0` 을 쓰지 않는다 — 단가 없음과 0원이 같아지면 100% 손실을 지어낸다.
+        try:
+            px = float(raw_px) if raw_px is not None else None
+        except (TypeError, ValueError):
+            px = None
+
+        if ttype in ("ADD", "BUY"):
+            if px is None:
+                no_px.add(ticker)
+            qty[ticker]  = qty.get(ticker, 0.0) + q
+            cost[ticker] = cost.get(ticker, 0.0) + (px or 0.0) * q
+
+        elif ttype in ("SOLD", "SELL"):
+            held = qty.get(ticker, 0.0)
+            if held <= 0:
+                reason = reason or _RPNL_NO_BASIS
+                continue
+            if ticker in no_px:
+                reason = reason or _RPNL_NO_BUY_PX
+                continue
+            if px is None:
+                reason = reason or _RPNL_NO_SELL_PX
+                continue
+            avg  = cost.get(ticker, 0.0) / held
+            sold = min(q, held)
+            realized      += (px - avg) * sold
+            realized_cost += avg * sold
+            cost[ticker] = cost.get(ticker, 0.0) - avg * sold
+            qty[ticker]  = held - sold
+            sales += 1
+
+        elif ttype == "UPDATE":
+            held = qty.get(ticker, 0.0)
+            avg  = (cost.get(ticker, 0.0) / held) if held > 0 else None
+            qty[ticker]  = max(0.0, q)
+            # 평단을 알 때만 원가를 다시 만든다. 모르면 0 으로 두고 종목을
+            # 표시해 둔다 — 이후 매도에서 `no_cost_basis` 가 아니라 정확히
+            # '평단 없음' 으로 갈린다.
+            if avg is None:
+                no_px.add(ticker)
+                cost[ticker] = 0.0
+            else:
+                cost[ticker] = avg * qty[ticker]
+
+    if reason is not None:
+        # 한 건이라도 계산 못 한 매도가 있으면 합계를 내보내지 않는다. 부분
+        # 합계는 유한하고 그럴듯해서 어떤 가드에도 걸리지 않는다.
+        return RealizedPnL(None, None, None, reason, sales)
+
+    pnl = round(realized, 2)
+    rcost = round(realized_cost, 2)
+    # 원가가 0 이면 비율의 기준점이 없다 (전량 무상 취득 등). 0% 는 '본전'
+    # 이라는 단정이라 쓰지 않는다.
+    pct = _num_or_none(realized / realized_cost * 100) if realized_cost > 0 else None
+    return RealizedPnL(pnl, rcost, pct, None, sales)
+
+
 # ── 현재가 (총자산과 보유 목록이 같은 값을 쓰게 하는 단일 출처) ────────────────
 
 # (현재가, 직전종가, 일변동률, 기준일, 실시간여부)
@@ -640,6 +762,11 @@ def calculate_metrics(
     total_rtn = (_num_or_none((stock_equity / stock_cost - 1) * 100)
                  if stock_cost else None)
 
+    # 실현손익. `trade_log` 의 세 상태를 그대로 넘긴다 — `or []` 로 뭉개면
+    # "안 알려줬다" 와 "이력이 없다" 가 합쳐져, 이력을 안 받는 호출자
+    # (리포트·analyst-feedback)에게 `realized_pnl: 0` 이라는 **단정**이 나간다.
+    rpnl = realized_pnl_from_log(trade_log)
+
     # 1D 변화 — 종목별 '마지막 두 실제 관측치' 합산이 1순위.
     # 에쿼티 커브의 위치 기반 차분(iloc[-1]-iloc[-2])은 마지막 두 행이
     # 유령(ffill 복제) 행이면 정확히 0.0 을 반환하고, 애초에 두 행이
@@ -789,6 +916,21 @@ def calculate_metrics(
         # 계산 불가는 null 로 내려간다 — `_round_keep_none` 이 None 을 통과시킨다.
         # 0 으로 바꾸면 '보합'·'본전'·'변동성 낮음' 이라는 단정이 된다 (§1.3).
         "total_return_pct":  _round_keep_none(total_rtn, 4),
+        # 실현손익 — `total_return_pct` 에 **없는** 조각이다. 그 값은 취득원가
+        # 대비 현재 평가액이라 매도로 확정한 손익이 들어오지 않는다 (현금에
+        # 남고 현금은 그 계산에서 빠진다). 둘을 더하면 전체 손익이 된다.
+        #
+        #     realized_pnl == 0.0   실현한 게 없다 (매도 이력이 없다)
+        #     realized_pnl == null  계산 불가 — 이유는 realized_pnl_reason
+        #
+        # 비율의 분모는 **매도된 주식의 취득원가**(`realized_cost`)다. 투자
+        # 원금 전체로 나누면 "닫은 포지션의 수익률" 이 아니라 계좌 전체에
+        # 희석된 값이 되어 `total_return_pct` 와 같은 질문에 답하지 못한다.
+        "realized_pnl":        rpnl.pnl,
+        "realized_cost":      rpnl.cost,
+        "realized_pnl_pct":   _round_keep_none(rpnl.pct, 4),
+        "realized_pnl_reason": rpnl.reason,
+        "realized_sales":     rpnl.sales,
         # `today_change_val` 키는 뺐다. 프론트 계약(types·demoData)에서 develop 이
         # 제거했고 백엔드 소비자도 없는데, 관측치가 한 개뿐이면 `0.0` 을 지어내
         # 내보내고 있었다. 아무도 읽지 않는 값을 위해 위장을 유지할 이유가 없다.
