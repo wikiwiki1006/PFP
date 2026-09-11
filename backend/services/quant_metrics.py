@@ -48,43 +48,91 @@ QUANT_WEIGHTS = {
 def compute_quant_score(close: pd.Series, info: dict, er: Optional[float] = None) -> dict:
     """4개 팩터 합성 퀀트 스코어 (0~100).
 
-    각 팩터를 0~100 으로 정규화한 뒤 가중 평균한다.
-    반환값에 팩터별 원점수를 포함해 화면에서 근거를 보여줄 수 있게 한다.
+    각 팩터를 0~100 으로 정규화한 뒤 가중 평균한다. 팩터별 원점수를 함께
+    돌려줘 화면에서 근거를 보여줄 수 있게 한다.
+
+    **없는 데이터는 0점이 아니다.** 예전에는 없는 값을 기본값으로 메워 점수에
+    넣었고, 그래서 같은 가격 이력을 가진 종목의 점수가 **데이터 가용성만으로**
+    움직였다 (실측 63 → 51, 12점 차이 · BULLISH/NEUTRAL 경계를 넘는다):
+
+        펀더멘털이 없는 종목(ETF·신규상장)  quality 0  ← `_f(None)*100`
+                                          value  38  ← `forwardPE` 기본값 25.0
+        이력이 짧은 종목(40일)              3M·6M 수익률을 '보합 0%' 로 써서
+                                          모멘텀 가중치 절반을 0 으로 채웠다
+
+    '사업의 질 0점' 은 측정 결과로 읽힌다 — ETF 는 그 항목이 **없는** 것이지
+    나쁜 것이 아니다. 이제 못 구한 팩터는 `None` 으로 두고 **있는 팩터만으로
+    가중 평균**한다 (가중치를 재정규화). 프론트는 `v == null` 인 팩터를 그리지
+    않는다 (`TickerDetailModal.tsx:997`).
+
+    `weights_used` 로 재정규화된 가중치를 함께 싣는다 — 응답만으로 점수를
+    재현할 수 있어야 "왜 이 점수인가" 에 답할 수 있다.
     """
     c = close.dropna().astype(float)
     if len(c) < 30:
         return {"score": None, "label": "데이터 부족", "factors": {}}
 
-    # ① 모멘텀 — 1M/3M/6M 수익률 가중 (최근일수록 크게)
-    def ret(days: int) -> float:
-        return (float(c.iloc[-1]) / float(c.iloc[-days]) - 1) * 100 if len(c) > days else 0.0
-    raw_mom = 0.5 * ret(21) + 0.3 * ret(63) + 0.2 * ret(126)
-    # ±33% 를 0~100 양끝으로 매핑 (연 33% 는 매우 강한 모멘텀)
-    momentum = _clip100(50 + raw_mom * 1.5)
+    # ① 모멘텀 — 1M/3M/6M 수익률 가중 (최근일수록 크게).
+    #    이력이 창보다 짧으면 그 창은 **빼고** 남은 창의 가중치를 재정규화한다.
+    #    0.0 으로 채우면 오르는 종목이 '보합' 을 절반 섞어 낮게 나온다.
+    mom_windows = [(21, 0.5), (63, 0.3), (126, 0.2)]
+    avail = [(d, w) for d, w in mom_windows if len(c) > d]
+    if avail:
+        w_sum = sum(w for _, w in avail)
+        raw_mom = sum((float(c.iloc[-1]) / float(c.iloc[-d]) - 1) * 100 * (w / w_sum)
+                      for d, w in avail)
+        # ±33% 를 0~100 양끝으로 매핑 (연 33% 는 매우 강한 모멘텀)
+        momentum = _clip100(50 + raw_mom * 1.5)
+    else:
+        momentum = None
+    mom_used = [f"{d}d" for d, _ in avail]
 
     # ② 추세 효율 — ER 이 없으면 여기서 계산
     if er is None:
         from backend.services.trading_signals import efficiency_ratio
         er = float(efficiency_ratio(c).iloc[-1])
     # ER 0.625 이상이면 만점 (한 방향 직진에 가까움)
-    trend = _clip100(er * 160)
+    trend = _clip100(er * 160) if er is not None and math.isfinite(er) else None
 
-    # ③ 퀄리티 — ROE + 순이익률
-    roe = _f(info.get("returnOnEquity")) * 100
-    pm  = _f(info.get("profitMargins")) * 100
-    quality = _clip100(roe * 0.6 + pm * 1.2)
+    # ③ 퀄리티 — ROE + 순이익률. 둘 다 있어야 낸다.
+    #    `roe * 0.6 + pm * 1.2` 는 두 입력에 맞춰 보정된 식이라, 한쪽이 없으면
+    #    체계적으로 낮은 점수가 된다. 한쪽만으로 재정규화할 수 있는 가중치가
+    #    아니다 (0.6·1.2 는 0~100 스케일로 옮기는 계수다).
+    roe_raw = info.get("returnOnEquity")
+    pm_raw  = info.get("profitMargins")
+    if roe_raw is not None and pm_raw is not None:
+        quality = _clip100(_f(roe_raw) * 100 * 0.6 + _f(pm_raw) * 100 * 1.2)
+    else:
+        quality = None
 
-    # ④ 밸류 — PEG 우선, 없으면 Forward P/E 로 대체
+    # ④ 밸류 — PEG 우선, 없으면 Forward P/E. 둘 다 없으면 **없다.**
+    #    예전에는 `forwardPE` 기본값 25.0 을 써서 "밸류 37점" 이라는 측정처럼
+    #    보이는 값을 만들었다.
     peg = info.get("pegRatio")
+    fpe_raw = info.get("forwardPE")
     if peg is not None and _f(peg) > 0:
         value = _clip100(100 - _f(peg) * 40)          # PEG 1.0 → 60점, 2.5 → 0점
+    elif fpe_raw is not None and _f(fpe_raw) > 0:
+        value = _clip100(100 - _f(fpe_raw) * 2.5)     # Fwd P/E 20 → 50점
     else:
-        fpe = _f(info.get("forwardPE"), 25.0)
-        value = _clip100(100 - max(fpe, 0) * 2.5)     # Fwd P/E 20 → 50점
+        value = None
 
-    factors = {"momentum": round(momentum), "trend": round(trend),
-               "quality": round(quality), "value": round(value)}
-    score = sum(factors[k] * w for k, w in QUANT_WEIGHTS.items())
+    factors: dict[str, float | None] = {
+        "momentum": round(momentum) if momentum is not None else None,
+        "trend":    round(trend)    if trend    is not None else None,
+        "quality":  round(quality)  if quality  is not None else None,
+        "value":    round(value)    if value    is not None else None,
+    }
+
+    # 있는 팩터만으로 가중 평균 — 가중치를 재정규화한다.
+    present = {k: w for k, w in QUANT_WEIGHTS.items() if factors[k] is not None}
+    if not present:
+        return {"score": None, "label": "데이터 부족", "factors": factors,
+                "weights": QUANT_WEIGHTS, "weights_used": {},
+                "momentum_windows": mom_used}
+    wsum = sum(present.values())
+    weights_used = {k: round(w / wsum, 4) for k, w in present.items()}
+    score = sum(factors[k] * (w / wsum) for k, w in present.items())
 
     if   score >= 75: label = "STRONG BUY / 다중 팩터 우위"
     elif score >= 60: label = "BULLISH / 모멘텀 우위"
@@ -97,6 +145,11 @@ def compute_quant_score(close: pd.Series, info: dict, er: Optional[float] = None
         "label":   label,
         "factors": factors,
         "weights": QUANT_WEIGHTS,
+        # 실제로 점수를 만든 가중치. `factors` 의 null 과 합쳐 보면 왜 이
+        # 점수인지 응답만으로 재현된다.
+        "weights_used":     weights_used,
+        # 모멘텀이 실제로 본 창. 이력이 짧으면 줄어든다.
+        "momentum_windows": mom_used,
     }
 
 

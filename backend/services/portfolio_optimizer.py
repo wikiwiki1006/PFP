@@ -114,17 +114,35 @@ def _compute_extended_metrics(
     ann_ret = float((1 + port_ret).prod() ** (252 / n) - 1)
 
     # Sortino: 하방 편차 = 음수 초과수익의 RMSE (semi-deviation)
+    #
+    # 분모가 0 이면 비율이 **정의되지 않는다** (무한). 예전에는 `0.0` 을 줬는데,
+    # 0.0 은 화면에서 "위험조정수익이 없다" 즉 **최악**으로 읽힌다 — 실제로는
+    # 하방 변동이 전혀 없었다는 뜻이므로 최선이다. 부호가 뒤집힌 위장이다.
+    # 실측: 매일 +0.05% 로만 오른 포트폴리오(연 +13.42%, 낙폭 0) → sortino 0.0.
+    # 이제 None 으로 둔다 (프론트는 `typeof raw === 'number'` 로 걸러 '—' 를
+    # 그린다 — `Optimizer.tsx:318-321`).
     daily_rf   = (1 + rf_rate) ** (1 / 252) - 1
     excess_neg = (port_ret - daily_rf).clip(upper=0.0)
     downside_std = float(np.sqrt((excess_neg ** 2).mean()) * np.sqrt(252))
-    sortino = (ann_ret - rf_rate) / downside_std if downside_std > 1e-8 else 0.0
+    sortino: float | None = None
+    sortino_reason: str | None = None
+    if downside_std > 1e-8:
+        sortino = (ann_ret - rf_rate) / downside_std
+    else:
+        # 위험이 없어서 비율이 없는 것과, 계산이 깨져서 없는 것을 가른다.
+        sortino_reason = "no_downside"
 
     # Max Drawdown
     cum = (1 + port_ret).cumprod()
     mdd = float((cum / cum.cummax() - 1).min())
 
-    # Calmar
-    calmar = ann_ret / abs(mdd) if abs(mdd) > 1e-8 else 0.0
+    # Calmar — 낙폭이 0 이면 같은 이유로 정의되지 않는다.
+    calmar: float | None = None
+    calmar_reason: str | None = None
+    if abs(mdd) > 1e-8:
+        calmar = ann_ret / abs(mdd)
+    else:
+        calmar_reason = "no_drawdown"
 
     # Beta — 비교 대상은 호출자가 넘긴 벤치마크다 (그 시장의 기준 지수).
     #
@@ -156,9 +174,11 @@ def _compute_extended_metrics(
     cvar_95 = cvar_daily * np.sqrt(252)
 
     return {
-        "sortino_ratio": round(sortino, 3),
+        "sortino_ratio": round(sortino, 3) if sortino is not None else None,
+        "sortino_reason": sortino_reason,
         "max_drawdown":  round(mdd, 4),
-        "calmar_ratio":  round(calmar, 3),
+        "calmar_ratio":  round(calmar, 3) if calmar is not None else None,
+        "calmar_reason": calmar_reason,
         "beta":          round(beta, 3) if beta is not None else None,
         # 베타가 있으면 None. 값이 있을 때 이유까지 실으면 소비자가 둘 중
         # 무엇을 믿을지 정해야 한다.
