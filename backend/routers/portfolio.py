@@ -899,32 +899,27 @@ def get_metrics(_auth: dict = Depends(current_user), market: str = Depends(marke
     metrics = calculate_metrics(holdings, close_df, equity_curve, raw_df=raw_df,
                                 live=live, market=market, trade_log=trade_log)
 
-    # total_return_pct: TWRR(날짜 보정 없는 시간가중수익률)의 마지막 값으로 덮어쓰기
-    # calculate_metrics는 equity_curve(날짜 보정 포함)를 쓰므로 추가 입금 시 왜곡 가능
+    # total_return_pct 를 곡선 마지막 점으로 덮어쓰던 블록을 지웠다.
     #
-    # 보정에 실패하면 보정 전 값을 남겨두지 않고 None 을 준다. 바로 위 주석대로
-    # 그 값은 **이미 왜곡된 것으로 알려져 있다.** 그대로 내보내면 사용자는 틀린
-    # 수익률을 정상처럼 본다 — 화면에 '—' 가 아니라 그럴듯한 숫자가 뜨므로
-    # 아무도 눈치채지 못한다. 계산 불가는 계산 불가로 보여야 한다.
-    try:
-        twrr, _, _, _, _ = build_return_pct_curve(holdings, trade_log, close_df, market=market)
-        # twrr.empty 만으로는 부족하다. 행은 있는데 값이 전량 NaN 이면
-        # dropna() 결과가 비어 iloc[-1] 이 IndexError 를 낸다.
-        #
-        # 빼면 마지막 값이 NaN 인 경우 float('nan') 이 그대로 metrics 에 담긴다.
-        # main.py 의 SafeJSONResponse 가 NaN 을 null 로 바꿔 주므로 요청은
-        # 실패하지 않고 화면에 '—' 가 뜬다 — 그래서 더 위험하다. "계산에 실패했다"
-        # 와 "값이 원래 없다" 가 응답에서 같은 null 이 되고, 아무도 눈치채지
-        # 못한다. 아래 except 는 직렬화보다 먼저 끝나므로 이걸 잡지도 않는다.
-        # "예외는 어차피 아래서 잡히니 중복" 이 아니다. 지우지 말 것.
-        series = twrr.dropna()
-        metrics["total_return_pct"] = (
-            round(float(series.iloc[-1]), 4) if not series.empty else None
-        )
-    except Exception as e:
-        logger.warning(f"TWRR 보정 실패 — total_return_pct 를 비운다 "
-                       f"(uid={uid}, market={market}): {e}")
-        metrics["total_return_pct"] = None
+    # 그 보정은 "calculate_metrics 가 equity_curve 를 쓰므로 추가 입금 시
+    # 왜곡된다" 는 전제에서 나왔다. **그 전제가 낡았다.** 지금은
+    # portfolio_calculator:640 이 취득원가 기준으로 계산하고 곡선을 쓰지
+    # 않는다 — 입금은 현금을 바꾸지 주식 평가액도 원가도 안 바꾸므로
+    # 구조적으로 입금에 면역이다. 고치려던 왜곡이 사라졌는데 보정만 남았다.
+    #
+    # 그래서 **맞는 값이 다른 정의의 값으로 교체되고 있었다.** 곡선 마지막
+    # 점은 창(window)에 의존하는 시간가중수익률이고, 원가 기준과는 기준일만
+    # 다른 게 아니라 다른 양이다. 합성 이력에서 575.82 대 6.60 이 나온다.
+    # 그 결과 화면의 세 숫자(총자산·원가·누적수익)로 서로를 검산할 수 없었다.
+    #
+    # dropna() 가드도 함께 지웠다. 그건 **곡선 값을 쓰는 동안** NaN 이 응답에
+    # 새는 것을 막는 가드였다 — 곡선 값을 안 쓰면 지킬 대상이 없다. 조각만
+    # 남기면 다음 사람이 왜 있는지 모른다.
+    #
+    # 남는 트레이드오프: 원가 기준은 **매도로 실현한 손익을 포함하지 않는다**
+    # (현금에 남고 현금은 이 계산에서 빠진다). 매도가 많은 사용자에게는 누적
+    # 수익이 과소 표시된다. 그 답은 실현손익 별도 필드지, 옆 두 숫자와 기준이
+    # 다른 필드가 아니다.
     return metrics
 
 
