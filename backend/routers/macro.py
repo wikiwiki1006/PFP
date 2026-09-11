@@ -331,8 +331,13 @@ def analyst_feedback_auto(
             if label.lower() in sec.lower() or sec.lower() in label.lower():
                 etf_chg = sector_chgs.get(etf)
                 break
-        chg_str = f"{etf_chg:+.1f}%" if etf_chg is not None else "N/A"
-        sector_lines.append(f"{sec}({wt*100:.0f}%, 오늘{chg_str})")
+        # 등락을 모르면 그 조각을 **빼고** 적는다. "오늘N/A" 를 넣으면 모델은
+        # 'N/A' 라는 문자열을 값으로 받는다 — 모르는 것을 넘기는 방법은
+        # 문자열이 아니라 생략이다.
+        if etf_chg is not None:
+            sector_lines.append(f"{sec}({wt*100:.0f}%, 오늘{etf_chg:+.1f}%)")
+        else:
+            sector_lines.append(f"{sec}({wt*100:.0f}%)")
 
     portfolio_sector_summary = " / ".join(sector_lines) if sector_lines else "섹터 데이터 없음"
 
@@ -348,7 +353,11 @@ def analyst_feedback_auto(
         # 클라이언트가 보낸 값이 없으면 None 을 넘겨 '산출 불가'로 처리한다.
         portfolio_beta=(live.portfolio_beta if live.portfolio_beta is not None
                         else metrics.get("portfolio_beta")),
-        today_chg_pct=live.today_chg_pct if live.today_chg_pct is not None else metrics.get("today_change_pct", 0.0),
+        # 기본값 0.0 을 두지 않는다. vix 때와 같은 형태다 — 0% 는 '보합'이라는
+        # 실측 판단이고, metrics 에 키가 있으면(값이 None 이어도) dict.get 은
+        # 애초에 기본값을 쓰지도 않는다.
+        today_chg_pct=(live.today_chg_pct if live.today_chg_pct is not None
+                       else metrics.get("today_change_pct")),
         sector_summary=portfolio_sector_summary,
         is_portfolio_sectors=True,
     )
