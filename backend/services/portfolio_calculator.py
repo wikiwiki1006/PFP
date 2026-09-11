@@ -675,7 +675,10 @@ def calculate_metrics(
         # 계산 불가는 null 로 내려간다 — `_round_keep_none` 이 None 을 통과시킨다.
         # 0 으로 바꾸면 '보합'·'본전'·'변동성 낮음' 이라는 단정이 된다 (§1.3).
         "total_return_pct":  _round_keep_none(total_rtn, 4),
-        "today_change_val":  round(today_chg_val, 2),
+        # `today_change_val` 키는 뺐다. 프론트 계약(types·demoData)에서 develop 이
+        # 제거했고 백엔드 소비자도 없는데, 관측치가 한 개뿐이면 `0.0` 을 지어내
+        # 내보내고 있었다. 아무도 읽지 않는 값을 위해 위장을 유지할 이유가 없다.
+        # 내부 변수는 남는다 — 폴백 분기가 `today_chg_val is None` 으로 갈린다.
         "today_change_pct":  _round_keep_none(today_chg_pct, 4),
         "as_of":             as_of_str,
         "market_open":       _market_open_flag(market),
