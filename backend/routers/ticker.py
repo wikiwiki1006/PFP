@@ -80,8 +80,15 @@ def _build_optimizer_block(sym: str, uid: str, closes=None, market: str = "US") 
     # 보유 종목이 바뀌지 않는 한 결과가 같으므로 짧게 캐싱한다.
     # (공용 본문이 DB 캐시에 적중해도 여기서 매번 공분산을 다시 계산하면
     #  응답이 수 초대로 남는다 — 실측 2.8s → 0.3s)
+    # 키에 시장을 넣는다 (§1.1). 이 블록의 결과는 get_holdings(uid, market=market)
+    # 에 의존하는데 키에는 market 이 없었다 — 먼저 조회한 시장의 답이 300초 동안
+    # 다른 시장에 그대로 나갔다. 실측으로 000660.KS 가 `?market=US` 에서
+    # in_portfolio=True · weight=48.79 를 받았다(미국에 없는 종목이다).
+    #
+    # MarketSwitch 의 전체 새로고침으로도 안 막힌다. 서버 메모리 캐시라
+    # 브라우저를 새로 고쳐도 남는다.
     from backend.services.market_data import _cache_get as _cg, _cache_put as _cp
-    _ok = f"opt_ctx_{sym}_{uid}"
+    _ok = f"opt_ctx_{sym}_{uid}_{market}"
     _hit = _cg(_ok, 300)
     if _hit is not None:
         return _hit
