@@ -1181,10 +1181,27 @@ def return_pct_to_records(
 def factor_analysis(portfolio_returns: pd.Series, close_df: pd.DataFrame) -> dict:
     """
     포트폴리오 수익률을 시장/모멘텀/가치 팩터에 회귀해 노출도 산출.
-    데이터 부족 시 빈 dict 반환.
+    데이터가 모자라면 빈 dict 반환.
+
+    **계산 실패와 데이터 부족을 구별한다.** 예전에는 함수 전체를
+    `except Exception: return {}` 로 감싸서 둘이 같은 값으로 나왔다. 그래서
+    아래 버그가 6개월간 "데이터가 모자란가 보다" 로 보였다:
+
+        mkt = close_df.get("^GSPC") or close_df.get("SPY")
+
+    `Series or Series` 는 `ValueError: The truth value of a Series is
+    ambiguous` 다 — **벤치마크를 찾아 놓고 같은 식에서 버렸다.** 300일치
+    ^GSPC 를 줘도 `{}` 였다.
+
+    예외는 삼키지 않고 로그에 남긴다. 값이 비는 것과 계산이 깨진 것은 다르다.
     """
     try:
-        mkt = close_df.get("^GSPC") or close_df.get("SPY")
+        # `or` 를 쓰지 않는다 — Series 의 진리값은 정의되지 않는다.
+        mkt = None
+        for sym in ("^GSPC", "SPY"):
+            if sym in close_df.columns:
+                mkt = close_df[sym]
+                break
         if mkt is None:
             return {}
 
@@ -1208,6 +1225,8 @@ def factor_analysis(portfolio_returns: pd.Series, close_df: pd.DataFrame) -> dic
             ss_tot = np.sum((y - y.mean()) ** 2)
             r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
         except Exception:
+            logger.warning("팩터 회귀 실패 (표본 %d일) — 팩터 노출도 없이 진행",
+                           len(common), exc_info=True)
             return {}
 
         return {
@@ -1216,4 +1235,6 @@ def factor_analysis(portfolio_returns: pd.Series, close_df: pd.DataFrame) -> dic
             "r_squared":        round(float(r2), 4),
         }
     except Exception:
+        logger.warning("팩터 분석 실패 — 데이터 부족과 구별되지 않으므로 남긴다",
+                       exc_info=True)
         return {}
