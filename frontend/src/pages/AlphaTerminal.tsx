@@ -2658,7 +2658,13 @@ export default function AlphaTerminal() {
                         <td className="py-2.5 px-3"><TickerLabel ticker={e.ticker} name={names[e.ticker]} primaryClass="text-base font-bold" /></td>
                         <td className="py-2.5 px-3 text-sm text-[#cbd5e1]">{e.earn_date}</td>
                         <td className="py-2.5 px-3 text-sm text-[#cbd5e1]">{e.div_date}</td>
-                        <td className="py-2.5 px-3 text-sm text-[#10b981] font-mono font-bold">{e.div_yield}</td>
+                        {/* null 이면 React 가 아무것도 안 그려 칸이 빈다 —
+                            '배당 없음'인지 '조회 실패'인지 구분되지 않는다.
+                            그리고 초록은 값이 있을 때만 의미가 있다. */}
+                        <td className="py-2.5 px-3 text-sm font-mono font-bold"
+                            style={{ color: e.div_yield == null ? '#64748b' : '#10b981' }}>
+                          {e.div_yield ?? '—'}
+                        </td>
                       </tr>
                     ))}
                   </tbody>

@@ -135,7 +135,8 @@ export interface EarningsEvent {
   ticker: string
   earn_date: string
   div_date: string
-  div_yield: string
+  /** null = 배당 정보 없음. 서버가 None 을 준다 (market_data:533,560). */
+  div_yield: string | null
 }
 
 export interface CorrelationMatrix {
