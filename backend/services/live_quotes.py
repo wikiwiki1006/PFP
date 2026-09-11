@@ -44,9 +44,16 @@ def _finite(v) -> Optional[float]:
         return None
 
 
-def save_quotes(quotes: dict, source: str, session: str) -> int:
-    """{ticker: {price, change_1d, change_1d_pct, volume, ...}} → market_snapshot upsert."""
+def save_quotes(quotes: dict, source: str, session: "str | None") -> int:
+    """{ticker: {price, change_1d, change_1d_pct, volume, ...}} → market_snapshot upsert.
+
+    `session=None` 이면 티커마다 자기 거래소의 세션을 기록한다. 배치에 시장이
+    섞이므로 그게 기본이어야 한다 — 전역 라벨은 한쪽에 대해 항상 틀린다
+    (`market_calendar.market_session` 참고). 문자열을 직접 주는 것은 그 값이
+    티커와 무관하게 참일 때뿐이다 (확정 종가 백필의 "closed" 등).
+    """
     from backend.db import get_conn, is_available
+    from backend.services.market_calendar import market_session
     if not is_available() or not quotes:
         return 0
     from psycopg2.extras import execute_values
@@ -61,7 +68,7 @@ def save_quotes(quotes: dict, source: str, session: str) -> int:
             _finite(q.get("change_1d")), _finite(q.get("change_1d_pct")),
             _finite(q.get("volume")), _finite(q.get("day_high")),
             _finite(q.get("day_low")), _finite(q.get("prev_close")),
-            session, source,
+            session if session is not None else market_session(str(t)), source,
         ))
     if not rows:
         return 0
@@ -143,7 +150,7 @@ class QuoteStream:
                 batch, self._buf = self._buf, {}
             if batch:
                 try:
-                    n = save_quotes(batch, source="ws", session=us_market_status())
+                    n = save_quotes(batch, source="ws", session=None)
                     logger.debug(f"QuoteStream flush: {n}개 티커")
                 except Exception as e:
                     logger.warning(f"QuoteStream flush 실패: {e}")
@@ -248,7 +255,7 @@ def refresh_tier1() -> int:
     if not tickers:
         return 0
     q = poll_quotes(tickers)
-    return save_quotes(q, source="poll", session=us_market_status())
+    return save_quotes(q, source="poll", session=None)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -403,7 +410,7 @@ def get_quotes(
     띄우면 되는 경로(거래 입력 폼 등)에서 쓴다 — 백필은 yfinance 를 한 번 더
     부르므로 사용자를 그만큼 더 기다리게 한다. 일별 종가는 스케줄러가 채운다.
     """
-    from backend.services.market_calendar import us_market_status
+    from backend.services.market_calendar import market_session, us_market_status
     syms = sorted({str(t).upper().strip() for t in tickers if t})
     if not syms:
         return {}
@@ -426,12 +433,12 @@ def get_quotes(
     if stale:
         fresh = poll_quotes(stale, interval=interval)
         if fresh:
-            save_quotes(fresh, source="poll", session=status)
+            save_quotes(fresh, source="poll", session=None)
             for t, q in fresh.items():
                 q = dict(q)
                 q["age_sec"] = 0.0
                 q["source"] = "poll"
-                q["session"] = status
+                q["session"] = market_session(t)
                 cached[t] = q
 
     # 확정 종가 누락분 백필 (market_prices + snapshot 동시 갱신).

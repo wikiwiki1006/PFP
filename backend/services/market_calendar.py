@@ -513,6 +513,26 @@ def price_can_move(ticker: str) -> bool:
     return True
 
 
+def market_session(ticker: str) -> str:
+    """이 티커가 속한 거래소의 **현재** 세션 (pre/open/post/closed).
+
+    시장 하나로 뭉뚱그린 라벨을 티커에 붙이면 안 된다. 두 장은 겹치지
+    않으므로(KRX 09:00 KST = 20:00 ET) 하나가 open 일 때 다른 하나는 반드시
+    닫혀 있고, 전역 라벨은 둘 중 하나에 대해 항상 틀린다.
+
+    실측 (11:20 KST · KRX 개장 · NYSE 마감):
+        ^KS11   session=post    ← 개장 중인데 마감으로 기록
+        ^GSPC   session=open    ← 7.3시간 전 값이라 그때는 맞았다
+
+    24시간 자산(암호화폐·환율·선물)은 세션 개념이 없어 'open' 을 준다.
+    """
+    if uses_us_session_calendar(ticker):
+        return us_market_status()
+    if uses_kr_session_calendar(ticker):
+        return kr_market_status()
+    return "open"
+
+
 def uses_kr_session_calendar(ticker: str) -> bool:
     """KRX 거래일 캘린더를 따르는 티커인지 (.KS / .KQ 와 코스피·코스닥 지수)."""
     t = str(ticker).upper().strip()
