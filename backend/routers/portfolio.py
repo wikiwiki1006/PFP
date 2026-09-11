@@ -197,9 +197,10 @@ def add_holding(
         if ticker in holdings:
             raise HTTPException(status_code=409, detail=f"{ticker} 이미 존재. PUT으로 수정하세요.")
 
+        event_date = (item.date or "").strip() or datetime.now().strftime("%Y-%m-%d")
+
         # 현금 최초 등록 시 DEPOSIT 이벤트 기록
         if ticker == "CASH" and float(item.q) > 0:
-            event_date = (item.date or "").strip() or datetime.now().strftime("%Y-%m-%d")
             add_trade({
                 "date":   event_date,
                 "ticker": "CASH",
@@ -208,6 +209,32 @@ def add_holding(
                 "price":  1.0,
                 "memo":   None,
             }, uid, market=market)
+        elif ticker != "CASH":
+            # 종목에도 **취득 기록을 남긴다.** 예전에는 현금만 남겨서, 이 경로로
+            # 들어온 보유는 `trade_log` 에 근거가 없었다. 그 종목을 나중에 팔면
+            # `realized_pnl_from_log` 가 원가를 못 찾아 `no_cost_basis` 가 되고,
+            # 그 설계상 **포트폴리오 전체**의 실현손익이 null 이 된다 (부분 합계를
+            # 내보내지 않는다). 재현했다: 추가 → 매도 → pnl None · sales 0.
+            #
+            # `/setup` 이 이미 이 형태로 기록한다 (시드 DEPOSIT 후 종목 ADD).
+            # 같은 파일 안에 맞는 예가 있었는데 이 분기만 빠져 있었다.
+            #
+            # **현금 중립이다.** `cash_ledger._cash_delta` 가 ADD 를 `-(q*price)`
+            # 로, DEPOSIT 을 `+q` 로 보므로 둘을 같은 금액으로 넣으면 순변화가
+            # 0 이다. 사용자가 보는 잔고는 그대로고 원장만 채워진다. 의미도
+            # 맞다 — "이미 갖고 있다" 는 밖에서 돈이 들어와 그 종목이 됐다는
+            # 뜻이고, 외부 유입은 성과가 아니라 자금 흐름이다.
+            q, avg = float(item.q), float(item.avg or 0)
+            if q > 0 and avg > 0:
+                add_trade({"date": event_date, "ticker": "CASH", "type": "DEPOSIT",
+                           "q": round(q * avg, 2), "price": 1.0,
+                           "memo": f"{ticker} 보유 등록"}, uid, market=market)
+                add_trade({"date": event_date, "ticker": ticker, "type": "ADD",
+                           "q": q, "price": avg, "memo": "보유 등록"}, uid, market=market)
+            # 평단이 없으면 거래를 남기지 않는다. `price=0` 인 ADD 는
+            # `realized_pnl_from_log` 에서 무상취득으로 읽혀 **100% 이익을
+            # 지어낸다.** 원가를 모르는 채로 `no_cost_basis` 가 나오는 편이
+            # 정직하다.
 
         save_holding(ticker, item.q, item.avg, item.sector or "Other", uid, market=market)
         return {"ok": True, "ticker": ticker}
