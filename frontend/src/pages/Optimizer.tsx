@@ -369,6 +369,16 @@ function FrontierChart({
   if (!frontier.length) return null
 
   const RISK_FREE = 0.04
+  // 분모 하한. `> 0` 이면 **부동소수 잡음이 통과한다** — 운영에서 vol
+  // 1.803e-15 가 `equal_weight_sharpe` 4.77e13 을 만들어 응답에 실렸다.
+  // 여기서는 그 점이 색 정규화의 **최대값**이 되어 나머지 구간이 전부
+  // 바닥으로 눌린다. null 로 떨어뜨리는 것보다 나쁘다.
+  //
+  // 값은 backend `portfolio_calculator.MIN_VOL_FOR_RATIO` 와 같다. 실측상
+  // `> 0` 과 `> 1e-12` 가 갈리는 실제 입력은 없고(가격이 상수면 vol 이
+  // 정확히 0.0, 300일 중 1틱이면 4.583e-05), 값의 우열이 아니라 **양쪽이
+  // 같은 답을 하는 것**이 요점이라 맞춘다.
+  const MIN_VOL_FOR_RATIO = 1e-12
   const W = 580, H = 270
   const M = { top: 24, right: 110, bottom: 48, left: 52 }
   const iW = W - M.left - M.right
@@ -383,7 +393,9 @@ function FrontierChart({
       // 최소값이 되어 색 정규화의 바닥을 끌어내리고(옆 점들이 실제보다 좋게
       // 보인다) 그 구간 자체는 빨강 — '최악' 으로 칠해진다. 서버 필드에서
       // 고친 것과 같은 형태가 여기 화면 계산에도 있었다.
-      sharpe: p.volatility > 0 ? (p.return - RISK_FREE) / p.volatility : null,
+      sharpe: p.volatility > MIN_VOL_FOR_RATIO
+        ? (p.return - RISK_FREE) / p.volatility
+        : null,
     }))
 
   const strategies = ([
