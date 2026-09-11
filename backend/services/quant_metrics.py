@@ -134,11 +134,31 @@ def compute_quant_score(close: pd.Series, info: dict, er: Optional[float] = None
     weights_used = {k: round(w / wsum, 4) for k, w in present.items()}
     score = sum(factors[k] * (w / wsum) for k, w in present.items())
 
-    if   score >= 75: label = "STRONG BUY / 다중 팩터 우위"
-    elif score >= 60: label = "BULLISH / 모멘텀 우위"
-    elif score >= 45: label = "NEUTRAL / 혼조"
-    elif score >= 30: label = "BEARISH / 팩터 약세"
-    else:             label = "WEAK / 전 팩터 열위"
+    # 라벨. 팩터가 전부 있을 때만 극단 밴드(STRONG BUY·WEAK)와 **이유 문구**를
+    # 붙인다.
+    #
+    # 극단 밴드를 뺀 근거는 실측이다. 2팩터 점수 S2 는 가중치 .60(모멘텀 .35 +
+    # 추세 .25)으로 재정규화한 값이라, 같은 종목의 quality·value 가 평균(50)
+    # 이었다면 4팩터 점수는 `S4 = .60*S2 + 20` 이 된다. 실데이터 250종목에서:
+    #
+    #     2팩터 STRONG BUY  5종목 → 4팩터 척도에서 최상위인 것 **0종목** (전부 BULLISH)
+    #     2팩터 WEAK        9종목 → 4팩터 척도에서 최하위인 것 **0종목** (전부 BEARISH)
+    #     가운데 셋은 양방향으로 움직인다 (BEARISH→NEUTRAL 25 · BULLISH→NEUTRAL 13)
+    #
+    # 즉 극단 둘만 **한 방향으로** 과도하게 배정된다. 경계 숫자를 팩터 수마다
+    # 새로 정하면 그 값이 또 임의값이 되므로, 경계는 그대로 두고 극단 밴드만
+    # 주지 않는다 — 새 상수가 없는 규칙이다.
+    #
+    # 이유 문구를 빼는 근거는 문구 자체다. 팩터가 둘인데 "다중 팩터 우위" 는
+    # 거짓이고, 그 둘 중 하나가 모멘텀이라 "모멘텀 우위" 는 동어반복이다.
+    # (프론트도 부분 측정이면 `split(' / ')[0]` 로 뒷부분을 버린다 —
+    # `TickerDetailModal.tsx:202`. 원천에서 거짓 문구를 만들지 않는다.)
+    full = len(present) == len(QUANT_WEIGHTS)
+    if   score >= 75: label = "STRONG BUY / 다중 팩터 우위" if full else "BULLISH"
+    elif score >= 60: label = "BULLISH / 모멘텀 우위" if full else "BULLISH"
+    elif score >= 45: label = "NEUTRAL / 혼조" if full else "NEUTRAL"
+    elif score >= 30: label = "BEARISH / 팩터 약세" if full else "BEARISH"
+    else:             label = "WEAK / 전 팩터 열위" if full else "BEARISH"
 
     return {
         "score":   round(_clip100(score)),
@@ -332,15 +352,21 @@ def compute_optimizer_context(
     # 무관하게 그 하나만 봤다. 한국 종목의 베타가 S&P 대비로 나갔다 —
     # 계산은 맞고 질문이 틀렸는데 맞는 답처럼 보인다.
     from backend.services.markets import benchmark_for
+    # 판정 기준은 `portfolio_calculator` 에 한 곳으로 모았다 — 예전에는 이
+    # 자리가 60일, 포트폴리오 베타가 30일이라 같은 종목을 두 화면이 다르게
+    # 판정했다 (관측치 45일 종목: 2.036 vs '—').
+    from backend.services.portfolio_calculator import (
+        BETA_MIN_OVERLAP, BETA_MIN_VARIANCE,
+    )
     bench = benchmark_for(market)
     beta = None
     try:
         if bench in close_df.columns:
             mkt = close_df[bench].pct_change().dropna()
             common = rets.index.intersection(mkt.index)
-            if len(common) >= 60:
+            if len(common) >= BETA_MIN_OVERLAP:
                 mv = float(mkt.loc[common].var())
-                if mv > 1e-12:
+                if mv > BETA_MIN_VARIANCE:
                     beta = round(float(np.cov(rets[ticker].loc[common], mkt.loc[common])[0, 1] / mv), 3)
     except Exception:
         # 이 블록은 예외 없이도 None 이 된다 (기준 지수 없음 · 공통 구간 60일
