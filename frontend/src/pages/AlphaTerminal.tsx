@@ -17,7 +17,7 @@ import {
   postTrade, addHolding, updateHolding, deleteHolding, getHoldings,
   generateDailyBrief, getDailyBriefHistory, getDailyBriefFile,
   getIndexPrices, getTrades, updateTrade, deleteTrade, getTickerPrice, searchTickers,
-  autoDetectSectors, isEmptyPortfolioError,
+  autoDetectSectors,
 } from '@/api'
 import { cn } from '@/lib/utils'
 import TickerDetailModal from '@/components/TickerDetailModal'
@@ -787,11 +787,15 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
           <span className="text-[13px] text-[#94a3b8] font-mono">로드 중…</span>
         </div>
       )}
+      {/* 조회 실패와 빈 포트폴리오를 가르는 근거가 **에러 여부**로 바뀌었다.
+          서버가 보유 없는 사용자에게 200 + `[]` 를 주므로, 빈 목록은 에러가
+          아니라 정상 응답이다. 실패는 실패대로 따로 말한다 — 예전처럼
+          "데이터 없음" 한 줄로 덮으면 조회 실패가 빈 화면으로 위장된다. */}
       {!curveQ.isLoading && !data.length && (
         <div className="flex items-center justify-center" style={{ height: 300 }}>
-          {isEmptyPortfolioError(curveQ.error)
-            ? <EmptyHoldings />
-            : <span className="text-[13px] text-[#94a3b8] font-mono">데이터 없음</span>}
+          {curveQ.isError
+            ? <span className="text-[13px] text-[#ef4444] font-mono">자산 곡선을 불러오지 못했습니다</span>
+            : <EmptyHoldings />}
         </div>
       )}
 
@@ -1375,11 +1379,14 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
         />
       )}
 
-      {/* 조회 실패를 '보유 없음'으로 보여주지 않는다 (그 반대도 마찬가지다) */}
-      {view === 'holdings' && holdQ.isError && isEmptyPortfolioError(holdQ.error) && (
+      {/* 조회 실패를 '보유 없음'으로 보여주지 않는다 (그 반대도 마찬가지다).
+          빈 상태는 **데이터**로 판단한다. 예전에는 `isEmptyPortfolioError(holdQ.error)`
+          였는데 /holdings-detail 은 처음부터 200 + `[]` 를 줬다 — 즉 이 분기는
+          한 번도 그려진 적이 없고, 보유가 없는 사용자는 빈 표만 봤다. */}
+      {view === 'holdings' && !holdQ.isError && !holdQ.isLoading && !(holdQ.data || []).length && (
         <div className="flex-1"><EmptyHoldings /></div>
       )}
-      {view === 'holdings' && holdQ.isError && !isEmptyPortfolioError(holdQ.error) && (
+      {view === 'holdings' && holdQ.isError && (
         <div className="flex-1 flex flex-col items-center justify-center gap-2 text-xs text-[#ef4444]">
           <span>보유 종목을 불러오지 못했습니다</span>
           <button onClick={() => holdQ.refetch()}
@@ -2545,9 +2552,11 @@ export default function AlphaTerminal() {
           items-stretch 를 그대로 두면 한 줄이 통째로 늘어나 헤더만 193px 을 먹었다. */}
       <div data-tour="metrics" className="flex-shrink-0 bg-[#060b14] border-b border-[#1e2d40] flex flex-col md:flex-row md:items-stretch">
         <div className="flex flex-1 min-w-0 overflow-x-auto">
-          {/* 실패를 '0원 포트폴리오'로 위장하지 않는다 — 조회 실패와 빈 포트폴리오는 다르다 */}
-          {metricsQ.isError && isEmptyPortfolioError(metricsQ.error) && <EmptyHoldings compact />}
-          {metricsQ.isError && !isEmptyPortfolioError(metricsQ.error) && (
+          {/* 실패를 '0원 포트폴리오'로 위장하지 않는다 — 조회 실패와 빈 포트폴리오는 다르다.
+              빈 포트폴리오는 **응답**에서 읽는다(`is_empty`). 예전에는 400 을 보고
+              판단했는데, 그건 서버가 정상 상태를 오류라고 부르는 동안만 맞았다. */}
+          {!metricsQ.isError && metricsQ.data?.is_empty && <EmptyHoldings compact />}
+          {metricsQ.isError && (
             <div className="flex items-center gap-2 px-4 py-2 text-xs text-[#ef4444]">
               <span>지표를 불러오지 못했습니다</span>
               <button onClick={() => metricsQ.refetch()}
@@ -2559,7 +2568,10 @@ export default function AlphaTerminal() {
           {!metricsQ.isError && metricsQ.isLoading && (
             <div className="px-4 py-2 text-xs text-[#64748b]">지표 불러오는 중...</div>
           )}
-          {!metricsQ.isError && m && typeof m.total_equity === 'number' && (
+          {/* `!m.is_empty` 가 필요하다. 빈 포트폴리오의 total_equity 는 **0 이고
+              그건 참이라서** `typeof === 'number'` 를 그대로 통과한다 — 빼면
+              EmptyHoldings 와 0원 지표 바가 함께 뜬다. */}
+          {!metricsQ.isError && m && !m.is_empty && typeof m.total_equity === 'number' && (
             <LockedPreview silent>
             <div className="flex items-stretch">
               {/* 총 자산은 축약하지 않는다. formatCompact 는 ₩1,235만 / $1.23M 처럼
