@@ -38,6 +38,30 @@ from backend.services.market_calendar import (
 )
 
 
+class PortfolioChange(NamedTuple):
+    """포트폴리오 일변동과 **그 값이 무엇으로 만들어졌는지**.
+
+    앞의 세 필드가 값이고 뒤의 셋은 그 값의 근거다. 근거를 함께 내보내는
+    이유는 집계가 부분 정보로도 그럴듯한 숫자를 내기 때문이다 — 10종목이
+    전부 +10% 오른 날 1종목만 계산 가능하면 **+0.92%** 가 나온다. 유한하고
+    범위도 그럴듯해서 어떤 가드에도 걸리지 않는다.
+
+    `stale` 은 "자기 시장의 마지막 확정 세션보다 뒤처진 종목" 이다. 서로의
+    `as_of` 를 비교하지 않는 이유가 있다 — 미국·한국을 함께 보유하면 두 시장의
+    마지막 확정 세션이 원래 다르다(KST 오전에 미국은 전날, 한국은 오늘). 서로
+    비교하면 혼합 포트폴리오가 항상 "날짜 섞임" 으로 뜬다. 기준은 각 종목이
+    속한 시장이어야 한다.
+
+    24시간 자산(암호화폐·환율·선물)은 세션 개념이 없어 이 판정에서 뺀다.
+    """
+    chg_val:    Optional[float]
+    chg_pct:    Optional[float]
+    as_of:      Optional[pd.Timestamp]   # 집계에 쓰인 가장 늦은 기준일
+    counted:    int                      # 변동률을 구한 종목 수
+    holdings_n: int                      # 구해야 했던 종목 수 (CASH 제외, 수량>0)
+    stale:      tuple[str, ...]          # 자기 시장 기준 뒤처진 종목
+
+
 def _market_now(ticker: str, now: Optional[datetime]) -> datetime:
     """티커가 상장된 거래소 기준 현재 시각.
 
@@ -224,23 +248,62 @@ def last_price(
     return float(s.iloc[-1])
 
 
+def _is_behind_own_market(
+    ticker: str, as_of: pd.Timestamp, now: Optional[datetime],
+) -> bool:
+    """이 종목의 기준일이 **자기 시장의** 마지막 확정 세션보다 뒤처졌는지.
+
+    서로의 `as_of` 를 비교하지 않는다. 미국·한국을 함께 보유하면 두 시장의
+    마지막 확정 세션이 원래 다르다 — KST 오전이면 미국 종목은 전날, 한국
+    종목은 오늘이 정상이다. 서로 비교하면 혼합 포트폴리오가 항상 "섞였다" 로
+    뜬다.
+
+    `<` 로 본다. 장중에는 실시간 가격이 주입돼 `as_of` 가 마지막 확정 세션보다
+    **앞설** 수 있고 그건 정상이다.
+
+    24시간 자산(암호화폐·환율·선물)은 세션 개념이 없어 판정하지 않는다.
+    """
+    from backend.services.market_calendar import (
+        last_completed_kr_session, last_completed_session,
+        uses_kr_session_calendar, uses_us_session_calendar,
+    )
+    try:
+        if uses_kr_session_calendar(ticker):
+            expected = last_completed_kr_session(_market_now(ticker, now))
+        elif uses_us_session_calendar(ticker):
+            expected = last_completed_session(_market_now(ticker, now))
+        else:
+            return False
+        return as_of.date() < expected
+    except Exception:
+        # 캘린더를 못 읽으면 "뒤처졌다" 고 단정하지 않는다 — 없는 결손을
+        # 만드는 것이 빠뜨리는 것보다 나쁘다.
+        return False
+
+
 def portfolio_daily_change(
     holdings: dict,
     raw_df: pd.DataFrame,
     live: Optional[dict] = None,
     now: Optional[datetime] = None,
-) -> tuple[Optional[float], Optional[float], Optional[pd.Timestamp]]:
-    """포트폴리오 전체 일변동 (금액, %, 기준일).
+) -> PortfolioChange:
+    """포트폴리오 전체 일변동 (금액, %, 기준일) + 그 값의 근거.
 
     각 종목의 실제 변동액을 합산한다 — 화면에 보이는 종목별 행의 합과
     정의상 일치한다. 현금은 분모(기준 자산)에만 포함되고 변동에는 기여하지 않는다.
-    반환 (None, None, None) 은 계산 가능한 종목이 하나도 없다는 뜻이다.
+    `chg_val is None` 은 계산 가능한 종목이 하나도 없다는 뜻이다.
+
+    `counted`·`holdings_n`·`stale` 은 **임계값 없이 사실만** 싣는다. "몇 %
+    미만이면 못 믿는가" 는 표시 계층의 결정이고, 여기서 정하면 근거 없는 상수가
+    하나 더 생긴다.
     """
     live = live or {}
     chg_val = 0.0
     base    = 0.0
     as_of: Optional[pd.Timestamp] = None
     counted = 0
+    holdings_n = 0
+    stale: list[str] = []
 
     for t, info in holdings.items():
         if t == "CASH":
@@ -251,6 +314,7 @@ def portfolio_daily_change(
             continue
         if qty == 0:
             continue
+        holdings_n += 1
 
         dc = daily_change(raw_df, t, live.get(t), now)
         if dc is None:
@@ -263,11 +327,13 @@ def portfolio_daily_change(
         chg_val += dc.chg_val * qty
         base    += dc.prev_close * qty
         counted += 1
+        if _is_behind_own_market(t, dc.as_of, now):
+            stale.append(t)
         if as_of is None or dc.as_of > as_of:
             as_of = dc.as_of
 
     if counted == 0:
-        return None, None, None
+        return PortfolioChange(None, None, None, 0, holdings_n, tuple(stale))
 
     try:
         cash = float(holdings.get("CASH", {}).get("q", 0) or 0)
@@ -276,5 +342,8 @@ def portfolio_daily_change(
     base += cash
 
     if base <= 0:
-        return None, None, as_of
-    return round(chg_val, 2), round(chg_val / base * 100, 4), as_of
+        return PortfolioChange(None, None, as_of, counted, holdings_n, tuple(stale))
+    return PortfolioChange(
+        round(chg_val, 2), round(chg_val / base * 100, 4), as_of,
+        counted, holdings_n, tuple(stale),
+    )

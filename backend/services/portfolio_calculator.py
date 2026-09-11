@@ -566,14 +566,19 @@ def calculate_metrics(
     # 연속된 거래일이라는 보장도 없다. 종목별 합산은 화면의 행 합계와도 일치한다.
     today_chg_val = today_chg_pct = None
     as_of_str = None
+    # 일변동이 무엇으로 만들어졌는지. 임계값은 두지 않고 사실만 싣는다.
+    chg_counted = chg_holdings = 0
+    chg_stale: list[str] = []
     if raw_df is not None and not raw_df.empty:
         try:
             from backend.services.price_series import portfolio_daily_change
-            _v, _p, _a = portfolio_daily_change(holdings, raw_df, live, now)
-            if _v is not None:
-                today_chg_val = _safe_or(_v, 0.0)
-                today_chg_pct = _num_or_none(_p)
-                as_of_str = _a.strftime("%Y-%m-%d") if _a is not None else None
+            pc = portfolio_daily_change(holdings, raw_df, live, now)
+            chg_counted, chg_holdings = pc.counted, pc.holdings_n
+            chg_stale = list(pc.stale)
+            if pc.chg_val is not None:
+                today_chg_val = _safe_or(pc.chg_val, 0.0)
+                today_chg_pct = _num_or_none(pc.chg_pct)
+                as_of_str = pc.as_of.strftime("%Y-%m-%d") if pc.as_of is not None else None
         except Exception:
             # 실패하면 아래 폴백이 에쿼티 곡선의 마지막 두 점으로 계산한다 —
             # 그 경로는 ffill 로 복제된 유령 행을 구분하지 못해 0% 를 낼 수 있다.
@@ -681,6 +686,14 @@ def calculate_metrics(
         # 내부 변수는 남는다 — 폴백 분기가 `today_chg_val is None` 으로 갈린다.
         "today_change_pct":  _round_keep_none(today_chg_pct, 4),
         "as_of":             as_of_str,
+        # 일변동의 근거. 집계는 부분 정보로도 그럴듯한 숫자를 낸다 — 10종목이
+        # 전부 +10% 오른 날 1종목만 계산되면 +0.92% 가 나오고, 유한하고 범위도
+        # 그럴듯해서 어떤 가드에도 걸리지 않는다. 그래서 사실을 함께 내보낸다.
+        # `change_stale` 은 **자기 시장의** 마지막 확정 세션보다 뒤처진 종목이다
+        # (서로의 as_of 를 비교하면 미국·한국 혼합이 항상 섞임으로 뜬다).
+        "change_counted":    chg_counted,
+        "change_holdings":   chg_holdings,
+        "change_stale":      chg_stale,
         "market_open":       _market_open_flag(market),
         # 베타·알파가 무엇에 대비한 값인지 응답에 담는다. 화면이 "베타" 라고만
         # 쓰면 사용자는 벤치마크를 모르고, 한국 포트폴리오에 S&P500 대비 값이
