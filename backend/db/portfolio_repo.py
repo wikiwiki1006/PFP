@@ -30,14 +30,14 @@ from __future__ import annotations
 import logging
 from contextlib import contextmanager
 
-from backend.db import get_conn, is_available
+from backend.db import get_conn, is_available, require_uid
 
 logger = logging.getLogger(__name__)
 
 
 # ── Holdings ───────────────────────────────────────────────────────────────────
 
-def get_holdings(user_id: str = "default", market: str = "US") -> dict:
+def get_holdings(user_id: "str | None" = None, market: str = "US") -> dict:
     """{ ticker: {q, avg, sector} } 반환. 해당 시장 보유분만.
 
     market 을 안 주면 미국이다. 프론트가 시장을 보내지 않는 옛 요청도
@@ -45,6 +45,7 @@ def get_holdings(user_id: str = "default", market: str = "US") -> dict:
 
     DB 를 못 읽으면 예외를 올린다 (모듈 docstring 참고). 빈 dict 는 "보유
     없음" 이라는 뜻으로만 쓴다."""
+    user_id = require_uid(user_id)
     if not is_available():
         raise RuntimeError("DB 미연결 — 보유 종목을 읽을 수 없다")
 
@@ -64,7 +65,7 @@ def save_holding(
     qty: float,
     avg_cost: float,
     sector: str = "Other",
-    user_id: str = "default",
+    user_id: "str | None" = None,
     market: str = "US",
 ):
     """종목 upsert. DB 를 못 쓰면 예외를 올린다.
@@ -72,6 +73,7 @@ def save_holding(
     예전에는 DB 미연결일 때 로그만 남기고 조용히 반환했다. 호출자에게는 저장
     성공과 구별되지 않아서, 사용자는 종목 추가 버튼을 누르고 200 을 받고
     아무것도 저장되지 않았다 (§1.3)."""
+    user_id = require_uid(user_id)
     if not is_available():
         raise RuntimeError(f"DB 미연결 — {ticker} 을(를) 저장할 수 없다")
     try:
@@ -91,7 +93,7 @@ def save_holding(
 
 
 @contextmanager
-def user_write_lock(user_id: str = "default"):
+def user_write_lock(user_id: "str | None" = None):
     """사용자별 쓰기 직렬화 (PostgreSQL advisory lock).
 
     보유·거래 변경은 전부 read-modify-write 다 (읽어서 계산한 뒤 절대값으로 덮어씀).
@@ -110,6 +112,7 @@ def user_write_lock(user_id: str = "default"):
     잃은 매매는 되돌릴 수 없고 사용자에게 보이지도 않는 반면, 503 은 다시
     누르면 된다.
     """
+    user_id = require_uid(user_id)
     import backend.db as _db
 
     # 이 블록이 쓸 풀을 고정한다. 전역을 나중에 다시 읽으면 안 된다 —
@@ -167,7 +170,7 @@ def user_write_lock(user_id: str = "default"):
                 logger.warning(f"user_write_lock({user_id}) 커넥션 반납 실패: {e}")
 
 
-def update_holding_sector(ticker: str, sector: str, user_id: str = "default",
+def update_holding_sector(ticker: str, sector: str, user_id: "str | None" = None,
                           market: str = "US") -> bool:
     """섹터만 갱신. 수량·평단은 건드리지 않는다.
 
@@ -183,6 +186,7 @@ def update_holding_sector(ticker: str, sector: str, user_id: str = "default",
     섹터가 'Other' 로 남는 것은 사용자 데이터를 잃는 게 아니고, 실패는
     logger.error 로 남는다. 두 경로가 갈리는 것을 알고 그렇게 둔 것이다.
     """
+    user_id = require_uid(user_id)
     if not is_available():
         raise RuntimeError(f"DB 미연결 — {ticker} 섹터를 갱신할 수 없다")
     try:
@@ -199,11 +203,12 @@ def update_holding_sector(ticker: str, sector: str, user_id: str = "default",
         return False
 
 
-def delete_holding(ticker: str, user_id: str = "default", with_trades: bool = False,
+def delete_holding(ticker: str, user_id: "str | None" = None, with_trades: bool = False,
                    market: str = "US"):
     """보유 종목 삭제. with_trades=True 일 때만 거래 이력도 함께 삭제.
 
     save_holding 과 같다 — DB 미연결이면 삭제된 척하지 않고 예외를 올린다."""
+    user_id = require_uid(user_id)
     if not is_available():
         raise RuntimeError(f"DB 미연결 — {ticker} 을(를) 삭제할 수 없다")
     try:
@@ -225,12 +230,13 @@ def delete_holding(ticker: str, user_id: str = "default", with_trades: bool = Fa
 
 # ── Trade Log ──────────────────────────────────────────────────────────────────
 
-def get_trade_log(user_id: str = "default", market: str = "US") -> list[dict]:
+def get_trade_log(user_id: "str | None" = None, market: str = "US") -> list[dict]:
     """[{id, date, ticker, type, q, price, memo}, ...] 반환.
 
     get_holdings 와 같다 — DB 를 못 읽으면 빈 목록 대신 예외를 올린다.
     거래 이력이 비어 보이면 그 위에서 계산하는 현금 원장·수익률이 전부
     조용히 틀어진다."""
+    user_id = require_uid(user_id)
     if not is_available():
         raise RuntimeError("DB 미연결 — 거래 이력을 읽을 수 없다")
 
@@ -257,7 +263,7 @@ def get_trade_log(user_id: str = "default", market: str = "US") -> list[dict]:
     ]
 
 
-def update_trade_by_id(trade_id: int, record: dict, user_id: str = "default",
+def update_trade_by_id(trade_id: int, record: dict, user_id: "str | None" = None,
                        market: str = "US") -> bool:
     """거래 내역 수정. 성공 시 True, **그런 거래가 없으면** False.
 
@@ -265,6 +271,7 @@ def update_trade_by_id(trade_id: int, record: dict, user_id: str = "default",
     호출자(`routers/portfolio.py`)가 그걸 404 "거래 내역 없음" 으로 바꾼다.
     DB 가 흔들리는 동안 사용자는 자기 거래가 사라졌다는 말을 듣고, 새로고침하면
     그대로 있다. 실패는 실패로 올린다 (§1.3)."""
+    user_id = require_uid(user_id)
     if not is_available():
         raise RuntimeError("DB 미연결 — 거래 이력을 수정할 수 없다")
     try:
@@ -292,11 +299,12 @@ def update_trade_by_id(trade_id: int, record: dict, user_id: str = "default",
         raise
 
 
-def delete_trade_by_id(trade_id: int, user_id: str = "default",
+def delete_trade_by_id(trade_id: int, user_id: "str | None" = None,
                        market: str = "US") -> bool:
     """거래 내역 삭제. 성공 시 True, **그런 거래가 없으면** False.
 
     update_trade_by_id 와 같다 — False 는 "그런 거래가 없다" 만 뜻한다."""
+    user_id = require_uid(user_id)
     if not is_available():
         raise RuntimeError("DB 미연결 — 거래 이력을 삭제할 수 없다")
     try:
@@ -312,11 +320,12 @@ def delete_trade_by_id(trade_id: int, user_id: str = "default",
         raise
 
 
-def add_trade(record: dict, user_id: str = "default", market: str = "US"):
+def add_trade(record: dict, user_id: "str | None" = None, market: str = "US"):
     """거래 1건 추가. DB 를 못 쓰면 예외를 올린다.
 
     save_holding 과 같은 이유다 — 조용히 반환하면 기록되지 않은 매매가 200 을
     받는다. 그 뒤 현금 원장·보유 재계산이 없는 거래 위에서 돈다."""
+    user_id = require_uid(user_id)
     if not is_available():
         raise RuntimeError("DB 미연결 — 거래 이력을 저장할 수 없다")
     try:

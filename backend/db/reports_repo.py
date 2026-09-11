@@ -11,7 +11,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
-from backend.db import get_conn, is_available
+from backend.db import get_conn, is_available, require_uid
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ def save_report(
     content: str,
     report_type: str = "other",
     metadata: Optional[dict] = None,
-    user_id: str = "default",
+    user_id: "str | None" = None,
     scope: str = "private",
     subject_key: Optional[str] = None,
     market: str = "US",
@@ -40,6 +40,7 @@ def save_report(
     scope='shared' + subject_key 를 주면 다른 사용자도 재사용할 수 있는
     공용 리포트가 된다 (find_fresh_shared_report 로 조회).
     """
+    user_id = require_uid(user_id)
     if not is_available():
         logger.error("DB 미연결 — 레포트를 저장할 수 없습니다.")
         return None
@@ -210,9 +211,10 @@ def save_analysis(
     cache_key: str,
     result: dict,
     ttl_hours: int = 24,
-    user_id: str = "default",
+    user_id: "str | None" = None,
 ):
     """AI 분석 결과 저장 (upsert, TTL 설정)."""
+    user_id = require_uid(user_id)
     if not is_available():
         return
     expires = datetime.now() + timedelta(hours=ttl_hours)
@@ -236,9 +238,10 @@ def save_analysis(
 def get_analysis(
     analysis_type: str,
     cache_key: str,
-    user_id: str = "default",
+    user_id: "str | None" = None,
 ) -> Optional[dict]:
     """만료되지 않은 분석 결과 반환. 없으면 None."""
+    user_id = require_uid(user_id)
     if not is_available():
         return None
     try:

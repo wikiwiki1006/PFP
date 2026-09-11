@@ -157,6 +157,36 @@ def init_pool(minconn: int = 2, maxconn: Optional[int] = None) -> bool:
         return False
 
 
+def require_uid(user_id: "str | None") -> str:
+    """개인 데이터 조회·기록에 쓸 사용자 ID. 없으면 **거절한다.**
+
+    §1.2 는 `"default"` 같은 상수 사용자 ID 를 금지한다. 그런데 리포 저장소
+    함수 12개가 `user_id: str = "default"` 를 기본 인자로 갖고 있었다. 지금은
+    인자를 빠뜨리는 호출자가 없지만(AST 로 backend/ 전체 확인), 그 기본값이
+    있는 한 다음에 누가 빠뜨리면 **조용히 공용 버킷을 읽고 쓴다** — 예외도
+    로그도 없이 남의 보유 종목이 화면에 뜬다.
+
+    기본값을 그냥 없애면 `sector`·`ttl_hours` 처럼 앞에 기본값 인자가 있는
+    세 함수에서 문법 오류가 난다. 그래서 자리와 호출 규약은 그대로 두고
+    **값을 안 주면 실패**하게 만든다. 잠복을 즉시 드러나는 실패로 바꾼다.
+
+    `pfp_main` 의 holdings 에 `user_id='default'` 행이 4개 남아 있다 —
+    인증 도입 전 데이터다. 이 함수는 그 값을 새로 만들지 않는다.
+    """
+    uid = (user_id or "").strip()
+    if not uid:
+        raise ValueError(
+            "user_id 가 필요합니다. 개인 데이터는 토큰에서 얻은 uid 로만 조회합니다 "
+            "(CLAUDE.md §1.2). 호출부에서 uid 를 넘기세요."
+        )
+    if uid == "default":
+        raise ValueError(
+            "user_id='default' 는 쓰지 않습니다 — 모든 사용자가 같은 버킷을 "
+            "공유하게 됩니다 (CLAUDE.md §1.2)."
+        )
+    return uid
+
+
 def is_available() -> bool:
     """DB 풀이 활성 상태인지 확인."""
     return _pool is not None
