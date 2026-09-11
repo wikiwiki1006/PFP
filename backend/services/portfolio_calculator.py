@@ -333,6 +333,7 @@ def _trades_by_chart_date(trade_markers, chart_dates: list[str]) -> dict:
 def equity_curve_to_records(
     curve: pd.Series,
     benchmark_df: pd.DataFrame | None = None,
+    market: str = "US",
     cash_event_amounts: dict | None = None,
     trade_markers: list | None = None,
 ) -> list[dict]:
@@ -351,16 +352,22 @@ def equity_curve_to_records(
     if not meaningful.empty:
         curve = curve.loc[meaningful.index[0]:]
 
-    sp500_indexed = None
-    if benchmark_df is not None and "^GSPC" in benchmark_df.columns:
-        b = benchmark_df["^GSPC"].reindex(curve.index).ffill().bfill()
+    # 비교선도 시장 기준 지수다. 베타·알파는 `benchmark_for(market)` 로 고쳤는데
+    # 곡선의 비교 시리즈가 `"^GSPC"` 하드코딩으로 남아, 같은 화면이 두 벤치마크를
+    # 쓰고 있었다 — metrics 는 `^KS11`(코스피), 곡선은 S&P 500.
+    from backend.services.markets import benchmark_for
+    bench = benchmark_for(market)
+
+    bench_indexed = None
+    if benchmark_df is not None and bench in benchmark_df.columns:
+        b = benchmark_df[bench].reindex(curve.index).ffill().bfill()
         b_clean = b.dropna()
         if len(b_clean) > 0:
-            sp500_indexed = b / float(b_clean.iloc[0]) * float(curve.iloc[0])
+            bench_indexed = b / float(b_clean.iloc[0]) * float(curve.iloc[0])
 
     # 벤치마크는 위에서 `curve.index` 로 reindex 했으므로 행 위치가 그대로 맞는다.
     # 날짜 라벨로 매번 `.loc` 을 걸면 날짜 수만큼 인덱스 조회가 생긴다.
-    bench_vals = None if sp500_indexed is None else sp500_indexed.to_numpy()
+    bench_vals = None if bench_indexed is None else bench_indexed.to_numpy()
 
     def _bv(i: int):
         if bench_vals is None:
@@ -1056,6 +1063,9 @@ def return_pct_to_records(
     initial_equity: float = 0.0,
     cash_events: "dict[str, float] | None" = None,
     equity: "pd.Series | None" = None,
+    # 마지막에 둔다 — 이 함수는 위치 인자로 불린다. 중간에 끼우면 그 뒤 인자가
+    # 한 칸씩 밀려 `trade_markers` 가 `market` 자리에 들어간다 (실제로 그랬다).
+    market: str = "US",
 ) -> list[dict]:
     """
     수익률(%) 시계열을 API 응답용 레코드 리스트로 변환.
@@ -1100,14 +1110,18 @@ def return_pct_to_records(
     if curve.empty:
         return []
 
-    # S&P 500: TWRR 포트폴리오는 현금흐름 왜곡이 없으므로 첫날 기준 단순 누적 수익률로 비교
+    # 비교선은 **시장 기준 지수**다 (US ^GSPC · KR ^KS11). TWRR 포트폴리오는
+    # 현금흐름 왜곡이 없으므로 첫날 기준 단순 누적 수익률로 비교한다.
+    from backend.services.markets import benchmark_for
+    bench = benchmark_for(market)
+
     b_full: "pd.Series | None" = None
-    sp_first_val: "float | None" = None
-    if close_df is not None and "^GSPC" in close_df.columns:
-        b_full = close_df["^GSPC"].reindex(curve.index).ffill().bfill()
+    bench_first_val: "float | None" = None
+    if close_df is not None and bench in close_df.columns:
+        b_full = close_df[bench].reindex(curve.index).ffill().bfill()
         b_from_first = b_full.loc[b_full.index >= first_date].dropna()
         if not b_from_first.empty:
-            sp_first_val = float(b_from_first.iloc[0])
+            bench_first_val = float(b_from_first.iloc[0])
 
     cash_evts = cash_events or {}
 
@@ -1130,11 +1144,11 @@ def return_pct_to_records(
             continue
         date_str = date_strs[i]
 
-        sp_val = None
-        if b_vals is not None and sp_first_val:
+        bench_pct = None
+        if b_vals is not None and bench_first_val:
             v = b_vals[i]
             if not pd.isna(v):
-                sp_val = round((float(v) / sp_first_val - 1) * 100, 2)
+                bench_pct = round((float(v) / bench_first_val - 1) * 100, 2)
 
         eq_val = None
         if eq_vals is not None:
@@ -1148,7 +1162,12 @@ def return_pct_to_records(
         records.append({
             "date":         date_str,
             "port":         round(float(pct), 2),
-            "sp":           sp_val,
+            # TODO(pfp-61 프론트 착륙 후): 키 이름을 `benchmark_pct` 로.
+            # `sp` 는 `alpha_vs_sp500` 과 같은 문제다 — 다만 지금 바꾸면
+            # `AlphaTerminal.tsx` 가 `d.sp` 를 여섯 곳에서 읽어 비교선이
+            # 사라진다. 그 사이 `sp` 가 거짓이 되지는 않는다: 프레임에 아직
+            # `^KS11` 이 없어 KR 은 None 이고, US 는 실제로 S&P 500 이다.
+            "sp":           bench_pct,
             "total_equity": eq_val,
             "cash_flow":    cf_val,
             "trades":       trade_by_date.get(date_str, []),
