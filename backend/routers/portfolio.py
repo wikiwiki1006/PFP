@@ -495,6 +495,35 @@ def _delete_trade_locked(trade_id: int, uid: str, market: str):
     if not trade:
         raise HTTPException(status_code=404, detail="거래 내역 없음")
 
+    # ── 지우면 원가가 사라지는가 ─────────────────────────────────────────────
+    #
+    # 매수를 지우고 매도가 남으면 그 매도의 취득원가를 알 수 없게 된다. 그러면
+    # `realized_pnl_from_log` 가 `no_cost_basis` 로 **포트폴리오 전체**의
+    # 실현손익을 null 로 만든다 (부분 합계를 안 내보낸다). 운영에 그 상태인
+    # 사용자가 있고, 재현했다.
+    #
+    # **되돌릴 수 없어서 막는다.** 재생이 보유를 지우므로(수량 0) 사용자는
+    # 매도를 다시 넣을 수도(미보유라 거부), 매수를 복원할 수도 없다. 막힌
+    # 길이 아니다 — 정말 둘 다 지우려면 매도부터 지우면 된다.
+    #
+    # 판정을 새로 쓰지 않고 **같은 함수에 묻는다.** "매도보다 앞선 매수만
+    # 문제" 같은 경우 분류를 여기서 다시 만들면 두 곳이 어긋난다.
+    _LOST_BASIS = ("no_cost_basis", "missing_buy_price")
+    _remaining = [t for t in all_trades if t.get("id") != trade_id]
+    # 이미 깨진 로그는 막지 않는다 — 정리하려는 것일 수 있다. **성립하던 것이
+    # 깨지는 경우**만 거부한다.
+    if (realized_pnl_from_log(all_trades).reason is None
+            and realized_pnl_from_log(_remaining).reason in _LOST_BASIS):
+        _tk = str(trade.get("ticker", "")).upper()
+        _n = sum(1 for t in _remaining
+                 if str(t.get("ticker", "")).upper() == _tk
+                 and str(t.get("type", "")).upper() in ("SOLD", "SELL"))
+        raise HTTPException(
+            status_code=400,
+            detail=(f"이 거래를 지우면 {_tk} 매도 {_n}건의 취득원가가 사라집니다. "
+                    f"매도를 먼저 지우거나 수정한 뒤 다시 시도하세요."),
+        )
+
     ok = delete_trade_by_id(trade_id, uid, market=market)
     if not ok:
         raise HTTPException(status_code=404, detail="거래 내역 없음")
