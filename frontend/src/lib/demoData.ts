@@ -23,7 +23,6 @@ export const DEMO_METRICS: PortfolioMetrics = {
   total_equity:     128_450,
   total_cost:       104_200,
   total_return_pct: 23.27,
-  today_change_val: 1_342,
   today_change_pct: 1.06,
   portfolio_beta:   1.14,
   vix:              16.8,
