@@ -94,7 +94,11 @@ def _compute_extended_metrics(
     Sortino  — 하방 편차(음수 초과수익) 기준 위험조정수익
     MDD      — 최고점 대비 최대 낙폭
     Calmar   — 연환산 수익 / |MDD|
-    Beta     — SPY 대비 시장 민감도 (벤치마크 있을 때만)
+    Beta     — **그 시장 기준 지수** 대비 시장 민감도 (벤치마크 있을 때만).
+               무엇 대비인지는 응답의 `beta_benchmark` 가 말한다 — 여기에
+               지수 이름을 적으면 계산을 고쳐도 문서가 거짓말을 계속한다
+               (`alpha_vs_sp500` 이 그랬다).
+               못 구하면 `beta_reason` 에 이유 코드를 싣는다.
     CVaR 95% — 하위 5% 시나리오 평균 연환산 손실
     """
     w = pd.Series(weights).reindex(daily_returns.columns).fillna(0.0)
@@ -122,14 +126,28 @@ def _compute_extended_metrics(
     # Calmar
     calmar = ann_ret / abs(mdd) if abs(mdd) > 1e-8 else 0.0
 
-    # Beta (SPY 대비)
+    # Beta — 비교 대상은 호출자가 넘긴 벤치마크다 (그 시장의 기준 지수).
+    #
+    # 못 구한 이유를 코드로 남긴다. 셋 다 `beta: null` 로 끝나서 화면에는
+    # 똑같이 "—" 가 뜨는데, 원인이 "지수를 못 받았다" 인지 "구간이 짧다" 인지
+    # 응답으로 구별되지 않았다. 문장이 아니라 코드로 싣는다 — 문구는 표시
+    # 계층의 결정이다.
     beta: float | None = None
-    if benchmark_returns is not None:
+    beta_reason: str | None = None
+    if benchmark_returns is None:
+        # 이 파이프라인은 벤치마크를 **항상** 요청하므로, 없다는 것은 수집 실패다.
+        beta_reason = "no_benchmark"
+    else:
         aligned = pd.concat([port_ret, benchmark_returns.rename("bench")], axis=1).dropna()
-        if len(aligned) >= 30:
+        if len(aligned) < 30:
+            beta_reason = "insufficient_overlap"
+        else:
             cov_mat = aligned.cov().values
             if cov_mat[1, 1] > 1e-8:
                 beta = float(cov_mat[0, 1] / cov_mat[1, 1])
+            else:
+                # 지수 수익률의 분산이 0 — 같은 값이 반복되는 프레임이다.
+                beta_reason = "zero_variance"
 
     # CVaR 95%: 하위 5% 일 수익 평균 → 연환산
     q5 = port_ret.quantile(0.05)
@@ -142,6 +160,9 @@ def _compute_extended_metrics(
         "max_drawdown":  round(mdd, 4),
         "calmar_ratio":  round(calmar, 3),
         "beta":          round(beta, 3) if beta is not None else None,
+        # 베타가 있으면 None. 값이 있을 때 이유까지 실으면 소비자가 둘 중
+        # 무엇을 믿을지 정해야 한다.
+        "beta_reason":   beta_reason,
         "cvar_95":       round(cvar_95, 4),
     }
 
@@ -888,21 +909,29 @@ def run_ai_optimization(
     def _get_fundamentals():
         return _gather_fundamentals(tickers)
 
+    # 베타의 비교 대상은 **그 시장의 기준 지수**다. `SPY` 로 고정돼 있어서,
+    # `/terminal` 이 "베타 (코스피 대비) 1.22" 를 보여주는 동안 `/optimizer` 의
+    # 같은 이름 값은 S&P 대비였다. 어느 쪽도 계산이 틀리지 않았는데 나란히
+    # 놓으면 둘 다 못 믿게 된다. 지수 선택 규칙을 아는 코드는
+    # `markets.benchmark_for` 하나여야 한다.
+    from backend.services.markets import benchmark_for, get_market
+    bench_ticker = benchmark_for(market)
+    bench_label  = get_market(market).indices.get(bench_ticker, bench_ticker)
+
     def _get_benchmark():
         try:
             import yfinance as yf
-            spy = yf.download(
-                "SPY", period=auto_period, progress=False, auto_adjust=True
+            bm = yf.download(
+                bench_ticker, period=auto_period, progress=False, auto_adjust=True
             )
-            col = "Close" if "Close" in spy.columns else spy.columns[0]
-            return spy[col].squeeze()
+            col = "Close" if "Close" in bm.columns else bm.columns[0]
+            return bm[col].squeeze()
         except Exception:
-            # 벤치마크가 없으면 `_compute_extended_metrics` 가 베타를 계산하지
-            # 않는다 (그쪽은 None 으로 정직하게 비운다). 다만 왜 비었는지가
-            # 어디에도 안 남아서, 화면에서 "베타 —" 를 보고도 원인을 알 수
-            # 없었다.
-            logger.warning("SPY 벤치마크 수집 실패 — 확장 지표의 베타가 빠진다",
-                           exc_info=True)
+            # 벤치마크가 없으면 `_compute_extended_metrics` 가 베타를 비운다.
+            # 그쪽이 `beta_reason="no_benchmark"` 를 함께 실으므로, 화면의
+            # "베타 —" 가 왜 비었는지 응답만 보고 알 수 있다.
+            logger.warning("벤치마크 %s 수집 실패 — 확장 지표의 베타가 빠진다",
+                           bench_ticker, exc_info=True)
             return None
 
     with ThreadPoolExecutor(max_workers=4) as ex:
@@ -959,7 +988,18 @@ def run_ai_optimization(
         "optimizations":          opt["optimizations"],
         "effective_target_return": opt["effective_target_return"],
         "posterior_returns":      opt["posterior_returns"],
+        # `_run_pypfopt` 이 만드는데 이 응답이 안 실어서 **클라이언트에 한 번도
+        # 도달하지 않았다.** 라우터는 이 함수만 부른다. BL 이 실패하면
+        # `posterior_returns` 가 과거 평균으로 바뀌는데 그 사실을 말하는 필드가
+        # 여기서 잘려 나갔고, `max_sharpe_hist` 의 기대수익을 재현할 벡터도 없었다.
+        "posterior_source":       opt["posterior_source"],
+        "historical_returns":     opt["historical_returns"],
         "frontier":               opt["frontier"],
         "correlation":            opt["correlation"],
         "data_period":            auto_period,
+        # 베타가 무엇 대비인지 응답이 말한다. 화면이 "베타" 라고만 쓰면
+        # 사용자는 기준을 모르고, 한국 포트폴리오에 S&P 대비 값이 나가도
+        # 알아챌 수 없다. 키 이름에 지수를 박지 않는 것도 같은 이유다.
+        "beta_benchmark":         bench_ticker,
+        "beta_benchmark_label":   bench_label,
     }
