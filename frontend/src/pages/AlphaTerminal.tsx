@@ -39,6 +39,7 @@ import { useMarket } from '@/lib/useMarket'
 import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
 import TickerLabel from '@/components/TickerLabel'
 import { marketSession } from '@/lib/marketStorage'
+import type { EquityCurvePoint } from '@/types'
 
 // 표시용 포맷터는 계산 불가를 '—'로 그린다. 0으로 위장하지 않는다.
 //
@@ -326,7 +327,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
     staleTime: 300_000,
   })
 
-  const filterByRange = (all: any[]) => {
+  const filterByRange = (all: EquityCurvePoint[]) => {
     if (range === 'ALL' || !all.length) return all
     const today  = new Date()
     const cutoff = new Date(today)
@@ -338,7 +339,10 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
   }
 
   const data = useMemo((): CurvePoint[] => {
-    const all: any[] = curveQ.data || []
+    // any 캐스트를 쓰지 않는다. 이게 EquityCurvePoint 선언이 서버 응답과
+    // 아예 다른 스키마인데도 build 가 통과한 이유였다 — 틀린 선언만으로는
+    // 조용하고, any 캐스트가 겹쳐야 타입체크가 통째로 비활성화된다.
+    const all: EquityCurvePoint[] = curveQ.data || []
     const sliced = filterByRange(all)
     if (!sliced.length) return []
 
@@ -454,7 +458,7 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
   }, [displayData])
 
   // 오늘의 일간 변동: 전체 원본 데이터 마지막 2개 포인트 차이
-  const allRawData: any[] = curveQ.data || []
+  const allRawData: EquityCurvePoint[] = curveQ.data || []
   const portAll  = allRawData.filter((d: any) => d.port != null)
   // 장 마감·휴장 시 ffill로 인한 0% 방지: 마지막 실제 변동값 반환
   const lastChange = (arr: any[], key: string): number => {

@@ -28,10 +28,31 @@ export interface PortfolioMetrics {
   market_open?: boolean
 }
 
+/** `/api/portfolio/equity-curve` 의 한 포인트.
+ *
+ *  예전 선언은 `{ date, value, benchmark_value }` 였는데 **서버는 그런 키를
+ *  보낸 적이 없다.** 공통 키가 `date` 하나였다. 그런데 build 가 안 깨졌다 —
+ *  AlphaTerminal 이 `curveQ.data || []` 를 `any[]` 로 캐스팅해 타입체크를
+ *  건너뛰었기 때문이다. 틀린 선언만으로는 조용하고, `any` 캐스트가 겹쳐야
+ *  이렇게 된다.
+ *
+ *  그 사이 DEMO_EQUITY_CURVE 가 **틀린 선언을 성실히 따랐다.** 그래서
+ *  비로그인 방문자의 미리보기 자산곡선이 통째로 비어 있었다 — 타입이
+ *  계약이 아니라 서버·컴포넌트와 다른 세 번째 진실이 돼 있었다.
+ *
+ *  어느 쪽이 맞는지는 서버가 정한다 (portfolio_calculator.py:1162-1175). */
 export interface EquityCurvePoint {
   date: string
-  value: number
-  benchmark_value: number | null
+  /** 기준일 대비 누적 수익률(%). */
+  port: number | null
+  /** 벤치마크 누적 수익률(%). 어느 지수인지는 /metrics 의 benchmark_label. */
+  benchmark_pct: number | null
+  /** 그날의 총 평가액. */
+  total_equity: number | null
+  /** 양수=입금, 음수=출금. 없으면 null. */
+  cash_flow: number | null
+  trades: { ticker: string; type: string; q: number; price: number }[]
+  holdings: { ticker: string; return_pct: number | null; price: number | null }[]
 }
 
 export interface Holding {
