@@ -205,7 +205,12 @@ def gather_yfinance_market_data(market: str = "US") -> str:
             # 크게 연동되므로 아예 빼면 인과를 설명할 수 없다.
             _kept = {"^GSPC", "^IXIC", "^VIX", "^TNX", "CL=F", "USDJPY=X"}
             PRICE_TICKERS = _kr_first + [r for r in PRICE_TICKERS if r[0] in _kept]
-            SECTOR_TICKERS = [(etf, f"{label}({etf})") for label, etf in _spec.sector_etfs[:6]]
+            # 그 시장이 정의한 섹터를 **전부** 넣는다. 예전에는 `[:6]` 으로
+            # 잘라서 에너지화학·철강·IT하드웨어가 빠졌는데, 한국 증시에서
+            # 작은 섹터가 아니다. 더 나쁜 건 아래 '미수집' 알림이 그 셋을
+            # 못 잡는다는 것이다 — 요청조차 안 했으니 실패한 적도 없고,
+            # 짧아진 목록이 전부인 것처럼 보인다.
+            SECTOR_TICKERS = [(etf, f"{label}({etf})") for label, etf in _spec.sector_etfs]
         all_price_tickers  = [t for t, *_ in PRICE_TICKERS]
         all_sector_tickers = [t for t, _ in SECTOR_TICKERS]
         all_tickers = all_price_tickers + all_sector_tickers
