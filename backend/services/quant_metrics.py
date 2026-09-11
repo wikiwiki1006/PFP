@@ -170,6 +170,7 @@ def compute_optimizer_context(
     holdings: dict,
     close_df: pd.DataFrame,
     ticker_close: pd.Series,
+    market: str = "US",
 ) -> dict:
     """포트폴리오 맥락에서의 최적 비중·리스크 기여도·상관관계·베타.
 
@@ -178,10 +179,18 @@ def compute_optimizer_context(
     않아 종목 수가 적어도 안정적이고, 상관 높은 자산에 쏠리지 않는다).
 
     보유 종목이 없으면 최적화가 성립하지 않으므로 None 필드로 반환한다.
+
+    `market` — 베타의 비교 대상을 그 시장의 기준 지수로 고른다
+    (`markets.benchmark_for`). **이 인자만으로는 아직 안 바뀐다**:
+    호출부(`routers/ticker.py`)가 `close_df` 에 `^GSPC` 를 시장과 무관하게
+    넣고 있어서, 그쪽이 같은 지수를 받아 넣어야 한국 종목의 베타가 코스피
+    대비가 된다. 기본값 `"US"` 는 지금 동작을 그대로 유지한다.
     """
     empty = {
         "target_weight": None, "current_weight": None, "risk_contribution": None,
         "correlation": None, "correlation_label": None, "beta_exposure": None,
+        # 정상 응답과 키를 맞춘다 — 소비자가 경로마다 다른 모양을 받지 않게.
+        "beta_benchmark": None,
         "in_portfolio": False, "note": "보유 종목이 없어 포트폴리오 맥락을 계산할 수 없습니다",
     }
     stock = [t for t in (holdings or {}) if t != "CASH"]
@@ -265,19 +274,24 @@ def compute_optimizer_context(
     elif correlation >= 0.4:  label = "Moderate"
     else:                     label = "Low — 분산효과 큼"
 
-    # ── 베타 (SPY 대비) ───────────────────────────────────────────────────
+    # ── 베타 (그 시장의 기준 지수 대비) ────────────────────────────────────
+    # 주석이 "SPY 대비" 라고 적혀 있었는데 코드는 `^GSPC` 를 봤고, 시장과
+    # 무관하게 그 하나만 봤다. 한국 종목의 베타가 S&P 대비로 나갔다 —
+    # 계산은 맞고 질문이 틀렸는데 맞는 답처럼 보인다.
+    from backend.services.markets import benchmark_for
+    bench = benchmark_for(market)
     beta = None
     try:
-        if "^GSPC" in close_df.columns:
-            mkt = close_df["^GSPC"].pct_change().dropna()
+        if bench in close_df.columns:
+            mkt = close_df[bench].pct_change().dropna()
             common = rets.index.intersection(mkt.index)
             if len(common) >= 60:
                 mv = float(mkt.loc[common].var())
                 if mv > 1e-12:
                     beta = round(float(np.cov(rets[ticker].loc[common], mkt.loc[common])[0, 1] / mv), 3)
     except Exception:
-        # 이 블록은 예외 없이도 None 이 된다 (^GSPC 없음 · 공통 구간 60일 미만 ·
-        # 시장 분산 0). 그 셋은 정상 경로이므로 로그를 남기지 않는다 — 여기는
+        # 이 블록은 예외 없이도 None 이 된다 (기준 지수 없음 · 공통 구간 60일
+        # 미만 · 시장 분산 0). 그 셋은 정상 경로이므로 로그를 남기지 않는다 — 여기는
         # **예외만** 잡으므로 실제로 계산이 깨진 경우다.
         logger.warning("베타 계산 실패 (%s) — 베타만 빠진다", ticker, exc_info=True)
 
@@ -288,6 +302,10 @@ def compute_optimizer_context(
         "correlation":       correlation,
         "correlation_label": label,
         "beta_exposure":     beta,
+        # 무엇 대비인지 응답이 말한다 — 키 이름에 지수를 박으면 계산을 고쳐도
+        # 이름이 거짓말을 계속한다 (`alpha_vs_sp500` 이 그랬다). 화면이 "베타"
+        # 라고만 쓰면 사용자는 기준을 모른다.
+        "beta_benchmark":    bench,
         "in_portfolio":      ticker in stock,
         "note":              None if ticker in stock else "미보유 — 편입 시 기준 목표 비중",
     }

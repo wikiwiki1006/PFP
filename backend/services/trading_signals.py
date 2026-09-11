@@ -682,26 +682,60 @@ def score_ticker_both_sides(
 # 9. 매크로 스프레드 과거 백분위 분류 (시장 상황)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _percentile_rank(series: pd.Series, value: float) -> float:
+# 백분위를 말할 수 있는 최소 관측치. 표본이 이보다 적으면 백분위를 내보내지
+# 않는다 — 등급(Low/Normal/High)의 띠 폭이 33점인데, 표본이 적으면 관측치 하나가
+# 백분위를 그보다 크게 움직여 등급이 데이터가 아니라 표본 추출의 결과가 된다.
+#
+# 실측 (FRED T10Y2Y 2,497행에서 무작위 부분표본 300회, 전체 표본 등급과 일치율):
+#     n=  1   0.0%      n= 20   85.0%      n=120   99.3%
+#     n=  2  53.3%      n= 30   92.3%      n=252  100.0%
+#     n=  5  64.3%      n= 60   96.0%
+# n=60 부터 96% 이고 오차 범위도 ±17점(띠 절반) 안에 들어온다. 그 아래는 등급이
+# 뒤집히는 비율이 한 자리로 내려가지 않는다.
+_MIN_PCTL_SAMPLE = 60
+
+
+def _percentile_rank(series: pd.Series, value: float) -> "float | None":
+    """`value` 가 `series` 분포에서 몇 백분위인가. 표본이 부족하면 None.
+
+    예전에는 표본이 없을 때 `50.0`("중립")을, 한 점일 때 `0.0`("최저")을
+    돌려줬다. 둘 다 **확신을 지어낸 값**이다. 특히 한 점짜리 표본은
+    `(v < v).sum() / 1 * 100` = 0.0 이라 "과거 최저" 라는 최대 확신이 되고,
+    FRED 가 한 행만 준 날 실제로 그 값이 나갔다 (실측: percentile 0.0 → 'Low').
+    """
     s = series.dropna()
-    if len(s) == 0:
-        return 50.0
+    if len(s) < _MIN_PCTL_SAMPLE:
+        return None
     return float((s < value).sum() / len(s) * 100)
 
 
 def compute_macro_spread_levels() -> dict:
     """
-    T10Y2Y(금리차), BAMLH0A0HYM2(HY 스프레드) 10년치 과거 데이터 기준
-    현재값의 백분위와 Low/Normal/High 분류, 의미에 맞는 색상 반환.
+    T10Y2Y(금리차), BAMLH0A0HYM2(HY 스프레드) 현재값의 백분위와
+    Low/Normal/High 분류, 의미에 맞는 색상 반환.
+
+    백분위의 근거 구간은 **시리즈마다 다르다.** 10년을 요청하지만 FRED 가
+    그만큼 주지 않는 시리즈가 있어서, 실제로 몇 개를 봤는지는 응답의
+    `history_n` 이 말한다. `as_of` 는 그 시리즈의 마지막 관측일이다 —
+    두 지표의 최신일이 하루씩 다를 수 있다.
+
+    **한 프레임으로 받아 `dropna()` 하지 않는다.** 예전에는 그렇게 해서
+    두 시리즈의 교집합만 남겼는데, BAMLH0A0HYM2 가 이 소스에서 3년만 오는
+    바람에 10년이 있는 T10Y2Y 가 3년으로 잘렸다 (실측 2,497행 → 749행).
+    금리차 백분위가 근거 없이 6.0점 달라지고, docstring 의 '10년치 기준'
+    이라는 말도 거짓이 됐다. 각 시리즈는 자기 이력 전체로 랭크한다.
     """
     from datetime import datetime, timedelta
 
     try:
         import pandas_datareader.data as web
         start = datetime.now() - timedelta(days=3650)
-        df = web.DataReader(["T10Y2Y", "BAMLH0A0HYM2"], "fred", start).dropna()
-        rate_series = df["T10Y2Y"]
-        hy_series   = df["BAMLH0A0HYM2"]
+        df = web.DataReader(["T10Y2Y", "BAMLH0A0HYM2"], "fred", start)
+        # 시리즈별로 자기 결측만 뺀다 (교집합을 만들지 않는다)
+        rate_series = df["T10Y2Y"].dropna()
+        hy_series   = df["BAMLH0A0HYM2"].dropna()
+        if rate_series.empty or hy_series.empty:
+            raise ValueError("FRED 응답에 유효 관측치가 없다")
         rate_spread = float(rate_series.iloc[-1])
         hy_spread   = float(hy_series.iloc[-1])
         source = "FRED"
@@ -724,10 +758,18 @@ def compute_macro_spread_levels() -> dict:
         )
         rate_spread = hy_spread = None
         rate_pct = hy_pct = None
+        rate_n = hy_n = 0
+        rate_as_of = hy_as_of = None
         source = "fallback"
     else:
         rate_pct = _percentile_rank(rate_series, rate_spread)
         hy_pct   = _percentile_rank(hy_series, hy_spread)
+        # 백분위가 몇 개를 보고 나온 값인지 함께 싣는다. 임계값(_MIN_PCTL_SAMPLE)
+        # 은 여기서 정하지만, **근거를 응답에 남겨야** 소비자가 "3년치로 낸
+        # 10년 백분위" 를 알아챌 수 있다. 없으면 그 사실은 어디에도 안 남는다.
+        rate_n, hy_n = len(rate_series), len(hy_series)
+        rate_as_of = rate_series.index[-1].strftime("%Y-%m-%d")
+        hy_as_of   = hy_series.index[-1].strftime("%Y-%m-%d")
 
     def _level(pct: "float | None") -> "str | None":
         # 백분위가 없으면 방향을 말할 수 없다. `Normal` 은 **실제 판정**이라
@@ -759,11 +801,16 @@ def compute_macro_spread_levels() -> dict:
             "value": round(rate_spread, 3) if rate_spread is not None else None,
             "percentile": round(rate_pct, 1) if rate_pct is not None else None,
             "level": rate_level, "color": rate_color,
+            # 백분위의 근거 — 관측치 수와 마지막 관측일. `percentile` 이 null
+            # 인데 `history_n` 이 0 이 아니면 "표본이 부족해서" 이고,
+            # `history_n` 이 0 이면 "조회 자체가 실패해서" 다.
+            "history_n": rate_n, "as_of": rate_as_of,
         },
         "hy_spread": {
             "value": round(hy_spread, 3) if hy_spread is not None else None,
             "percentile": round(hy_pct, 1) if hy_pct is not None else None,
             "level": hy_level, "color": hy_color,
+            "history_n": hy_n, "as_of": hy_as_of,
         },
         "source": source,
     }
