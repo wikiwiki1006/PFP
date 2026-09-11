@@ -37,7 +37,7 @@ _MARKET_OPEN  = _dtime(9, 30)
 _MARKET_CLOSE = _dtime(16, 0)
 
 # 미국 증시 캘린더를 따르지 않는 티커 (24/7 또는 해외 거래소)
-_NON_US_EXACT = {"^KS11", "^KQ11", "^N225", "^HSI", "^STOXX50E", "^FTSE", "^GDAXI"}
+_NON_US_EXACT = {"^KS11", "^KQ11", "^N225", "^TOPX", "^HSI", "^STOXX50E", "^FTSE", "^GDAXI"}
 _NON_US_SUFFIX = (
     "-USD",   # 암호화폐 (BTC-USD)
     "=X",     # 환율 (USDKRW=X)
@@ -115,6 +115,18 @@ def now_kst() -> datetime:
     """현재 시각(한국). 로그·화면 표시용."""
     n = now_et()
     return n.astimezone(KST) if KST is not None else n
+
+
+try:
+    JST = ZoneInfo("Asia/Tokyo")
+except Exception:  # pragma: no cover
+    JST = None  # type: ignore
+
+
+def now_jst() -> datetime:
+    """현재 시각(일본). 도쿄증권거래소 세션 판정용."""
+    n = now_et()
+    return n.astimezone(JST) if JST is not None else n
 
 
 def et_to_kst_label(et_hour: int, et_minute: int = 0) -> str:
@@ -488,6 +500,53 @@ def last_completed_kr_session(now: Optional[datetime] = None) -> date:
     return d
 
 
+# 도쿄증권거래소. 2024-11 에 종가가 15:00 → 15:30 으로 연장됐다.
+# 11:30~12:30 점심 휴장이 있지만 세션 안으로 둔다 — 그 한 시간을 'closed' 로
+# 부르면 장중인데 마감으로 표시된다.
+_TSE_OPEN      = _dtime(9, 0)
+_TSE_CLOSE     = _dtime(15, 30)
+_TSE_EXT_OPEN  = _dtime(8, 30)
+_TSE_EXT_CLOSE = _dtime(16, 0)
+
+
+def uses_jp_session_calendar(ticker: str) -> bool:
+    """도쿄증권거래소 세션을 따르는 티커인지 (닛케이·토픽스와 .T)."""
+    t = str(ticker).upper().strip()
+    return t.endswith(".T") or t in {"^N225", "^TOPX"}
+
+
+def jp_market_status(now: Optional[datetime] = None) -> Literal["pre", "open", "post", "closed"]:
+    """현재 일본 증시 상태 (정규장 09:00~15:30 JST).
+
+    한국과 같은 이유로 **평일 여부만 본다.** 일본 공휴일 캘린더가 이 리포에
+    없어서 연 십수 일은 'open' 으로 오판한다. 그래도 '항상 open' 보다는
+    낫다 — 그게 지금까지의 동작이었고, 도쿄가 닫힌 18시간 동안 매분
+    yfinance 를 부르게 했다.
+
+    **확정 종가 판정(uses_session_calendar)에는 쓰지 않는다.** 그쪽은 틀리면
+    휴장일 종가를 지어내므로 진짜 캘린더가 필요하다. 여기는 틀려도 조회가
+    조금 늘 뿐이라 감당할 수 있는 오차다 — 같은 구분을 한국에서도 한다
+    (kr_market_status 는 평일만 보고, is_kr_trading_day 는 관측 캘린더를 본다).
+    """
+    n = now or now_jst()
+    if n.weekday() >= 5:
+        return "closed"
+    t = n.time()
+    if t < _TSE_OPEN:
+        return "pre"
+    if t < _TSE_CLOSE:
+        return "open"
+    return "post"
+
+
+def is_jp_extended_hours(now: Optional[datetime] = None) -> bool:
+    """일본 지수 값이 **변할 수 있는** 시간대인지 (08:30~16:00 JST 평일)."""
+    n = now or now_jst()
+    if n.weekday() >= 5:
+        return False
+    return _TSE_EXT_OPEN <= n.time() < _TSE_EXT_CLOSE
+
+
 def price_can_move(ticker: str) -> bool:
     """이 티커의 가격이 **지금 변할 수 있는가.**
 
@@ -496,7 +555,8 @@ def price_can_move(ticker: str) -> bool:
 
       · 미국 주식  → 프리·정규·애프터마켓 (04:00~20:00 ET, 거래일만)
       · 한국 주식  → 시간외 포함 08:30~18:00 KST, 평일만
-      · 그 외      → 항상 True (암호화폐·환율·선물·해외지수)
+      · 일본 지수  → 08:30~16:00 JST, 평일만 (^N225 는 마퀴에 실린다)
+      · 그 외      → 항상 True (암호화폐·환율·선물)
 
     **시장 하나로 뭉뚱그리면 안 된다.** live_prices 는
     `is_us_market_open()` 하나로 전 종목을 게이트하고 있었다. KRX 정규장
@@ -506,10 +566,17 @@ def price_can_move(ticker: str) -> bool:
     계속 조회했다. 같은 응답 안에서 metrics 는 `market_open: true` 를 주고
     보유 목록은 전부 `is_live: false` 였다.
     """
-    if uses_us_session_calendar(ticker):
-        return is_us_extended_hours()
+    # 구체적으로 알아보는 것부터 묻는다. uses_us_session_calendar 는 "모르면
+    # 미국" 인 폴백이라 먼저 물으면 새 거래소를 미국으로 삼킨다 — 실제로
+    # ^N225 는 _NON_US_EXACT 에 등록돼 있어 동작하고 ^TOPX 는 아니어서
+    # 같은 시각에 한쪽은 post, 한쪽은 pre 였다. 두 곳에 등록해야 동작하는
+    # 결합을 순서로 없앤다.
     if uses_kr_session_calendar(ticker):
         return is_kr_extended_hours()
+    if uses_jp_session_calendar(ticker):
+        return is_jp_extended_hours()
+    if uses_us_session_calendar(ticker):
+        return is_us_extended_hours()
     return True
 
 
@@ -542,10 +609,13 @@ def market_session(ticker: str) -> str:
 
     24시간 자산(암호화폐·환율·선물)은 세션 개념이 없어 'open' 을 준다.
     """
-    if uses_us_session_calendar(ticker):
-        return us_market_status()
+    # price_can_move 와 같은 순서를 쓴다 (폴백을 마지막에).
     if uses_kr_session_calendar(ticker):
         return kr_market_status()
+    if uses_jp_session_calendar(ticker):
+        return jp_market_status()
+    if uses_us_session_calendar(ticker):
+        return us_market_status()
     return "open"
 
 
