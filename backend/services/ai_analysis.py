@@ -918,7 +918,6 @@ def run_macro_agents(
     portfolio: dict,
     model_key: str = "sonnet",
     mode: str = "fast",
-    provider: str = "claude",
     should_cancel: Optional[Callable[[], bool]] = None,
     market: str = "US",
 ) -> list[dict]:
@@ -928,18 +927,9 @@ def run_macro_agents(
     Phase 1 (id ≤ 7): 병렬 독립 분석
     Phase 2 (id > 7): Phase 1 전체 결과를 컨텍스트로 순차 종합
 
-    `provider` 는 **더 이상 고를 수 없다.** GPT 경로는 도달 불가라 삭제했다.
-    인자는 호출부(`routers/macro.py`, `models/macro.py`, 프론트 요청 타입)가
-    아직 넘기고 있어 남아 있을 뿐이고, 그쪽이 정리되면 같이 없앤다.
-
-    'claude' 가 아닌 값이 오면 **로그를 남긴다.** 예전에는 주석에만 "무시됨"
-    이라 적혀 있었는데, 그러면 다음 사람이 고를 수 있는 것으로 읽고 넘겨 본 뒤
-    아무 일도 안 일어나는 이유를 모른다. 조용히 무시하는 것이 인자가 남아 있는
-    것보다 나쁘다.
+    모델 제공자는 고를 수 없다. GPT 경로가 도달 불가여서 삭제했고, `provider`
+    인자도 호출부와 함께 없앴다.
     """
-    if provider and provider != "claude":
-        logger.warning("provider=%r 는 더 이상 지원하지 않는다 — Claude 로 실행한다",
-                       provider)
     effective_model_key = model_key  # haiku → 전체 Haiku; sonnet → _AGENT_MODEL_TIER 분기
 
     selected_ids = ANALYSIS_MODES.get(mode, ANALYSIS_MODES["fast"])
