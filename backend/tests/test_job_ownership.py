@@ -260,3 +260,94 @@ def test_the_database_path_applies_the_same_owner_rule():
     assert not visible("someone", job_store.ANONYMOUS), "익명이 남의 잡을 읽는다"
     assert visible("me", "me") and visible(None, "me"), "본인 것과 무주공산"
     assert not visible("someone", "me"), "로그인 호출자가 남의 잡을 읽는다"
+
+
+# ── DB 분기를 실제로 돌린다 ────────────────────────────────────────────────────
+#
+# 위 동등성 검사는 두 조각으로 나눠 본다 — "DB 경로가 `_visible` 을 부르는가"
+# 와 "`_visible` 이 세 상태를 가르는가". 둘 다 맞아도 **합성이 틀릴 수 있다**:
+# DB 경로가 `_visible` 에 인자를 바꿔 넘기거나, `SELECT` 의 다른 열을
+# `user_id` 로 읽으면 두 조각 검사는 그대로 통과한다.
+#
+# 위 검사들은 전부 `_db()` 를 None 으로 눌러 **메모리 경로만** 돈다. 그래서
+# 그 합성은 아무 데서도 안 재진다. 여기서 행을 직접 넣고 DB 경로로 읽는다.
+
+@pytest.fixture
+def db_jobs(live_db):
+    """`jobs` 테이블에 직접 넣고 지운다. 풀이 열려 있어 `_db()` 가 DB 를 준다."""
+    from backend.db import get_conn
+
+    kind = "__test_owner__"
+
+    def purge():
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM jobs WHERE kind=%s", (kind,))
+
+    def put(owner):
+        job_id = str(uuid.uuid4())
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO jobs(id, kind, user_id, status, result) "
+                "VALUES(%s,%s,%s,'done',%s)",
+                (job_id, kind, owner, '{"secret": "주인의 결과"}'),
+            )
+        return job_id
+
+    purge()
+    yield kind, put
+    purge()
+
+
+def test_the_database_branch_applies_the_rule_to_the_right_row(db_jobs):
+    """DB 에서 읽은 행에 소유자 규칙이 **실제로** 적용된다.
+
+    여섯 갈래를 DB 경로로 직접 잰다. 조각 검사 둘이 다 맞아도 여기가
+    틀릴 수 있다 — 인자를 바꿔 넘기거나 다른 열을 `user_id` 로 읽으면
+    조각 검사는 통과한다.
+    """
+    from backend.services.job_store import ANONYMOUS, JobStore
+
+    kind, put = db_jobs
+    store = JobStore(kind=kind)
+    owned = put(OWNER)
+    unowned = put(None)
+
+    # 소유자 검사 생략(None) — 둘 다 보인다.
+    assert store.get(owned, owner=None) is not None
+    assert store.get(unowned, owner=None) is not None
+
+    # 익명 — 무주공산만.
+    assert store.get(unowned, owner=ANONYMOUS) is not None, "익명이 자기 잡을 못 읽는다"
+    assert store.get(owned, owner=ANONYMOUS) is None, (
+        "an anonymous caller read a signed-in user's job through the database "
+        "path -- the in-memory tests cannot see this. (§1.2)"
+    )
+
+    # 로그인 — 자기 것 + 무주공산.
+    assert store.get(owned, owner=OWNER) is not None, "주인이 자기 잡을 못 읽는다"
+    assert store.get(unowned, owner=OWNER) is not None
+    assert store.get(owned, owner=OTHER) is None, (
+        "another user read this job through the database path."
+    )
+
+
+def test_the_database_branch_is_the_one_being_exercised(db_jobs):
+    """전제 — 위 검사가 **메모리 폴백이 아니라** DB 경로를 돌았다.
+
+    풀이 닫혀 있으면 `_db()` 가 None 을 주고 전부 메모리로 내려간다. 그러면
+    위 검사는 이미 덮인 경로를 한 번 더 재는 것이 되고, 노리던 합성은
+    그대로 안 재진다.
+    """
+    from backend.services import job_store
+
+    assert job_store._db() is not None, (
+        "the job store fell back to memory -- the test above measured the "
+        "path that was already covered, not the database one."
+    )
+
+    kind, put = db_jobs
+    job_id = put(OWNER)
+    from backend.db import get_conn
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM jobs WHERE id=%s", (job_id,))
+        assert cur.fetchone(), "행이 DB 에 안 들어갔다"
