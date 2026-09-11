@@ -81,11 +81,18 @@ export function subscribeMarket(fn: (m: Market) => void): () => void {
 /**
  * 금액 표기. 시장에 따라 기호와 소수 자리가 달라진다.
  * 원화에 소수점 두 자리를 붙이면(`₩80,000.00`) 어색하고 자릿수만 늘어난다.
+ *
+ * 부호는 **기호 앞**에 붙인다. `toLocaleString` 이 음수에 '-' 를 붙이므로
+ * `기호 + 값` 으로 이으면 `$-300.00` 처럼 부호가 기호 뒤로 들어간다.
+ * 같은 파일의 `formatCompact` 는 처음부터 이렇게 하고 있었다 — 한 파일에
+ * 맞는 예와 틀린 예가 같이 있으면, 읽는 사람은 옆 줄을 보고 "이 파일은
+ * 이미 처리한다" 고 판단한다. 실제로 그렇게 걸렸다.
  */
 export function formatMoney(value: number | null | undefined, market?: Market): string {
   if (value == null || !Number.isFinite(value)) return '—'
   const spec = MARKETS[market ?? current]
-  return spec.symbol + value.toLocaleString(spec.locale, {
+  const sign = value < 0 ? '-' : ''
+  return sign + spec.symbol + Math.abs(value).toLocaleString(spec.locale, {
     minimumFractionDigits: spec.fractionDigits,
     maximumFractionDigits: spec.fractionDigits,
   })
@@ -96,11 +103,18 @@ export function formatMoney(value: number | null | undefined, market?: Market): 
  *
  * 한국 주식은 호가 단위가 1원이라 소수점이 없다. 달러와 같은 규칙으로 찍으면
  * `₩71,900.00` 처럼 실제로 존재하지 않는 정밀도가 표시된다.
+ *
+ * 부호는 **기호 앞**에 붙인다. `toLocaleString` 이 음수에 '-' 를 붙이므로
+ * `기호 + 값` 으로 이으면 `$-300.00` 처럼 부호가 기호 뒤로 들어간다.
+ * 같은 파일의 `formatCompact` 는 처음부터 이렇게 하고 있었다 — 한 파일에
+ * 맞는 예와 틀린 예가 같이 있으면, 읽는 사람은 옆 줄을 보고 "이 파일은
+ * 이미 처리한다" 고 판단한다. 실제로 그렇게 걸렸다.
  */
 export function formatPrice(value: number | null | undefined, market?: Market): string {
   if (value == null || !Number.isFinite(value)) return '—'
   const spec = MARKETS[market ?? current]
-  return spec.symbol + value.toLocaleString(spec.locale, {
+  const sign = value < 0 ? '-' : ''
+  return sign + spec.symbol + Math.abs(value).toLocaleString(spec.locale, {
     minimumFractionDigits: spec.fractionDigits,
     maximumFractionDigits: spec.fractionDigits,
   })
@@ -115,10 +129,13 @@ export function formatAxisPrice(value: number | null | undefined, market?: Marke
   // 1만 기준으로 줄이면 71,900 이 '7만'이 되어, 68,000~75,000 범위의 주가
   // 차트에서 축 라벨이 전부 '7만'으로 같아진다. 한국 주식은 대부분 100만원
   // 아래라 그대로 찍어도 라벨이 길지 않다.
-  if (spec.code === 'KR' && Math.abs(value) >= 1_000_000) {
-    return `${spec.symbol}${Math.round(value / 10_000).toLocaleString(spec.locale)}만`
+  // 부호는 기호 앞에 (formatMoney·formatPrice·formatCompact 와 같은 규칙).
+  const sign = value < 0 ? '-' : ''
+  const v = Math.abs(value)
+  if (spec.code === 'KR' && v >= 1_000_000) {
+    return `${sign}${spec.symbol}${Math.round(v / 10_000).toLocaleString(spec.locale)}만`
   }
-  return spec.symbol + Math.round(value).toLocaleString(spec.locale)
+  return sign + spec.symbol + Math.round(v).toLocaleString(spec.locale)
 }
 
 /**
