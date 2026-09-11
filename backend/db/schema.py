@@ -357,14 +357,27 @@ CREATE INDEX IF NOT EXISTS idx_market_snapshot_updated
 """
 
 
-def init_schema():
-    """DDL 실행 (멱등). 기동할 때마다 돌아도 안전하다."""
+def init_schema() -> bool:
+    """DDL 실행 (멱등). 기동할 때마다 돌아도 안전하다.
+
+    **적용됐는지를 반환한다.** 예전에는 반환값이 없고 예외를 삼켜서, 불러도
+    적용 여부를 알 수 없었다 — 실패해도 앱은 정상 기동하고 로그 한 줄만
+    남는다. 그 상태에서 새 코드가 옛 스키마를 만나면 그 경로의 쓰기가
+    통째로 죽는데(`no unique or exclusion constraint matching the ON CONFLICT
+    specification`), 증상은 한참 뒤에 "저장이 안 된다" 로 나타난다. §1.3(c) 다.
+
+    지금도 예외를 올리지는 않는다 — 기동을 막으면 DB 순단 한 번에 배포가
+    멈춘다. 대신 호출자가 실패를 **볼 수 있게** 한다.
+    """
     if not is_available():
-        return
+        logger.error("DB 미연결 — 스키마를 적용하지 못했다")
+        return False
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(_DDL)
         logger.info("DB 스키마 초기화 완료")
+        return True
     except Exception as e:
         logger.error(f"스키마 초기화 오류: {e}")
+        return False
