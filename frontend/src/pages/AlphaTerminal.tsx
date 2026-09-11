@@ -303,10 +303,17 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
   // 여기서 시장을 보고 직접 고르지 않는다 — 곡선을 그리는 지수와 라벨이
   // 갈라지면 화면이 다른 지수 이름으로 같은 선을 설명하게 된다.
   // 아직 안 왔으면 이름을 지어내지 말고 중립어를 쓴다.
-  const benchLabelQ = useQuery({
-    queryKey: ['portfolio-metrics'], queryFn: getPortfolioMetrics,
-    staleTime: 55_000,
-  })
+  //
+  // **useDemoQuery 를 쓴다.** 평범한 useQuery 로 두면 비로그인 게이트가 없어
+  // 방문자가 페이지를 열 때마다 /portfolio/metrics 에 401 이 나간다. 화면은
+  // 안 깨지지만(라벨이 '벤치마크' 로 떨어진다) 인증 실패가 정상 트래픽에 섞인다.
+  //
+  // 그리고 아래 metricsQ 와 **같은 키**를 쓴다. react-query 는 키로 중복
+  // 제거하므로, 게이트가 있는 쪽과 없는 쪽이 같은 캐시 항목을 두고 경쟁하면
+  // 어느 쪽이 먼저 도느냐가 상태를 정한다. 둘 다 같은 훅으로 맞춰야 그 경쟁이
+  // 없어진다.
+  const benchLabelQ = useDemoQuery(['portfolio-metrics'], getPortfolioMetrics,
+                                   DEMO_METRICS, { staleTime: 55_000 })
   const benchLabel = benchLabelQ.data?.benchmark_label ?? '벤치마크'
   // 모바일에서는 드래그 확대(스와이프 줌)를 끈다 — 스크롤하려고 짚은 손가락이
   // 그대로 확대 영역 선택으로 잡혀 페이지 스크롤을 막았다.
