@@ -101,19 +101,13 @@ ALWAYS_FETCH = [
     "USDKRW=X", "JPYKRW=X", "SPY", "QQQ", "NVDA", "AAPL", "MSFT",
 ]
 
-GICS_SECTOR_ETFS = [
-    ("TECHNOLOGY",        "XLK"),
-    ("FINANCIALS",        "XLF"),
-    ("COMMUNICATION",     "XLC"),
-    ("CONSUMER_DISC",     "XLY"),
-    ("HEALTHCARE",        "XLV"),
-    ("INDUSTRIALS",       "XLI"),
-    ("CONSUMER_STAPLES",  "XLP"),
-    ("ENERGY",            "XLE"),
-    ("UTILITIES",         "XLU"),
-    ("MATERIALS",         "XLB"),
-    ("REAL_ESTATE",       "XLRE"),
-]
+# GICS_SECTOR_ETFS 는 없앴다. 미국 섹터 표가 여기와 markets.py 두 곳에
+# 있었고 티커는 같은데 **키 형식이 달랐다** — 여기는 "TECHNOLOGY",
+# markets.py 는 "Technology". 화면(/api/market/sectors)은 이쪽을 읽고
+# 리포트 프롬프트(ai_analysis)는 저쪽을 읽어서, 한 시장의 섹터 이름이
+# 두 표면에서 다르게 나갔다. 아래 sector_etfs_for 의 docstring 이
+# "두 곳으로 갈라지면 한쪽만 고치는 실수가 난다" 고 적어 놓고 바로 그
+# 상태였다. 이제 markets.py 하나만 본다.
 
 # 예약 수집 대상은 **모든 시장**의 섹터 ETF 다.
 #
@@ -145,8 +139,6 @@ def sector_etfs_for(market: str = "US") -> list[tuple[str, str]]:
     두 곳으로 갈라지면 한쪽만 고치는 실수가 난다.
     """
     from backend.services.markets import get_market
-    if (market or "US").upper() == "US":
-        return GICS_SECTOR_ETFS
     return get_market(market).sector_etfs
 
 

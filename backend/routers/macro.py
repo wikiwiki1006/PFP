@@ -37,7 +37,6 @@ from backend.services.market_data import (
     get_close_df,
     get_sector_changes,
     get_portfolio_news,
-    GICS_SECTOR_ETFS,
 )
 from backend.services.portfolio_calculator import calculate_metrics, build_equity_curve
 from backend.services.price_series import daily_change

@@ -51,11 +51,20 @@ US = MarketSpec(
         "^VIX":  "VIX",
         "^TNX":  "미 10년물",
     },
+    # 키는 대문자 스네이크다. 예전에는 여기만 "Technology" 처럼 사람이 읽는
+    # 표기를 썼는데, 실제 API 응답은 market_data.GICS_SECTOR_ETFS 의 대문자
+    # 키로 나갔다 — 같은 시장의 섹터 표가 두 벌이었고 형식이 달랐다.
+    # 프롬프트는 이 목록을 읽고(ai_analysis) 화면은 저쪽을 읽어서, 한 시장의
+    # 섹터 이름이 두 표면에서 다르게 나왔다.
+    # 순서가 화면 섹터 표의 정렬이다. 옛 GICS_SECTOR_ETFS 순서를 그대로 옮겼다 —
+    # 통합하면서 순서까지 바꾸면 표가 이유 없이 재배열된다.
     sector_etfs=[
-        ("Technology", "XLK"), ("Financials", "XLF"), ("Health Care", "XLV"),
-        ("Consumer Discretionary", "XLY"), ("Communication Services", "XLC"),
-        ("Industrials", "XLI"), ("Consumer Staples", "XLP"), ("Energy", "XLE"),
-        ("Utilities", "XLU"), ("Real Estate", "XLRE"), ("Materials", "XLB"),
+        ("TECHNOLOGY",       "XLK"), ("FINANCIALS",       "XLF"),
+        ("COMMUNICATION",    "XLC"), ("CONSUMER_DISC",    "XLY"),
+        ("HEALTHCARE",       "XLV"), ("INDUSTRIALS",      "XLI"),
+        ("CONSUMER_STAPLES", "XLP"), ("ENERGY",           "XLE"),
+        ("UTILITIES",        "XLU"), ("MATERIALS",        "XLB"),
+        ("REAL_ESTATE",      "XLRE"),
     ],
     fred_series={
         "policy_rate":  "FEDFUNDS",
@@ -81,9 +90,9 @@ KR = MarketSpec(
     # 한국에는 미국 SPDR 같은 표준 11 섹터 ETF 세트가 없다. 거래대금이 충분한
     # KODEX·TIGER 업종 ETF 로 대체하되, 대응되지 않는 섹터는 비워 둔다 —
     # 없는 것을 억지로 끼워 맞추면 섹터 등락률이 사실과 달라진다.
-    # 섹터 키는 미국(GICS_SECTOR_ETFS)과 **같은 형식**이어야 한다.
-    # 프론트의 한글 라벨 표가 이 키로 찾는다 — 'Technology' 처럼 다른 표기를
-    # 쓰면 표에서 못 찾아 영어 원문이 그대로 화면에 나온다.
+    # 섹터 키는 미국과 **같은 형식**(대문자 스네이크)이어야 한다.
+    # 프론트의 한글 라벨 표(AlphaTerminal.SECTOR_LABEL_KO)가 이 키로 찾는다 —
+    # 다른 표기를 쓰면 표에서 못 찾아 영어 원문이 그대로 화면에 나온다.
     sector_etfs=[
         ("TECHNOLOGY",        "091160.KS"),   # KODEX 반도체
         ("FINANCIALS",        "091170.KS"),   # KODEX 은행
@@ -110,6 +119,45 @@ KR = MarketSpec(
     suffixes=(".KS", ".KQ"),
     lang_note="한국 증시(KOSPI·KOSDAQ), 통화 KRW",
 )
+
+# 섹터 키 → 한글 표시명.
+#
+# 프론트(AlphaTerminal.SECTOR_LABEL_KO)와 **같은 표**다. 두 언어라 사본이
+# 하나 생기는 것은 피할 수 없지만, 백엔드 안에서 세 번째를 만들지는 않는다 —
+# 리포트 프롬프트가 이 표를 쓴다. 예전에는 프롬프트에 내부 키가 그대로 실려
+# `TECHNOLOGY(091160.KS)` 처럼 나갔고, 모델이 한국어로 풀어 쓰는 것에
+# 기대고 있었다.
+#
+# 미국·한국이 공유하는 11개는 여기 한 번만 적는다. 한국 전용 4개는 KODEX
+# 업종 ETF 가 GICS 와 1:1 대응되지 않아 실제 ETF 가 담는 업종 이름을 쓴다.
+SECTOR_LABEL_KO: dict[str, str] = {
+    "TECHNOLOGY":       "기술",
+    "FINANCIALS":       "금융",
+    "COMMUNICATION":    "커뮤니케이션",
+    "CONSUMER_DISC":    "소비재",
+    "HEALTHCARE":       "헬스케어",
+    "INDUSTRIALS":      "산업재",
+    "CONSUMER_STAPLES": "필수소비",
+    "ENERGY":           "에너지",
+    "UTILITIES":        "유틸리티",
+    "MATERIALS":        "소재",
+    "REAL_ESTATE":      "부동산",
+    "SHIPBUILDING":     "조선",
+    "ENERGY_CHEM":      "에너지화학",
+    "STEEL":            "철강",
+    "IT_HARDWARE":      "IT하드웨어",
+}
+
+
+def sector_label(key: str) -> str:
+    """섹터 키의 한글 표시명. 모르는 키는 그대로 돌려준다.
+
+    모르는 키를 빈 문자열로 만들지 않는다 — 화면·프롬프트에서 섹터 이름이
+    사라지면 그 행이 무엇인지 알 수 없게 되고, 키가 그대로 보이면 최소한
+    무엇이 빠졌는지 보인다.
+    """
+    return SECTOR_LABEL_KO.get(key, key)
+
 
 MARKETS: dict[str, MarketSpec] = {"US": US, "KR": KR}
 
