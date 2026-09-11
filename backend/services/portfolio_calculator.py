@@ -527,8 +527,18 @@ def calculate_metrics(
     # 에쿼티 곡선의 마지막 값으로 회복한다. 수량이 NaN 이면 합이 NaN 이 되고
     # 그 경로로 넘어간다. (그 회복이 있어서 "수량 NaN → 총수익률 -100%" 는
     # 일어나지 않는다. 의심해서 실측으로 확인했다.)
-    total_equity = _safe_or(sum(_price(t) * holdings[t]["q"] for t in stock_tickers) + cash_val, 0.0)
-    total_cost   = _safe_or(sum(_safe_or(holdings[t]["avg"], 0.0) * _safe_or(holdings[t]["q"], 0.0) for t in stock_tickers) + cash_val, 0.0)
+    # 주식만 본 평가액·원가. 수익률은 이 쌍으로 계산한다 — 현금을 분모에 넣으면
+    # "누적 수익" 이 계좌 전체 수익률이 되어 현금 비중만큼 희석된다. 곡선 기준
+    # 경로는 TWRR 로 현금흐름을 보정해 현금의 기회비용을 수익률에 반영하지
+    # 않으므로, 폴백에 현금을 넣으면 **같은 필드가 경로에 따라 다른 정의**가 된다.
+    # (현금 절반을 들고 있던 사용자는 실제 +0.08% 를 +0.04% 로 봤다.)
+    stock_equity = _safe_or(sum(_price(t) * holdings[t]["q"] for t in stock_tickers), 0.0)
+    stock_cost   = _safe_or(sum(_safe_or(holdings[t]["avg"], 0.0) * _safe_or(holdings[t]["q"], 0.0)
+                                for t in stock_tickers), 0.0)
+
+    # 응답의 `total_equity` 는 현금을 포함한 **총자산**이다 (화면 라벨도 그렇다).
+    total_equity = _safe_or(stock_equity + cash_val, 0.0)
+    total_cost   = stock_cost
 
     # 보유 종목이 없어도 equity curve 마지막 값을 현재 자산으로 사용
     # (전량 매도 후 현금 보유 또는 CASH 항목 없는 경우 대응)
@@ -544,9 +554,11 @@ def calculate_metrics(
         eq_first = float(eq_meaningful.iloc[0])
         total_rtn = _num_or_none((total_equity / eq_first - 1) * 100)
     else:
-        # 원가도 0 이면 기준점이 없다 — 0% 는 "본전" 이라는 단정이다.
-        total_rtn = (_num_or_none((total_equity / total_cost - 1) * 100)
-                     if total_cost else None)
+        # 주식 평가액 대 주식 원가. 분자에도 현금을 넣지 않는다 — 한쪽만 빼면
+        # 현금을 수익으로 세어 수익률이 폭증한다 (현금 절반이면 +99%).
+        # 원가가 0 이면 기준점이 없다 — 0% 는 "본전" 이라는 단정이다.
+        total_rtn = (_num_or_none((stock_equity / stock_cost - 1) * 100)
+                     if stock_cost else None)
 
     # 1D 변화 — 종목별 '마지막 두 실제 관측치' 합산이 1순위.
     # 에쿼티 커브의 위치 기반 차분(iloc[-1]-iloc[-2])은 마지막 두 행이
