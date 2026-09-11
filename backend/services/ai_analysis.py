@@ -29,7 +29,6 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 logger = logging.getLogger(__name__)
 
 ANTHROPIC_API_KEY  = os.getenv("ANTHROPIC_API_KEY", "")
-GPT_API_KEY        = os.getenv("GPT_API_KEY", "")
 CONTEXT_CHAR_LIMIT   = 3200   # 20% 절감
 PHASE2_CONTEXT_LIMIT = 8000   # 20% 절감
 
@@ -428,80 +427,6 @@ _CLAUDE_SYSTEM = (
     "Analyze it conditionally (\"if this were to happen\"). "
     "For real market figures (index levels, rates), use the provided yfinance data."
 )
-
-
-_GPT_URL = "https://api.openai.com/v1/chat/completions"
-_GPT_HEADERS = lambda: {
-    "Authorization": f"Bearer {GPT_API_KEY}",
-    "Content-Type": "application/json",
-}
-
-
-def call_gpt(prompt: str, max_tokens: int, perplexity_ctx: str = "") -> str:
-    """OpenAI GPT REST API 호출. openai 패키지 불필요."""
-    if not GPT_API_KEY:
-        return "[GPT API 키 없음 — .env에 GPT_API_KEY 추가 필요]"
-    full_prompt = (
-        f"[시장 데이터·뉴스 — 분석에 활용하세요]\n{perplexity_ctx}\n\n---\n\n{prompt}"
-        if perplexity_ctx else prompt
-    )
-    messages = [
-        {"role": "system", "content": _CLAUDE_SYSTEM},
-        {"role": "user",   "content": full_prompt},
-    ]
-    payload = {
-        "model": "gpt-5-mini",
-        "messages": messages,
-        "max_completion_tokens": max_tokens,
-        "temperature": 1,
-    }
-    try:
-        resp = requests.post(_GPT_URL, json=payload, headers=_GPT_HEADERS(), timeout=180)
-        if not resp.ok:
-            return f"[GPT 오류: {resp.status_code} — {resp.text[:300]}]"
-        data = resp.json()
-        choices = data.get("choices", [])
-        if not choices:
-            return "[GPT 응답 없음]"
-        msg_obj = choices[0].get("message", {})
-        text = msg_obj.get("content", "") or ""
-        if not text:
-            import json as _json
-            fr = choices[0].get("finish_reason", "unknown")
-            refusal = msg_obj.get("refusal") or ""
-            print(f"[GPT DEBUG] content empty. finish_reason={fr} "
-                  f"refusal={refusal[:200]} message_keys={list(msg_obj.keys())} "
-                  f"usage={data.get('usage')} raw={_json.dumps(choices[0], ensure_ascii=False)[:600]}")
-            if refusal:
-                return f"[GPT 거부 응답: {refusal[:300]}]"
-            return f"[GPT 빈 응답 — finish_reason: {fr}]"
-        # 토큰 한도로 잘린 경우: 끊긴 마지막 문장만 완성
-        if choices[0].get("finish_reason") == "length" and text.strip():
-            try:
-                fix_payload = {**payload, "messages": messages + [
-                    {"role": "assistant", "content": text},
-                    {"role": "user", "content": (
-                        "위 텍스트가 토큰 한도로 중간에 끊겼습니다. "
-                        "끊긴 마지막 문장만 한두 문장으로 자연스럽게 완성해 주세요. "
-                        "새 섹션이나 추가 내용은 쓰지 마세요."
-                    )},
-                ], "max_completion_tokens": 200}
-                fix_resp = requests.post(_GPT_URL, json=fix_payload, headers=_GPT_HEADERS(), timeout=60)
-                if fix_resp.ok:
-                    fix_choices = fix_resp.json().get("choices", [])
-                    if fix_choices:
-                        tail = fix_choices[0].get("message", {}).get("content", "") or ""
-                        if tail.strip():
-                            text += tail
-            except Exception:
-                # 보수에 실패하면 잘린 원문이 그대로 리포트에 간다. 원문은
-                # 모델이 실제로 쓴 것이라 거짓은 아니지만, 문장이 중간에서
-                # 끊긴 이유가 어디에도 안 남는다.
-                logger.warning("GPT 잘린 응답 보수 실패 — 잘린 원문 그대로 사용",
-                               exc_info=True)
-        return text
-    except Exception as exc:
-        return f"[GPT 오류: {exc}]"
 
 
 def call_claude(prompt: str, model: str, max_tokens: int, perplexity_ctx: str = "",
@@ -912,7 +837,6 @@ def _run_parallel_agents(
     portfolio_str: str,
     model_key: str,
     perplexity_ctx: str,
-    provider: str = "claude",
     should_cancel: Optional[Callable[[], bool]] = None,
     market: str = "US",
 ) -> dict[int, tuple[str, float]]:
@@ -932,19 +856,10 @@ def _run_parallel_agents(
             # 큐에서 대기하다 취소된 에이전트 — LLM 을 부르지 않고 끝낸다.
             return ag["id"], "[취소됨]", 0.0
         try:
-            if provider == "gpt":
-                # GPT는 항상 전체 컨텍스트(yfinance+뉴스)를 주입해 데이터 누락 방지
-                # GPT-5.6 Sol은 reasoning 모델이라 내부 추론 토큰이 max_completion_tokens에 포함됨
-                # → 에이전트 토큰 예산을 4× 확장해 출력 공간을 확보 (최소 4000)
-                # gpt-5-mini도 reasoning 토큰 소비 — 3× (min 4000)으로 출력 여유 확보.
-                # Agent 6은 4000 캡 (전략 에이전트, 간결한 출력 선호).
-                gpt_tokens = 4000 if ag["id"] == 6 else max(4000, ag["max_tokens"] * 3)
-                text = call_gpt(ag["prompt"], gpt_tokens, perplexity_ctx=perplexity_ctx)
-            else:
-                ctx = perplexity_ctx if ag.get("inject_perplexity") else ""
-                model = _resolve_model(ag["id"], model_key)
-                text = call_claude(ag["prompt"], model, ag["max_tokens"], perplexity_ctx=ctx,
-                                   should_cancel=should_cancel)
+            ctx = perplexity_ctx if ag.get("inject_perplexity") else ""
+            model = _resolve_model(ag["id"], model_key)
+            text = call_claude(ag["prompt"], model, ag["max_tokens"], perplexity_ctx=ctx,
+                               should_cancel=should_cancel)
             return ag["id"], text, time.time() - t0
         except JobCancelled:
             return ag["id"], "[취소됨]", time.time() - t0
@@ -967,7 +882,6 @@ def _run_contextual_agents(
     model_key: str,
     context_texts: list[str],
     perplexity_ctx: str,
-    provider: str = "claude",
     should_cancel: Optional[Callable[[], bool]] = None,
     market: str = "US",
 ) -> dict[int, tuple[str, float]]:
@@ -986,14 +900,10 @@ def _run_contextual_agents(
         if should_cancel is not None and should_cancel():
             raise JobCancelled()
         try:
-            if provider == "gpt":
-                gpt_tokens = max(4000, ag["max_tokens"] * 3)
-                text = call_gpt(ag["prompt"], gpt_tokens, perplexity_ctx=perplexity_ctx)
-            else:
-                ctx = perplexity_ctx if ag.get("inject_perplexity") else ""
-                model = _resolve_model(ag_id, model_key)
-                text = call_claude(ag["prompt"], model, ag["max_tokens"], perplexity_ctx=ctx,
-                                   should_cancel=should_cancel)
+            ctx = perplexity_ctx if ag.get("inject_perplexity") else ""
+            model = _resolve_model(ag_id, model_key)
+            text = call_claude(ag["prompt"], model, ag["max_tokens"], perplexity_ctx=ctx,
+                               should_cancel=should_cancel)
         except JobCancelled:
             raise
         except Exception as exc:
@@ -1008,7 +918,7 @@ def run_macro_agents(
     portfolio: dict,
     model_key: str = "sonnet",
     mode: str = "fast",
-    provider: str = "claude",  # 무시됨 — 항상 Claude 사용
+    provider: str = "claude",
     should_cancel: Optional[Callable[[], bool]] = None,
     market: str = "US",
 ) -> list[dict]:
@@ -1017,8 +927,19 @@ def run_macro_agents(
     심층 분석(model_key=sonnet): 에이전트 티어에 따라 Haiku/Sonnet 자동 분기 (_AGENT_MODEL_TIER)
     Phase 1 (id ≤ 7): 병렬 독립 분석
     Phase 2 (id > 7): Phase 1 전체 결과를 컨텍스트로 순차 종합
+
+    `provider` 는 **더 이상 고를 수 없다.** GPT 경로는 도달 불가라 삭제했다.
+    인자는 호출부(`routers/macro.py`, `models/macro.py`, 프론트 요청 타입)가
+    아직 넘기고 있어 남아 있을 뿐이고, 그쪽이 정리되면 같이 없앤다.
+
+    'claude' 가 아닌 값이 오면 **로그를 남긴다.** 예전에는 주석에만 "무시됨"
+    이라 적혀 있었는데, 그러면 다음 사람이 고를 수 있는 것으로 읽고 넘겨 본 뒤
+    아무 일도 안 일어나는 이유를 모른다. 조용히 무시하는 것이 인자가 남아 있는
+    것보다 나쁘다.
     """
-    effective_provider  = "claude"
+    if provider and provider != "claude":
+        logger.warning("provider=%r 는 더 이상 지원하지 않는다 — Claude 로 실행한다",
+                       provider)
     effective_model_key = model_key  # haiku → 전체 Haiku; sonnet → _AGENT_MODEL_TIER 분기
 
     selected_ids = ANALYSIS_MODES.get(mode, ANALYSIS_MODES["fast"])
@@ -1040,7 +961,7 @@ def run_macro_agents(
     if phase1_ids:
         all_results.update(
             _run_parallel_agents(phase1_ids, event, portfolio_str, effective_model_key,
-                                 perplexity_ctx, effective_provider, should_cancel, market)
+                                 perplexity_ctx, should_cancel, market)
         )
     _check()
 
@@ -1051,7 +972,7 @@ def run_macro_agents(
         ]
         all_results.update(
             _run_contextual_agents(phase2_ids, event, portfolio_str, effective_model_key,
-                                   p1_texts, perplexity_ctx, effective_provider, should_cancel, market)
+                                   p1_texts, perplexity_ctx, should_cancel, market)
         )
     _check()
 
