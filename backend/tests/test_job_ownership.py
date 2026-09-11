@@ -158,51 +158,25 @@ def test_an_anonymous_caller_can_still_read_an_unowned_job(client, store):
     )
 
 
-# ── 익명 호출자에게는 그 규칙이 걸리지 않는다 ──────────────────────────────────
+# ── 익명 호출자도 규칙에 걸린다 ────────────────────────────────────────────────
 #
-# `job_store.get` 의 검사는 `if owner is not None and user_id not in (None,
-# owner)` 다. 즉 `owner=None` 은 **"익명 사용자"** 가 아니라 **"검사하지
-# 마"** 로 동작한다.
+# 한동안 안 걸렸다. `job_store.get` 의 검사가 `if owner is not None and
+# user_id not in (None, owner)` 였고, 이 엔드포인트는 `optional_user` 라
+# 라우터가 비로그인에 `owner=None` 을 넘겼다. 그 `None` 은 "익명 사용자" 가
+# 아니라 **"검사하지 마"** 였다 — 한 값이 두 뜻을 갖는 동안 로그인하지 않은
+# 호출자가 남의 잡을 읽고 취소할 수 있었다.
 #
-# 그리고 이 엔드포인트는 `optional_user` 라 로그인 없이 부를 수 있고,
-# 라우터는 `owner=(_auth or {}).get("uid")` — 비로그인이면 `None` 이다.
-# 그래서 **로그인하지 않은 호출자가 남의 잡을 읽는다.** 같은 이유로
-# DELETE 도 통과해 남의 잡을 취소할 수 있다.
+# 고친 방향은 "익명이면 막는다" 가 **아니다.** 그러면 바로 위 검사가
+# 빨개진다 — 비로그인 최적화 사용자가 자기 잡의 진행 상황을 못 본다.
+# 두 뜻을 다른 값으로 갈랐다 (`job_store.ANONYMOUS`):
 #
-# 라우터 주석은 *"남의 잡이면 존재 여부조차 알리지 않는다"* 라고 적고 있다.
-# 로그인한 호출자에게는 맞고 **익명 호출자에게는 틀리다.**
+#     owner is None        소유자 검사 안 함 (내부 호출·정리) → 전부
+#     owner is ANONYMOUS   비로그인 호출자                   → 무주공산만
+#     owner == uid         로그인 호출자                     → 자기 것 + 무주공산
 #
 # id 가 UUID4 라 추측은 어렵다. 다만 잡 id 는 URL·로그·브라우저 기록에
 # 남으므로 "모르면 안전" 은 소유자 검사의 대체물이 아니다.
-#
-# ## 무엇을 고쳐야 하는가
-#
-# "익명이면 막는다" 가 아니다. 그렇게 하면 바로 위 검사가 빨개진다 —
-# 비로그인 최적화 사용자가 자기 잡의 진행 상황을 못 보게 된다.
-#
-# 고칠 것은 **한 값이 두 뜻을 갖는 것**이다. `owner=None` 이 지금
-# "소유자 검사를 하지 마" 와 "익명 호출자" 를 동시에 뜻한다. 셋을 갈라야
-# 한다:
-#
-#     소유자 검사 안 함   (내부 호출·정리 작업)      → 전부 보인다
-#     익명 호출자        (`optional_user` 가 None)  → 소유자 **없는** 잡만
-#     로그인 호출자       uid                        → 자기 것 + 소유자 없는 것
-#
-# 가운데가 지금 없다. 셋째 줄의 규칙(`user_id not in (None, owner)`)은 이미
-# 맞으므로, 익명을 그 규칙에 태우면 된다 — 예를 들어 라우터가 `owner` 를
-# 안 넘기는 대신 "익명" 을 나타내는 별도 표식을 넘기고, `get` 이 그때
-# `user_id is None` 인 잡만 돌려주는 식이다.
-#
-# 고칠 자리가 `backend/routers/optimizer.py` 와
-# `backend/services/job_store.py` 라 이 창 소유가 아니다. 고쳐지면 XPASS 로
-# 뒤집혀 이 표시를 떼라고 요구한다.
 
-@pytest.mark.xfail(strict=True, reason=(
-    "owner=None 이 '익명' 과 '소유자 검사 생략' 을 동시에 뜻한다. "
-    "엔드포인트가 optional_user 라, 로그인하지 않은 호출자는 소유자 검사를 "
-    "통째로 건너뛰고 남의 잡을 읽고 취소할 수 있다. 고치는 방향은 '익명이면 "
-    "막는다' 가 아니라 그 두 뜻을 다른 값으로 가르는 것이다 — 위 설명 참고. "
-    "자리: routers/optimizer.py · services/job_store.py."))
 def test_an_anonymous_caller_cannot_read_someone_elses_job(client, store):
     """로그인하지 않은 호출자도 남의 잡은 못 읽어야 한다."""
     job_id = _make_job(store, OWNER)
@@ -216,29 +190,24 @@ def test_an_anonymous_caller_cannot_read_someone_elses_job(client, store):
     )
 
 
-def test_this_is_what_the_anonymous_path_does_today(client, store):
-    """지금 동작을 그대로 적어 둔다 — 위 xfail 이 무엇을 기다리는지.
+def test_an_anonymous_caller_cannot_cancel_someone_elses_job(client, store):
+    """취소도 같은 판정을 지난다.
 
-    고쳐지는 순간 이 검사도 같이 빨개져서 둘을 함께 지우게 한다.
+    읽기만 막고 끝내면 안 된다 — 취소는 `get()` 을 지나므로 **같이** 열려
+    있었다. 그리고 읽기와 달리 상태를 **바꾼다.** 실행 중인 잡으로 재야
+    한다: 끝난 잡에 대고 부르면 아무 일도 안 일어나서, 막혔는지 원래
+    바뀔 것이 없었는지 구별할 수 없다.
     """
-    job_id = _make_job(store, OWNER)
-    client.as_user(None)
-
-    read = client.get(f"/api/optimizer/ai-optimize-job/{job_id}")
-    assert read.status_code == 200 and "주인의" in read.text, (
-        f"the anonymous path changed ({read.status_code}) -- update or delete "
-        "this note together with the xfail above."
-    )
-
-    # 취소도 같은 `get()` 을 지나므로 같이 열린다. 다만 **실행 중일 때만**
-    # 실제로 상태가 바뀐다 — 끝난 잡에 대고 불러도 아무 일도 없다.
     running = str(uuid.uuid4())
     store.set(running, {"status": "running"}, owner=OWNER)
-    assert client.delete(f"/api/optimizer/ai-optimize-job/{running}").status_code == 200
+
+    client.as_user(None)
+    client.delete(f"/api/optimizer/ai-optimize-job/{running}")
 
     client.as_user(OWNER)
-    assert store.get(running, owner=OWNER)["status"] == "cancelled", (
-        "취소는 안 열려 있다 — 그렇다면 위 설명에서 취소를 빼야 한다"
+    assert store.get(running, owner=OWNER)["status"] == "running", (
+        "an anonymous caller cancelled a signed-in user's running job -- "
+        "cancel goes through the same get(), so it must apply the same rule."
     )
 
 
@@ -257,9 +226,15 @@ def test_the_database_path_applies_the_same_owner_rule():
 
     **한계를 적어 둔다**: 위 검사들은 `_db()` 를 None 으로 눌러 메모리
     경로만 돈다. 그래서 **DB 경로의 소유자 검사는 이 검사 하나로만 덮인다** —
-    변이로 확인했다: DB 경로의 `if owner ...` 를 지우면 다른 검사는 전부
-    초록이고 여기만 빨개진다. 소스 형태 비교라 검사 문구가 바뀌면 같이
-    고쳐야 하는데, 그 비용을 내고서라도 둘 중 하나만 고쳐지는 것을 막는다.
+    변이로 확인했다: DB 경로의 검사를 지우면 다른 검사는 전부 초록이고
+    여기만 빨개진다.
+
+    예전에는 두 경로에 규칙이 **복사되어** 있어 같은 문자열
+    (`not in (None, owner)`)이 양쪽에 있는지 봤다. 익명 수정 때 그 규칙이
+    `_visible()` 한 곳으로 모였고, 지금은 **둘이 같은 것을 부르는지**를
+    본다 — 복사본이 없으면 어긋날 자리도 없으므로 이쪽이 더 강하다.
+    (원 검사의 주석이 "검사 문구가 바뀌면 같이 고쳐야 한다" 고 그 비용을
+    미리 적어 두었다.)
     """
     import inspect
 
@@ -268,10 +243,20 @@ def test_the_database_path_applies_the_same_owner_rule():
     db_path = inspect.getsource(job_store.JobStore.get)
     mem_path = inspect.getsource(job_store.JobStore._mem_get)
 
-    rule = "not in (None, owner)"
-    assert rule in db_path and rule in mem_path, (
+    call = "self._visible("
+    assert call in db_path and call in mem_path, (
         "the DB path and the in-memory fallback no longer share the same "
-        f"owner rule ({rule!r}) -- a mismatch opens other people's jobs only "
+        f"owner rule ({call!r}) -- a mismatch opens other people's jobs only "
         "while the database is unreachable, which is nearly impossible to "
         "notice. (DB 가 흔들리는 동안만 열린다.)"
     )
+
+    # 그 한 곳이 세 상태를 실제로 가르는지 본다. 위 단언만으로는 `_visible`
+    # 이 `return True` 여도 통과한다 — 호출하는지만 봤지 무엇을 하는지는
+    # 안 봤기 때문이다.
+    visible = job_store.JobStore._visible
+    assert visible(None, None) and visible("someone", None), "None 은 검사 생략이다"
+    assert visible(None, job_store.ANONYMOUS), "익명도 무주공산은 읽는다"
+    assert not visible("someone", job_store.ANONYMOUS), "익명이 남의 잡을 읽는다"
+    assert visible("me", "me") and visible(None, "me"), "본인 것과 무주공산"
+    assert not visible("someone", "me"), "로그인 호출자가 남의 잡을 읽는다"

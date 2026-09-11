@@ -12,7 +12,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 from backend.services.auth import current_user, optional_user
-from backend.services.job_store import JobStore
+from backend.services.job_store import JobStore, ANONYMOUS, Owner
 from fastapi import Depends, APIRouter, Header, HTTPException
 
 from backend.services.markets import market_param
@@ -33,6 +33,20 @@ router = APIRouter(prefix="/api/optimizer", tags=["optimizer"])
 # 잡 상태는 DB 에 둔다 — Cloud Run 은 인스턴스를 여러 개 띄우고 세션 고정이 없어서,
 # 메모리에 두면 폴링이 다른 인스턴스로 갈 때 잡을 찾지 못한다.
 _store = JobStore(kind="optimizer", max_jobs=50)
+
+
+def _job_owner(auth: Optional[dict]) -> Owner:
+    """조회·취소에 넘길 소유자 값.
+
+    **이 엔드포인트는 `optional_user` 다.** 비로그인에 `None` 을 넘기면
+    job_store 가 그것을 "소유자 검사를 하지 마" 로 읽어 남의 잡까지 보여
+    준다. 한 값이 두 뜻을 갖고 있었고, 익명 호출자가 그 틈으로 들어갔다.
+
+    잡 **생성** 쪽은 계속 `None` 이다 (아래 `_owner`). 거기서는 "이 잡에
+    소유자가 없다" 라는 뜻이고, 그건 비로그인 최적화 잡의 실제 상태다.
+    읽는 쪽의 `None`(검사 생략)과 뜻이 다르므로 같이 두지 않는다.
+    """
+    return auth["uid"] if auth else ANONYMOUS
 
 
 
@@ -215,7 +229,12 @@ def start_ai_optimize_job(
 def get_ai_optimize_job(job_id: str, _auth: Optional[dict] = Depends(optional_user), market: str = Depends(market_param)):
     """잡 상태 조회 (본인 잡 또는 비로그인 잡)."""
     # 남의 잡이면 존재 여부조차 알리지 않는다 (get 이 None 을 돌려준다).
-    job = _store.get(job_id, owner=(_auth or {}).get("uid"))
+    #
+    # 비로그인이면 `None` 이 아니라 `ANONYMOUS` 다. `(_auth or {}).get("uid")`
+    # 는 비로그인에 `None` 을 주는데, job_store 에서 `None` 은 **"소유자 검사를
+    # 하지 마"** 라는 뜻이라 익명 호출자가 검사 면제 경로를 탔다 — 위 주석이
+    # 로그인 호출자에게만 참이었다.
+    job = _store.get(job_id, owner=_job_owner(_auth))
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
@@ -224,5 +243,6 @@ def get_ai_optimize_job(job_id: str, _auth: Optional[dict] = Depends(optional_us
 @router.delete("/ai-optimize-job/{job_id}")
 def cancel_ai_optimize_job(job_id: str, _auth: Optional[dict] = Depends(optional_user), market: str = Depends(market_param)):
     """잡 취소 (본인 잡 또는 비로그인 잡)."""
-    _store.cancel(job_id, owner=(_auth or {}).get("uid"))
+    # 조회와 같은 판정을 지난다 — 읽을 수 없는 잡은 취소도 못 한다.
+    _store.cancel(job_id, owner=_job_owner(_auth))
     return {"ok": True}
