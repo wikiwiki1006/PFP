@@ -200,10 +200,6 @@ _KNOWN = {
         "거래 조회가 실패해도 '거래 기록 없음'",
     "pages/AlphaTerminal.tsx::SectorPerfPanel::sectorTableQ":
         "섹터표 조회가 실패해도 '데이터 없음'",
-    "pages/LensReport.tsx::EquityTab::histQ":
-        "주식 리포트 목록 — agent/develop 76727f2 에서 고침, 병합되면 이 줄을 지운다",
-    "pages/LensReport.tsx::IndustryTab::histQ":
-        "산업 리포트 목록 — 같은 커밋에서 고침, 병합되면 이 줄을 지운다",
     "pages/LensReport.tsx::HistoryTab::histQ":
         "위 둘과 같은 파일인데 **안 고쳐졌다** — 세 번째 자리",
     "pages/MacroScenario.tsx::MacroScenario::histQ":
