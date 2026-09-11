@@ -280,6 +280,77 @@ def test_an_unknown_tier_is_silently_treated_as_basic(two_users):
     )
 
 
+# ── 공용 리포트: 저장 키에 **등급이 없다** ─────────────────────────────────────
+#
+# `find_fresh_shared_report` 는 `model_tier` 를 **신원의 일부로** 다룬다 —
+# 심층을 요청한 사람에게 기본을 주지 않는다. 그런데 저장 키는
+# `(market, filename)` 이고 파일명은 `lens_{ticker}_{date}.md` 라 등급이 없다.
+# **조회가 다르다고 보는 둘이 한 행을 쓴다.**
+#
+# 실측 결과:
+#   A 가 심층 저장 → id=602
+#   B 가 기본 요청 → 재사용 안 됨(등급 다름, 맞다) → 기본 생성 → **같은 행을 덮음**
+#   A 의 목록에는 그 항목이 남고(소유자는 A), 열면 **기본 내용**이 나온다
+#   A 의 심층 결과는 사라졌고, 다시 심층을 요청하면 새로 만든다
+#
+# 심층은 `deep_analysis_usage` 로 하루 한 번 제한을 걸 수 있는 기능이다.
+# 즉 **남의 기본 요청 하나가 내 그날치 심층 결과를 지운다.**
+#
+# 개인 데이터는 아니지만 뿌리는 같다 — 조회가 쓰는 신원과 저장이 쓰는 키가
+# 어긋나 있다. 고치는 방법은 둘 중 하나다: 파일명에 등급을 넣거나
+# (`lens_{ticker}_{tier}_{date}.md`), 공용 유니크 인덱스에
+# `COALESCE(metadata->>'model_tier','basic')` 을 넣거나. 어느 쪽이든
+# `ON CONFLICT` 대상도 같이 바뀐다.
+#
+# 고칠 자리가 `backend/db/` 와 `backend/routers/` 라 이 창 소유가 아니다.
+
+@pytest.mark.xfail(strict=True, reason=(
+    "공용 리포트의 저장 키에 model_tier 가 없다. 조회는 등급을 신원으로 "
+    "다루는데 저장은 (market, filename) 이라, 남의 기본 리포트가 내 심층 "
+    "리포트 행을 덮는다. 고칠 자리가 backend/db/ 와 backend/routers/ 라 "
+    "이 창 소유가 아니다."))
+def test_a_basic_report_does_not_overwrite_a_deep_one(two_users):
+    """등급이 다르면 서로를 덮지 않는다 — 조회가 그 둘을 다르게 보므로."""
+    fn = "lens_AAPL_2026-09-11.md"          # 라우터가 만드는 실제 형식
+    rr.save_report(fn, "심층 리서치", report_type="equity_research",
+                   metadata={"model_tier": "deep"}, user_id=ALICE,
+                   scope="shared", subject_key="AAPL")
+    rr.save_report(fn, "기본 리서치", report_type="equity_research",
+                   metadata={"model_tier": "basic"}, user_id=BOB,
+                   scope="shared", subject_key="AAPL")
+
+    assert rr.find_fresh_shared_report("equity_research", "AAPL",
+                                       model_tier="deep") is not None, (
+        "a basic report overwrote a deep one -- the lookup treats the two "
+        "tiers as different products, so they must not share one row. Deep "
+        "runs are quota-limited, so someone else's basic request destroys "
+        "that day's deep result."
+    )
+
+
+def test_this_is_what_the_tier_collision_does_today(two_users):
+    """지금 동작을 적어 둔다 — 위 xfail 이 무엇을 기다리는지.
+
+    고쳐지는 순간 이 검사도 같이 빨개져서 둘을 함께 지우게 한다.
+    """
+    fn = "lens_AAPL_2026-09-11.md"
+    first = rr.save_report(fn, "심층 리서치", report_type="equity_research",
+                           metadata={"model_tier": "deep"}, user_id=ALICE,
+                           scope="shared", subject_key="AAPL")
+    second = rr.save_report(fn, "기본 리서치", report_type="equity_research",
+                            metadata={"model_tier": "basic"}, user_id=BOB,
+                            scope="shared", subject_key="AAPL")
+
+    assert first == second, "전제: 같은 행을 덮는다"
+    assert _rows(fn) == [(ALICE, "기본 리서치")], (
+        f"the tier collision no longer behaves this way: {_rows(fn)} -- update "
+        "or delete this note together with the xfail above."
+    )
+    assert rr.get_report_content(fn, ALICE) == "기본 리서치", (
+        "앨리스가 자기 목록의 심층 항목을 열면 기본 내용이 나온다"
+    )
+
+
 def test_a_shared_report_does_not_cross_markets(two_users):
     """한국 리포트가 미국 요청에 나오면 안 된다 (§1.1).
 
