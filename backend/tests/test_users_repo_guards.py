@@ -160,14 +160,26 @@ def test_the_guards_stay_closed_when_the_database_is_not_configured(monkeypatch)
     쓰면서 실제로 그 함정에 빠졌다 — 풀이 닫힌 채로는 `except` 블록에
     **도달조차 하지 않는데**, 옆 검사가 열어 둔 풀 덕분에 통과하고 있었다.
     """
+    from backend.db import DBBusy
+
     monkeypatch.setattr(users_repo, "is_available", lambda: False)
 
     assert users_repo.is_admin("anyone") is False
     assert users_repo.set_admin("anyone", True) is False
     assert users_repo.username_taken("anything") is True
-    assert users_repo.find_by_email("someone@example.com") is None
     assert users_repo.touch_login("anyone") is False
     assert users_repo.delete_user("anyone") == {"deleted": False}
+
+    # `find_by_email` 만 **값이 아니라 예외**로 닫는다. 이 함수에서는 None 이
+    # "그런 계정 없음" 이고, 호출부가 그 답을 근거로 인증 계정을 지운다 —
+    # 즉 None 은 닫힌 값이 아니라 **열린 값**이다. 옆줄의
+    # `username_taken → True` 와 같은 자리에 놓으려면 못 읽었다고 말해야
+    # 한다. (`test_account_lookup_failure_is_not_absence.py` 참고)
+    with pytest.raises(DBBusy):
+        users_repo.find_by_email("someone@example.com")
+
+    # 입력이 없는 것은 진짜 "없음" 이다 — DB 를 볼 것도 없다.
+    assert users_repo.find_by_email("") is None
 
 
 def test_an_unused_username_is_free(rows):
