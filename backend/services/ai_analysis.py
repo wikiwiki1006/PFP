@@ -240,7 +240,12 @@ def gather_yfinance_market_data(market: str = "US") -> str:
                     if cur_price:
                         data_source = "DB 캐시"
         except Exception:
-            pass
+            # ①: 아래 ②(yfinance 직접)가 이어받고, 둘 다 실패하면 프롬프트에
+            # "(market price data unavailable …)" 이 적힌다. 그래서 계속 가되
+            # 조용히 가지는 않는다 — 캐시가 상시 죽어 있어도 ②가 매번 받아내면
+            # 지표는 나오고 비용과 지연만 늘어난다. 그 상태가 로그에 안 남는다.
+            logger.warning("시장 지표 DB 캐시 조회 실패 — yfinance 직접 조회로 진행",
+                           exc_info=True)
 
         # 2) 직접 yfinance 다운로드 (핵심 지수 누락 시)
         core_ok = all(t in cur_price for t in ("^GSPC", "^IXIC", "^KS11"))
@@ -269,7 +274,9 @@ def gather_yfinance_market_data(market: str = "US") -> str:
                         if cur_price:
                             data_source = "yfinance 직접"
             except Exception:
-                pass
+                # ②까지 실패하면 아래 `if not cur_price:` 가 프롬프트에 못 받았다고
+                # 적는다. 모델에게는 그걸로 충분하지만 원인은 여기에만 있다.
+                logger.warning("yfinance 시장 지표 직접 조회 실패", exc_info=True)
 
         if not cur_price:
             lines.append("  (market price data unavailable — network error or DB not ready)")
@@ -296,16 +303,27 @@ def gather_yfinance_market_data(market: str = "US") -> str:
 
             lines.append("")
             lines.append("  [Sector ETF 1d change]")
+            # 못 구한 섹터는 **이름을 모아 적는다.** 그냥 빼면 모델은 짧아진
+            # 목록을 전부로 읽고 "이 섹터들만 움직였다" 를 쓴다. 어느 섹터가
+            # 빠졌는지 모르면 그게 조회 실패인지 원래 없는 섹터인지도 모른다.
+            missing_sectors: list[str] = []
             for t, name in SECTOR_TICKERS:
                 c = cur_price.get(t)
                 p = prev_price.get(t)
                 if c is None or p is None:
+                    missing_sectors.append(name)
                     continue
                 try:
                     chg = (c / p - 1) * 100
                     lines.append(f"  {name}: {chg:+.2f}%")
                 except Exception:
-                    pass
+                    # p 가 0 이면 여기로 온다 — 0 은 가격이 아니다.
+                    logger.warning("섹터 변동률 계산 실패 (%s, cur=%s prev=%s)",
+                                   t, c, p, exc_info=True)
+                    missing_sectors.append(name)
+            if missing_sectors:
+                logger.warning("섹터 변동률 누락: %s", ", ".join(missing_sectors))
+                lines.append(f"  (미수집: {', '.join(missing_sectors)} — 이 섹터는 판단에서 제외하세요)")
 
         # 거시 지표 — 시장에 맞는 것을 넣는다.
         # 한국 시나리오에 Fed 금리·미국 실업률을 넣으면 모델이 그걸 근거로
@@ -476,7 +494,11 @@ def call_gpt(prompt: str, max_tokens: int, perplexity_ctx: str = "") -> str:
                         if tail.strip():
                             text += tail
             except Exception:
-                pass
+                # 보수에 실패하면 잘린 원문이 그대로 리포트에 간다. 원문은
+                # 모델이 실제로 쓴 것이라 거짓은 아니지만, 문장이 중간에서
+                # 끊긴 이유가 어디에도 안 남는다.
+                logger.warning("GPT 잘린 응답 보수 실패 — 잘린 원문 그대로 사용",
+                               exc_info=True)
         return text
     except Exception as exc:
         return f"[GPT 오류: {exc}]"
@@ -1049,6 +1071,16 @@ def run_macro_agents(
 # ── Final Verdict JSON 파싱 ───────────────────────────────────────────────────
 
 def parse_verdict_cards(raw_text: str) -> list[dict] | None:
+    """판정 카드 JSON 파싱. 온전한 파싱 → 잘린 JSON 복구 → 실패 시 None.
+
+    앞 두 단계의 실패는 **설계된 폴백**이다. 모델 출력이 토큰 한도에서 잘리는
+    일이 흔해서 복구 경로를 따로 둔 것이라, 1단계 실패는 정상 동작에 가깝다.
+    그래서 그 둘은 `debug` 로 남긴다 — `warning` 으로 올리면 정상 상황에서
+    경고가 쏟아지고, 그러면 아무도 경고를 안 본다.
+
+    반면 **둘 다 실패한 것**은 다르다. 그때는 판정 카드가 통째로 없는 리포트가
+    나가고, 호출자는 `None` 을 받아 그 섹션을 비운다. 그건 남긴다.
+    """
     VALID_COLORS = {"danger", "warning", "success", "info"}
 
     def _normalize(cards: list[dict]) -> list[dict]:
@@ -1065,7 +1097,8 @@ def parse_verdict_cards(raw_text: str) -> list[dict] | None:
             if isinstance(cards, list) and cards:
                 return _normalize(cards)
     except Exception:
-        pass
+        logger.debug("판정 카드 JSON 파싱 실패 — 잘린 JSON 복구를 시도한다",
+                     exc_info=True)
 
     # 잘린 JSON 부분 복구
     try:
@@ -1085,26 +1118,41 @@ def parse_verdict_cards(raw_text: str) -> list[dict] | None:
                             if "title" in obj:
                                 recovered.append(obj)
                         except Exception:
-                            pass
+                            # 조각 단위 복구다. 못 읽는 조각이 섞여 있는 것이
+                            # 이 경로의 전제라 건너뛰는 것이 맞다.
+                            logger.debug("판정 카드 조각 복구 실패", exc_info=True)
                     start = None
                 depth -= 1
         if recovered:
             return _normalize(recovered)
     except Exception:
-        pass
+        logger.debug("잘린 판정 카드 복구 경로 자체가 실패", exc_info=True)
 
+    # 여기까지 왔으면 카드가 하나도 없다. 호출자는 None 을 받아 그 섹션을
+    # 비우는데, 화면에서는 '판정이 없는 리포트' 와 '판정을 못 읽은 리포트' 가
+    # 똑같이 보인다. 둘을 구별할 수 있는 곳은 여기뿐이다.
+    logger.warning("판정 카드를 파싱하지 못했다 — 리포트에서 판정 섹션이 빈다 (%d자)",
+                   len(raw_text or ""))
     return None
 
 
 def parse_portfolio_actions(raw_text: str) -> list[dict] | None:
+    """포트폴리오 액션 JSON 파싱. 실패하면 None.
+
+    카드 쪽과 달리 **복구 경로가 없다.** 한 번 실패하면 그걸로 끝이고,
+    사용자는 액션 제안이 없는 리포트를 받는다. 그래서 `debug` 가 아니라
+    `warning` 이다 — 여기가 유일한 신호다.
+    """
     try:
         match = re.search(r"\[.*\]", raw_text, re.DOTALL)
         if match:
             actions = json.loads(match.group())
             if isinstance(actions, list):
                 return actions
+        logger.warning("포트폴리오 액션 JSON 배열을 찾지 못했다 (%d자)", len(raw_text or ""))
     except Exception:
-        pass
+        logger.warning("포트폴리오 액션 파싱 실패 — 액션 섹션이 빈다 (%d자)",
+                       len(raw_text or ""), exc_info=True)
     return None
 
 
@@ -1259,12 +1307,15 @@ def generate_daily_brief(
             f" = 총자산 {_fmt_price(stock_val + cash_val, cur)}"
         )
 
-    if not held:
-        pass
-    elif no_pnl:
-        total_line += f"  ·  오늘 손익 합계: {', '.join(no_pnl)} 데이터 없음 — 합산 불가"
-    else:
-        total_line += f"  ·  오늘 손익 합계 {_fmt_price(_sum('day_pnl'), cur)}"
+    # 보유가 있을 때만 손익 합계를 붙인다. 현금만 있는 계좌에 `₩0` 을 적으면
+    # '오늘 손익 0' 이라는 관측이 되는데, 실제로는 더할 것이 없었을 뿐이다
+    # (§1.3a). 예전에는 `if not held: pass` 로 써서 예외를 삼키는 자리처럼
+    # 보였다 — 삼키는 게 아니라 붙일 것이 없는 경우다.
+    if held:
+        if no_pnl:
+            total_line += f"  ·  오늘 손익 합계: {', '.join(no_pnl)} 데이터 없음 — 합산 불가"
+        else:
+            total_line += f"  ·  오늘 손익 합계 {_fmt_price(_sum('day_pnl'), cur)}"
 
     # `get_portfolio_news` 는 `headline` 키를 준다. 여기서는 `n['title']` 을
     # 읽고 있었고, 그건 **뉴스가 하나라도 있으면 KeyError → 500** 이다.
