@@ -57,16 +57,27 @@ def _portfolio_close_df(
     period: str = "2y",
     ttl: int = 3600,
     extra_tickers: list | None = None,
+    market: str = "US",
 ):
     """
     포트폴리오 전용 close_df.
     extra_tickers: 현재 미보유이나 이력이 필요한 종목 (매도 완료 종목 등).
     metrics 와 equity-curve 가 동일 파라미터로 호출 → 두 번째 요청은 메모리 캐시 히트.
+
+    벤치마크는 **시장을 따라간다** (US→^GSPC, KR→^KS11). 예전에는 ^GSPC 가
+    하드코딩이라 한국 포트폴리오의 프레임에 ^KS11 이 없었고, 베타·알파가
+    계산 자체를 못 해 영구히 null 이었다 — 응답은 benchmark_label 로
+    "코스피" 라고 말하면서 값은 비어 있는 상태였다.
+
+    ^VIX 는 시장과 무관하게 남긴다. VKOSPI 를 야후가 주지 않아(^VKOSPI ·
+    ^VKOSPI200 · VKOSPI.KS · ^KSVKOSPI 전부 0건) 한국 화면에서도 미국 VIX 를
+    쓰고, 그 사실은 라벨("변동성 (미국 VIX)")로 밝힌다.
     """
+    from backend.services.markets import benchmark_for
     tickers = sorted(set(
         [t for t in holdings if t != "CASH"]
         + (extra_tickers or [])
-        + ["^GSPC", "^VIX"]
+        + [benchmark_for(market), "^VIX"]
     ))
     df = get_close_df(tickers, period=period, ttl=ttl, include_market=False)
     df = _inject_live(df)
@@ -856,7 +867,8 @@ def get_metrics(_auth: dict = Depends(current_user), market: str = Depends(marke
         if str(tr.get("ticker", "")).upper() not in ("CASH", "")
     })
     _period = _period_covering_first_trade(trade_log)
-    close_df = _portfolio_close_df(holdings, period=_period, ttl=300, extra_tickers=traded_tickers)
+    close_df = _portfolio_close_df(holdings, period=_period, ttl=300,
+                                   extra_tickers=traded_tickers, market=market)
     if close_df.empty:
         raise HTTPException(status_code=400, detail="가격 데이터 없음")
     equity_curve = build_equity_curve(holdings, trade_log, close_df, market=market)
@@ -935,7 +947,8 @@ def get_equity_curve(
         if str(tr.get("ticker", "")).upper() not in ("CASH", "")
     })
     _period = _period_covering_first_trade(trade_log)
-    close_df = _portfolio_close_df(holdings, period=_period, ttl=300, extra_tickers=traded_tickers)
+    close_df = _portfolio_close_df(holdings, period=_period, ttl=300,
+                                   extra_tickers=traded_tickers, market=market)
 
     return_pct, holdings_by_date, initial_equity, cash_events, equity = build_return_pct_curve(
         holdings, trade_log, close_df, market=market)

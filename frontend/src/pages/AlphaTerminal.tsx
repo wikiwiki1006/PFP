@@ -241,7 +241,9 @@ type BenchmarkMode = 'sp500' | 'nasdaq' | 'both'
 
 type CurvePoint = {
   date: string
-  port: number
+  /** undefined = 그 날짜의 포트폴리오 수익률을 모른다 (시세 이력 시작 전 등).
+   *  0 으로 채우면 정체한 것처럼 그려지므로 선을 끊는다. sp 와 같은 취급이다. */
+  port?: number
   sp?: number
   nasdaq?: number
   total_equity?: number
@@ -369,7 +371,12 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
         ? +((nc / firstNqPrice - 1) * 100).toFixed(2) : undefined
       return {
         date:         d.date,
-        port:         rebase(d.port, basePort) ?? 0,
+        // `?? 0` 을 쓰지 않는다. 값이 없는 구간을 0% 로 채우면 **포트폴리오가
+        // 그동안 정체한 것처럼** 그려진다 — 같은 구간에서 벤치마크 선은
+        // 움직이므로 "시장은 올랐는데 내 포트폴리오만 제자리" 로 읽힌다.
+        // 바로 아래 sp 는 이미 undefined 로 두고 있었다. 값을 모르는 구간은
+        // 선을 끊는 게 맞다.
+        port:         rebase(d.port, basePort),
         sp:           rebase(d.sp, baseSp),
         nasdaq:       nv,
         total_equity: d.total_equity ?? undefined,
@@ -540,7 +547,9 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
             <span style={{ color: '#00e6ff' }}>●</span>
             <span className="text-[#94a3b8] text-[10px]">포트폴리오</span>
           </span>
-          <span className="font-mono font-bold" style={{ color: d.port >= 0 ? '#10b981' : '#ef4444' }}>{fp(d.port, 2)}</span>
+          {/* 값이 없으면 회색 '—'. raw 삼항이면 `null >= 0` 이 거짓이라
+              **계산 불가가 빨강(손실)** 으로 칠해진다. */}
+          <span className="font-mono font-bold" style={{ color: chgColor(d.port) }}>{fp(d.port, 2)}</span>
         </div>
         {d.sp != null && (bm === 'sp500' || bm === 'both') && (
           <div className="flex items-center justify-between gap-3 mb-0.5">
