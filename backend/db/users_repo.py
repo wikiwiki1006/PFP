@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from backend.db import get_conn, is_available
+from backend.db import DBBusy, get_conn, is_available
 
 logger = logging.getLogger(__name__)
 
@@ -215,9 +215,31 @@ def find_by_email(email: str) -> Optional[dict]:
     """이메일로 계정 조회. 가입 공급자가 겹치는지 판단하는 데만 쓴다.
 
     find_by_username 과 마찬가지로 결과를 그대로 클라이언트에 내보내면 안 된다.
+
+    **못 읽었으면 None 을 돌려주지 않고 올려보낸다.** 이 함수에서 None 은
+    "그런 계정이 없다" 는 단정이고, 호출자가 그걸 근거로 되돌릴 수 없는 일을
+    한다 — `routers/auth.py` 의 `_reconcile_account` 는 "DB 행은 없는데 인증
+    계정은 있다" 를 잔해로 보고 **Firebase 인증 계정을 지운다.** DB 가 잠깐
+    끊긴 동안 그 경로를 타면 실사용자가 로그인할 수 없게 되고 되돌릴 방법이
+    없다. 이메일만 알면 인증 없이 `/signup` 으로 부를 수 있는 경로다.
+
+    그래서 이 함수의 '닫힌 값' 은 None 이 아니라 예외다 (§1.3(c)). 다섯
+    호출부가 전부 개선된다 — `main.py` 의 DBBusy 핸들러가 503 을 준다:
+      · /email-available   "사용 가능" (틀림)      → 503
+      · _reconcile_account 인증 계정 삭제 (영구)   → 503, 삭제 안 함
+      · /login             401 "비밀번호 틀림"     → 503
+      · 소셜 가입          중복 검사 통과 → 계정 갈라짐 → 503
+      · 비밀번호 재설정     404 "가입되지 않은 이메일" → 503
+
+    DBBusy 만 올리지 않고 모든 예외를 올린다. 가장 흔한 실패인 연결 끊김은
+    psycopg2.OperationalError 이지 DBBusy 가 아니라서, 좁게 잡으면 정작
+    주요 실패를 놓친다. 읽는 데 성공했는데 행이 없으면 아래 `if r else None`
+    으로 나가므로, except 에 도달했다는 것 자체가 "판단 불가" 다.
     """
-    if not is_available() or not email:
-        return None
+    if not email:
+        return None          # 물어볼 것이 없다 — 이건 진짜 "없음" 이다
+    if not is_available():
+        raise DBBusy("DB 미연결 — 계정 조회 불가")
     try:
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
@@ -227,9 +249,11 @@ def find_by_email(email: str) -> Optional[dict]:
             r = cur.fetchone()
         return {"uid": r[0], "username": r[1], "provider": r[2],
                 "disabled": bool(r[3])} if r else None
+    except DBBusy:
+        raise
     except Exception as e:
         logger.error(f"find_by_email 실패: {e}")
-        return None
+        raise DBBusy("계정 조회 실패") from e
 
 
 def set_username(uid: str, username: str) -> bool:
