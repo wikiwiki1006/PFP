@@ -61,7 +61,11 @@ def metrics_call(monkeypatch):
                         lambda *a, **kw: pd.Series([1000.0, 1100.0, 1200.0], index=_DATES))
     monkeypatch.setattr(portfolio_router, "calculate_metrics",
                         lambda *a, **kw: dict(_BASE_METRICS))
-    monkeypatch.setattr(portfolio_router, "_is_market_open", lambda *a, **kw: False)
+    # 실시간 조회를 막는다. 예전에는 `_is_market_open` 을 False 로 눌렀는데,
+    # 그 게이트가 라우터에서 사라졌다 — 미국 개장 여부로 한국 종목까지
+    # 걸러 버려서, 티커별 판단(_get_live_prices)으로 옮겼기 때문이다.
+    # 이 테스트가 막으려던 것은 네트워크 호출이므로 그 지점을 직접 누른다.
+    monkeypatch.setattr(portfolio_router, "_get_live_prices", lambda *a, **kw: {})
 
     def call():
         return portfolio_router.get_metrics(_auth={"uid": UID}, market=MARKET)

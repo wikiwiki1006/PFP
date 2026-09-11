@@ -34,7 +34,7 @@ from backend.services.portfolio_calculator import (
 
 # ─── 시세·현금·섹터 로직은 services 로 분리 ──────────────────────────────────
 from backend.services.live_prices import (
-    _is_market_open, _get_live_prices, _ensure_prev_close, _inject_live,
+    _get_live_prices, _ensure_prev_close, _inject_live,
 )
 from backend.services.cash_ledger import (
     _cash_event_delta, _revert_cash_event, _cash_delta, _adjust_cash,
@@ -874,7 +874,13 @@ def get_metrics(_auth: dict = Depends(current_user), market: str = Depends(marke
     # 포트폴리오 변동률이 실제보다 작게 나온다.
     if _1d_tickers and not raw_df.empty:
         raw_df = _ensure_prev_close(raw_df, _1d_tickers)
-    live = _get_live_prices(_1d_tickers) if (_1d_tickers and _is_market_open()) else {}
+    # 개장 여부로 미리 거르지 않는다. _is_market_open() 은 **미국** 하나만
+    # 답하는데 보유 목록에는 시장이 섞인다 — KRX 정규장(ET 20:00~02:30)에는
+    # False 라 한국 종목의 실시간이 통째로 막혔다. 반대로 미국장 시간에는
+    # True 라 KRX 가 닫힌 한국 종목까지 계속 조회했다.
+    # 가격이 변할 수 있는지는 _get_live_prices 가 티커별로 판단한다
+    # (market_calendar.price_can_move).
+    live = _get_live_prices(_1d_tickers) if _1d_tickers else {}
     metrics = calculate_metrics(holdings, close_df, equity_curve, raw_df=raw_df,
                                 live=live, market=market)
 
@@ -966,8 +972,11 @@ def get_holdings_detail_endpoint(_auth: dict = Depends(current_user), market: st
     # 전일 종가가 없는 종목(DB에 1행만 존재)을 yfinance에서 보완
     raw_df = _ensure_prev_close(raw_df, tickers)
 
-    # 장중에만 실시간 가격 사용. 장 외에는 마지막 확정 종가 기준으로 계산된다.
-    live = _get_live_prices(tickers) if _is_market_open() else {}
+    # 장중에만 실시간 가격을 쓰는 것은 맞지만, **어느 장인지는 티커마다 다르다.**
+    # _is_market_open() 은 미국 하나만 답해서 한국 종목이 장중 내내 종가로
+    # 표시됐다 — 실측으로 삼성전자가 269,000(전일 종가) 대 259,250(실시간)
+    # 으로 3.6% 과대 표시됐다. _get_live_prices 가 티커별로 거른다.
+    live = _get_live_prices(tickers)
 
     rows = get_holdings_detail(holdings, raw_df, live=live)
 
