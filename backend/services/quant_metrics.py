@@ -13,11 +13,14 @@ services/quant_metrics.py
 """
 from __future__ import annotations
 
+import logging
 import math
 from typing import Optional
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 
 def _f(v, default: float = 0.0) -> float:
@@ -209,7 +212,22 @@ def compute_optimizer_context(
         w = hrp_weights(cov, corr)
         target = round(float(w.get(ticker, 0.0)) * 100, 2)
     except Exception:
-        pass
+        # 개별 로그로 남긴다 — 실제 DB 표본 120회에서 예외가 0건이라 소음이
+        # 되지 않고, 드문 만큼 났을 때 이유가 필요하다.
+        #
+        # 도달 경로가 있다: 보유 종목 중 하나가 상수 가격이면(거래정지·상장폐지
+        # 대기) 그 열의 분산이 0 이라 `rets.corr()` 에 NaN 이 생기고, scipy 가
+        # "condensed distance matrix must contain only finite values" 로 거부한다.
+        # 그러면 **목표 비중만** 조용히 사라진다 — 나머지 필드는 다 계산되고
+        # note 도 None 이라 화면에는 이유 없이 '—' 만 뜬다.
+        # NaN 이 있는 열을 나열하면 전부 나온다 — 한 종목의 NaN 상관이 모든
+        # 행으로 퍼지기 때문이다. 원인은 **분산이 0 인 열**이라 그것만 짚는다.
+        flat = [c for c in rets.columns if not (float(rets[c].var()) > 0)]
+        logger.warning(
+            "HRP 목표 비중 계산 실패 (%s, 유니버스 %d종목) — 목표 비중만 빠진다. "
+            "가격이 상수인 종목: %s",
+            ticker, len(cols), flat or "없음", exc_info=True,
+        )
 
     # ── 현재 비중 (평가금액 기준) ─────────────────────────────────────────
     last = px.iloc[-1]
@@ -258,7 +276,10 @@ def compute_optimizer_context(
                 if mv > 1e-12:
                     beta = round(float(np.cov(rets[ticker].loc[common], mkt.loc[common])[0, 1] / mv), 3)
     except Exception:
-        pass
+        # 이 블록은 예외 없이도 None 이 된다 (^GSPC 없음 · 공통 구간 60일 미만 ·
+        # 시장 분산 0). 그 셋은 정상 경로이므로 로그를 남기지 않는다 — 여기는
+        # **예외만** 잡으므로 실제로 계산이 깨진 경우다.
+        logger.warning("베타 계산 실패 (%s) — 베타만 빠진다", ticker, exc_info=True)
 
     return {
         "target_weight":     target,
