@@ -69,11 +69,22 @@ export const DEMO_SECTOR_WEIGHTS: SectorWeights = {
   Cash:                8.0,
 }
 
-/** 2년치 주간 곡선 — 완만한 우상향에 조정 구간을 섞어 실제처럼 보이게 한다. */
+/** 2년치 주간 곡선 — 완만한 우상향에 조정 구간을 섞어 실제처럼 보이게 한다.
+ *
+ *  **서버 응답과 같은 모양이어야 한다.** 예전에는 `{ value, benchmark_value }`
+ *  를 만들었는데 서버는 `{ port, benchmark_pct, total_equity, ... }` 를 준다.
+ *  AlphaTerminal 은 서버 쪽 키를 읽으므로 비로그인 방문자의 미리보기
+ *  자산곡선이 통째로 비어 있었다 — firstOf('port') 가 전 포인트에서 null 이라
+ *  선이 그려지지 않았다.
+ *
+ *  데모 상수는 타입 선언이 아니라 **실제 응답**을 따라야 한다. 타입이 틀리면
+ *  데모가 그 틀린 모양을 성실히 따라가고, 그게 화면에서만 드러난다. */
 export const DEMO_EQUITY_CURVE: EquityCurvePoint[] = (() => {
   const pts: EquityCurvePoint[] = []
   let v = 100_000
   let b = 100_000
+  const v0 = 100_000
+  const b0 = 100_000
   const start = new Date('2024-08-01T00:00:00Z')
   // 결정적 유사난수 — 렌더마다 곡선이 달라지지 않도록 시드를 고정한다.
   let seed = 42
@@ -86,9 +97,14 @@ export const DEMO_EQUITY_CURVE: EquityCurvePoint[] = (() => {
     v *= 1 + drawdown + (rnd() - 0.42) * 0.022
     b *= 1 + drawdown * 0.7 + (rnd() - 0.44) * 0.016
     pts.push({
-      date: d.toISOString().slice(0, 10),
-      value: Math.round(v),
-      benchmark_value: Math.round(b),
+      date:          d.toISOString().slice(0, 10),
+      // 서버는 금액이 아니라 **누적 수익률(%)** 을 준다.
+      port:          +((v / v0 - 1) * 100).toFixed(2),
+      benchmark_pct: +((b / b0 - 1) * 100).toFixed(2),
+      total_equity:  Math.round(v),
+      cash_flow:     null,
+      trades:        [],
+      holdings:      [],
     })
   }
   return pts
