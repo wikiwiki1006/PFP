@@ -27,11 +27,41 @@ import numpy as np
 import pandas as pd
 
 from backend.services.market_calendar import (
+    KST,
     _holidays_for_year,
+    kr_price_cutoff,
     now_et,
+    now_kst,
     us_price_cutoff,
+    uses_kr_session_calendar,
     uses_us_session_calendar,
 )
+
+
+def _market_now(ticker: str, now: Optional[datetime]) -> datetime:
+    """티커가 상장된 거래소 기준 현재 시각.
+
+    이 모듈은 '오늘'을 `now_et()` 로만 정의하고 있었다. 한국 종목에는 틀린다.
+    KRX 정규장 09:00~15:30 KST 는 ET 로 20:00~02:30 이라, **한국장이 열려
+    있는 동안 ET 날짜는 하루 뒤처져 있다.**
+
+    그래서 장중 실시간 가격이 들어오면 `daily_change` 가 '오늘 이전의 마지막
+    종가'를 ET 날짜로 잘랐고, 어제(KST) 종가가 '오늘'로 분류돼 전일 종가에서
+    빠졌다. 실측 (2026-09-11 10:35 KST, 005930.KS):
+
+        프레임   09-08 269,500 · 09-09 269,500 · 09-10 269,000
+        실시간   258,500
+        결과     prev_close=269,500 (09-09)  chg=-4.08%   as_of=09-10
+        정답     prev_close=269,000 (09-10)  chg=-3.90%   as_of=09-11
+
+    이틀치 변동을 오늘 등락으로 부르고, 실시간 가격에 어제 날짜를 붙였다.
+    차이가 작아 보이는 건 이틀이 비슷했기 때문이고, 구조는 매일 틀린다.
+    """
+    if uses_kr_session_calendar(ticker):
+        if now is None:
+            return now_kst()
+        return now.astimezone(KST) if (KST is not None and now.tzinfo) else now
+    return now or now_et()
 
 
 class DailyChange(NamedTuple):
@@ -99,6 +129,17 @@ def _clean_series(raw_df: pd.DataFrame, ticker: str, now: Optional[datetime]) ->
         # ② 아직 거래가 시작되지 않은 날짜(장전의 오늘) 행 절단
         cutoff = pd.Timestamp(us_price_cutoff(now))
         s = s[s.index.normalize() <= cutoff]
+    elif uses_kr_session_calendar(ticker):
+        # 한국 종목에는 아무 필터도 없었다 — 미국 캘린더를 못 쓴다는 이유로
+        # 분기 전체를 건너뛰었고, 그래서 장전 유령행이 그대로 남았다.
+        # KRX 에도 컷오프가 있으니(kr_price_cutoff) 같은 처리를 한다.
+        #
+        # 휴장일 마스크는 걸지 않는다. KRX 캘린더는 관측 기반이라 소스에
+        # 구멍이 나면 멀쩡한 거래일이 빠지는데(2026-09-10 이 실제로 그랬다),
+        # 그걸 마스크로 쓰면 있는 종가를 지운다. 쓰기 쪽은 save_prices_to_db
+        # 가 이미 막고 있으므로 읽기에서 한 번 더 지울 이유가 없다.
+        cutoff = pd.Timestamp(kr_price_cutoff(_market_now(ticker, now)))
+        s = s[s.index.normalize() <= cutoff]
 
     return s
 
@@ -118,7 +159,7 @@ def daily_change(
     if s.empty:
         return None
 
-    n = now or now_et()
+    n = _market_now(ticker, now)
 
     if live_price is not None and live_price > 0:
         today = pd.Timestamp(n.date())
