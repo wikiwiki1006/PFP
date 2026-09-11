@@ -634,6 +634,7 @@ def refresh_user_prices(tickers: list[str]):
     import yfinance as yf
     from backend.db.market_cache import save_prices_to_db, save_snapshot, _yf_sem
     from backend.services.market_data import _cache   # in-memory 캐시 무효화용
+    from backend.services.price_series import daily_change
 
     if not tickers:
         return
@@ -648,6 +649,10 @@ def refresh_user_prices(tickers: list[str]):
                 progress=False, auto_adjust=True, threads=False,
             )
         if data.empty:
+            # 사용자가 새로고침을 눌렀는데 아무 일도 안 일어난 경우다.
+            # 로그가 없으면 그 사실을 알 단서가 어디에도 없다 (§1.3).
+            logger.warning("사용자 시세 새로고침: yfinance 빈 응답 (%d종목) — 갱신 없음",
+                           len(tickers))
             return
         close_raw = (
             data["Close"]
@@ -658,23 +663,31 @@ def refresh_user_prices(tickers: list[str]):
         if not close_for_db.empty:
             save_prices_to_db(close_for_db)
 
-        # 스냅샷: 티커별 마지막 2개 유효값으로 변동률 계산
+        # 스냅샷 — `_update_snapshot` 과 **같은 primitive** 를 쓴다.
+        #
+        # 예전에는 여기서 직접 계산하면서 관측치가 1개면 `p_f = c_f` 로 두었다.
+        # 그러면 전일 종가를 모르는 종목이 **변동률 0.0% = 보합**으로 나간다.
+        # `if p_f else 0.0` 도 같은 위장이다 (전일가가 0이면 0% 를 지어낸다).
+        # 사용자가 새로고침 버튼을 눌러서 도는 경로라 그 값이 바로 화면에 뜬다.
+        #
+        # 같은 파일 250줄 위(`_update_snapshot`)에 옳은 형태가 이미 있었다 —
+        # 한쪽만 고쳐져 있었다. 값을 못 구하면 건너뛴다: 스냅샷에 없으면
+        # 화면이 '—' 를 그리고, 0.0 은 '보합' 이라는 관측이 된다 (§1.3a).
         snap = {}
+        skipped = []
         for t in close_raw.columns:
-            series = close_raw[t].dropna()
-            if series.empty:
+            dc = daily_change(close_raw, str(t))
+            if dc is None or not math.isfinite(dc.price):
+                skipped.append(str(t))
                 continue
-            c_f = float(series.iloc[-1])
-            if not math.isfinite(c_f):
-                continue
-            p_f = float(series.iloc[-2]) if len(series) >= 2 else c_f
-            if not math.isfinite(p_f):
-                p_f = c_f
             snap[str(t)] = {
-                "price":         round(c_f, 4),
-                "change_1d":     round(c_f - p_f, 4),
-                "change_1d_pct": round((c_f / p_f - 1) * 100, 4) if p_f else 0.0,
+                "price":         round(dc.price, 4),
+                "change_1d":     round(dc.chg_val, 4),
+                "change_1d_pct": round(dc.chg_pct, 4),
             }
+        if skipped:
+            logger.warning("사용자 시세 새로고침: 변동률을 못 구해 건너뜀 %d종목 (%s)",
+                           len(skipped), ", ".join(skipped[:5]))
         if snap:
             save_snapshot(snap)
 
