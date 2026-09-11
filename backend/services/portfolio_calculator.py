@@ -406,6 +406,54 @@ def calculate_portfolio_beta(
         return None
 
 
+# ── 현재가 (총자산과 보유 목록이 같은 값을 쓰게 하는 단일 출처) ────────────────
+
+# (현재가, 직전종가, 일변동률, 기준일, 실시간여부)
+PricedRow = tuple[float, float, "float | None", object, bool]
+
+
+def _priced_holdings(
+    holdings: dict,
+    sparse_df: pd.DataFrame | None,
+    live: dict | None = None,
+    now=None,
+) -> dict[str, PricedRow]:
+    """보유 종목의 현재가. `sparse_df` 로 값을 못 내는 티커는 **빼고** 돌려준다.
+
+    `/metrics` 의 총자산과 `/holdings-detail` 의 행이 같은 가격을 쓰게 하려고
+    한 곳에 둔다. 예전에는 총자산만 종가 프레임(`close_df.ffill().iloc[-1]`)에서
+    나왔다. 장중에는 실시간이 붙은 행 합계와 종가로 만든 총자산이 갈라져,
+    화면 상단 "총 자산" 과 바로 아래 보유 목록의 합이 달랐다 — KRX 장중 실측
+    ₩75,960,000 vs ₩74,175,000, **₩1,785,000(2.4%) 차이**. 사용자가 표를
+    더해서 검산하는 자리라 어긋나면 바로 보인다.
+
+    실시간 게이트가 티커별로 갈리기 전에는 양쪽이 다 종가라 **우연히** 맞았다.
+    한쪽만 실시간이 되면서 벌어진 것이므로, 값을 한 곳에서 만들어 다시 갈라질
+    수 없게 한다. 두 함수가 같은 프레임·같은 `live`·같은 `now` 를 받으면
+    티커별 가격이 정의상 동일하다.
+    """
+    from backend.services.price_series import daily_change, last_price
+
+    out: dict[str, PricedRow] = {}
+    if sparse_df is None or sparse_df.empty:
+        return out
+    live = live or {}
+
+    for t in holdings:
+        if t == "CASH":
+            continue
+        dc = daily_change(sparse_df, t, live.get(t), now)
+        if dc is not None:
+            out[t] = (dc.price, dc.prev_close, dc.chg_pct, dc.as_of, dc.is_live)
+            continue
+        # 관측치가 1개뿐이라 변동률을 못 구해도 가격은 확보한다 — 여기서
+        # 빠뜨리면 시가총액·비중·손익이 전부 왜곡된다.
+        p = last_price(sparse_df, t, live.get(t), now)
+        if p:
+            out[t] = (p, p, None, None, bool(live.get(t)))
+    return out
+
+
 # ── 핵심 지표 계산 ─────────────────────────────────────────────────────────────
 
 def _market_open_flag(market: str = "US") -> bool:
@@ -491,9 +539,34 @@ def calculate_metrics(
     # 경로는 TWRR 로 현금흐름을 보정해 현금의 기회비용을 수익률에 반영하지
     # 않으므로, 폴백에 현금을 넣으면 **같은 필드가 경로에 따라 다른 정의**가 된다.
     # (현금 절반을 들고 있던 사용자는 실제 +0.08% 를 +0.04% 로 봤다.)
-    stock_equity = _safe_or(sum(_price(t) * holdings[t]["q"] for t in stock_tickers), 0.0)
+    #
+    # 가격은 `_priced_holdings` 에서 온다 — `/holdings-detail` 의 행과 **같은
+    # 출처**다. 종가 프레임(`price_df.iloc[-1]`)으로 내면 장중에 총자산만 어제
+    # 종가에 머물러 화면 아래 보유 목록 합계와 어긋난다 (실측 2.4%).
+    # `raw_df` 를 안 주는 호출자(analyst-feedback·리포트)는 종가 프레임으로
+    # 폴백한다 — 그쪽은 비교할 표가 화면에 없다.
+    priced = _priced_holdings(holdings, raw_df, live, now)
+    unpriced = [t for t in holdings
+                if t != "CASH" and t not in priced and t in close_df.columns]
+    if priced and unpriced:
+        # 총자산에서 이 종목들을 빼면 자산이 줄어든 것처럼 보인다. 종가로
+        # 채우되, 그 사실을 남긴다 — `/holdings-detail` 은 같은 티커를 ₩0 으로
+        # 표시하므로 표 합계와 총자산이 이 금액만큼 어긋난다.
+        logger.warning(
+            "실시간 프레임에 없는 보유 종목 %s — 총자산은 마지막 종가로 채웠다. "
+            "보유 목록 행은 0 으로 표시되므로 표 합계와 총자산이 그만큼 어긋난다.",
+            unpriced,
+        )
+
+    def _value_price(t):
+        row = priced.get(t)
+        return row[0] if row is not None else _price(t)
+
+    value_tickers = ([t for t in holdings if t != "CASH" and (t in priced or t in unpriced)]
+                     if priced else stock_tickers)
+    stock_equity = _safe_or(sum(_value_price(t) * holdings[t]["q"] for t in value_tickers), 0.0)
     stock_cost   = _safe_or(sum(_safe_or(holdings[t]["avg"], 0.0) * _safe_or(holdings[t]["q"], 0.0)
-                                for t in stock_tickers), 0.0)
+                                for t in value_tickers), 0.0)
 
     # 응답의 `total_equity` 는 현금을 포함한 **총자산**이다 (화면 라벨도 그렇다).
     total_equity = _safe_or(stock_equity + cash_val, 0.0)
@@ -549,7 +622,18 @@ def calculate_metrics(
     # 유령(ffill 복제) 행이면 정확히 0.0 을 반환하고, 애초에 두 행이
     # 연속된 거래일이라는 보장도 없다. 종목별 합산은 화면의 행 합계와도 일치한다.
     today_chg_val = today_chg_pct = None
-    as_of_str = None
+
+    # `as_of` 는 **`total_equity` 의 기준일**이다. 예전에는 일변동 primitive 의
+    # 기준일을 그대로 실었는데, 총자산은 어제 종가로 만들면서 일변동은 실시간
+    # 가격으로 만들고 있었다 — 09-10 종가로 계산한 총자산에 `as_of: 2026-09-11`
+    # 이 붙었다. 지금은 둘이 같은 가격에서 나오므로 한 날짜가 둘 다 설명한다.
+    as_of_ts = None
+    for _row in priced.values():
+        if _row[3] is not None and (as_of_ts is None or _row[3] > as_of_ts):
+            as_of_ts = _row[3]
+    if as_of_ts is None and len(close_df.index):
+        as_of_ts = close_df.index[-1]
+    as_of_str = as_of_ts.strftime("%Y-%m-%d") if as_of_ts is not None else None
     # 일변동이 무엇으로 만들어졌는지. 임계값은 두지 않고 사실만 싣는다.
     chg_counted = chg_holdings = 0
     chg_stale: list[str] = []
@@ -562,7 +646,6 @@ def calculate_metrics(
             if pc.chg_val is not None:
                 today_chg_val = _safe_or(pc.chg_val, 0.0)
                 today_chg_pct = _num_or_none(pc.chg_pct)
-                as_of_str = pc.as_of.strftime("%Y-%m-%d") if pc.as_of is not None else None
         except Exception:
             # 실패하면 아래 폴백이 에쿼티 곡선의 마지막 두 점으로 계산한다 —
             # 그 경로는 ffill 로 복제된 유령 행을 구분하지 못해 0% 를 낼 수 있다.
@@ -729,26 +812,12 @@ def get_holdings_detail(
     주말 행은 여기서 제거하지 않는다 — 암호화폐·환율의 실제 주말 거래를 보존해야 하고,
     미국 주식의 비거래일 필터링은 primitive 가 캘린더 기준으로 수행한다.
     """
-    from backend.services.price_series import daily_change, last_price
-
     if close_df.empty:
         return []
 
-    live = live or {}
-
-    # (현재가, 변동률, 기준일, 실시간여부)
-    ticker_px: dict[str, tuple[float, float, float | None, object, bool]] = {}
-    for t in holdings:
-        if t == "CASH":
-            continue
-        dc = daily_change(close_df, t, live.get(t), now)
-        if dc is not None:
-            ticker_px[t] = (dc.price, dc.prev_close, dc.chg_pct, dc.as_of, dc.is_live)
-        else:
-            # 관측치가 1개뿐이라 변동률을 못 구해도 가격은 반드시 확보한다.
-            # 여기서 0.0으로 떨어뜨리면 시가총액·비중·손익이 전부 왜곡된다.
-            p = last_price(close_df, t, live.get(t), now) or 0.0
-            ticker_px[t] = (p, p, None, None, bool(live.get(t)))
+    # 가격은 `calculate_metrics` 와 **같은 출처**에서 온다. 한쪽만 실시간이
+    # 되면서 "총 자산" 과 이 표의 합계가 갈라진 적이 있다 (실측 2.4%).
+    ticker_px = _priced_holdings(holdings, close_df, live, now)
 
     total_equity = sum(
         ticker_px.get(t, (0.0,))[0] * _safe_or(info.get("q", 0), 0.0)
