@@ -753,8 +753,22 @@ def calculate_metrics(
     # 않고 **아래 응답 조립 한 곳으로** 흐르게 한다 (조립을 두 벌 만들면
     # 필드가 늘 때 한쪽만 늘어난다 — 오늘 고친 결함들과 같은 형태다).
     # 주말(토·일) 행 제거 — ffill로 복사된 주말 데이터가 당일 변동률 0%를 만드는 버그 방지
-    close_df     = close_df[close_df.index.dayofweek < 5]
-    equity_curve = equity_curve[equity_curve.index.dayofweek < 5]
+    #
+    # **인덱스 종류를 먼저 본다.** 빈 프레임의 모양이 출처마다 갈린다:
+    #     get_close_df 실패      → 맨 `pd.DataFrame()`  → RangeIndex
+    #     build_equity_curve 빈값 → 이른 반환            → DatetimeIndex
+    # `RangeIndex.dayofweek` 는 AttributeError 라 `/metrics` 가 500 이 되고,
+    # 화면은 "보유 없음" 도 오류도 못 띄운다 — yfinance 가 한 번 흔들릴 때마다
+    # 그렇게 된다. 예전에는 위의 `{}` 조기 반환이 이 줄 **앞에서** 막아
+    # 주었는데, 그걸 없애면 가드가 사라진다.
+    #
+    # 같은 방어가 같은 파일에 이미 있다 — `_trim_to_session` 의
+    # `if not isinstance(close_df.index, pd.DatetimeIndex): return close_df`.
+    # 그 자리는 따라오지 않았다.
+    if isinstance(close_df.index, pd.DatetimeIndex):
+        close_df = close_df[close_df.index.dayofweek < 5]
+    if isinstance(equity_curve.index, pd.DatetimeIndex):
+        equity_curve = equity_curve[equity_curve.index.dayofweek < 5]
 
     # 비거래일(주말·공휴일)에 NaN이 생기지 않도록 ffill 적용
     price_df = close_df.ffill()

@@ -17,12 +17,35 @@ except ImportError:
     _HAS_PYPFOPT = False
 
 
-def _ratio_or_none(ratio: float | None, vol: float) -> "tuple[float | None, str | None]":
-    """분모(변동성)가 너무 작으면 비율을 내보내지 않는다. `(값, 이유코드)`.
+def _ratio_undefined_reason(ratio: float | None, vol: float) -> "str | None":
+    """비율이 성립하지 **않는** 이유. 성립하면 None.
 
-    이유를 값과 **같은 자리에서** 만든다 — 호출부가 따로 판정하면 세 곳이
-    각자 다른 이유를 붙일 수 있고, 그게 이 파일에서 하한이 셋으로 갈렸던
-    원인이다.
+    판정을 여기 한 곳에 둔다 — 호출부가 각자 판정하면 세 곳이 다른 이유를
+    붙일 수 있고, 그게 이 파일에서 하한이 셋(`> 0` · `> 1e-12` · 프론트
+    `> 0`)으로 갈렸던 원인이다. 값은 `_ratio_or_none` 이, 이유는 이 함수가
+    같은 판정에서 나온다.
+
+    분모를 **먼저** 본다. 호출자가 이미 None 을 만들어 넘겼어도(폴백 경로가
+    그 형태다) 이유는 분모에서 나오기 때문이다.
+    """
+    import math
+
+    from backend.services.portfolio_calculator import MIN_VOL_FOR_RATIO
+
+    if vol is None or not math.isfinite(float(vol)):
+        return "no_volatility"
+    if float(vol) <= MIN_VOL_FOR_RATIO:
+        return "no_volatility"
+    if ratio is None or not math.isfinite(float(ratio)):
+        return "not_finite"
+    return None
+
+
+def _ratio_or_none(ratio: float | None, vol: float) -> "float | None":
+    """분모(변동성)가 너무 작으면 비율을 내보내지 않는다.
+
+    판정은 `_ratio_undefined_reason` 이 한다 — 이 함수는 그 판정을 값으로
+    옮기기만 한다. 둘이 갈리면 "값은 있는데 이유도 있다" 같은 응답이 나온다.
 
     `vol > 0` 으로만 걸렀을 때 무엇이 나갔는지 실측했다. 매일 정확히 +0.05%
     오르는 결정론적 입력(연 +13.42%)의 동일비중 변동성은 **0 이 아니라
@@ -35,19 +58,7 @@ def _ratio_or_none(ratio: float | None, vol: float) -> "tuple[float | None, str 
 
     하한은 `portfolio_calculator.MIN_VOL_FOR_RATIO` 한 곳에서 읽는다.
     """
-    import math
-
-    from backend.services.portfolio_calculator import MIN_VOL_FOR_RATIO
-
-    # 분모를 **먼저** 본다. 호출자가 이미 None 을 만들어 넘겼어도 이유는
-    # 분모에서 나오기 때문이다 (`_max_sharpe_numpy` 가 그 형태다).
-    if vol is None or not math.isfinite(float(vol)):
-        return None, "no_volatility"
-    if float(vol) <= MIN_VOL_FOR_RATIO:
-        return None, "no_volatility"
-    if ratio is None or not math.isfinite(float(ratio)):
-        return None, "not_finite"
-    return float(ratio), None
+    return None if _ratio_undefined_reason(ratio, vol) is not None else float(ratio)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -103,7 +114,8 @@ def optimize_max_sharpe(
         cleaned   = ef.clean_weights()
         weights   = np.array([cleaned[t] for t in tickers])
         exp_ret, vol, sharpe = ef.portfolio_performance(risk_free_rate=risk_free_rate)
-        sharpe, sharpe_reason = _ratio_or_none(sharpe, vol)
+        sharpe_reason = _ratio_undefined_reason(sharpe, vol)
+        sharpe = _ratio_or_none(sharpe, vol)
     else:
         method = "NumPy SLSQP 폴백"
         weights, exp_ret, vol, sharpe = _max_sharpe_numpy(
@@ -111,7 +123,8 @@ def optimize_max_sharpe(
         )
         # 폴백도 같은 판정을 통과시킨다 — 이유 코드가 경로에 따라 달라지면
         # 소비자가 두 가지를 다뤄야 한다.
-        sharpe, sharpe_reason = _ratio_or_none(sharpe, vol)
+        sharpe_reason = _ratio_undefined_reason(sharpe, vol)
+        sharpe = _ratio_or_none(sharpe, vol)
 
     frontier = _compute_efficient_frontier(mu_annual, cov_annual, weight_bounds, n_points=40)
 
@@ -120,7 +133,8 @@ def optimize_max_sharpe(
     eq_vol    = float(np.sqrt(eq_w @ cov_annual @ eq_w))
     # 동일비중 비교군의 샤프도 같은 규칙·같은 판정자를 쓴다.
     eq_raw = (eq_ret - risk_free_rate) / eq_vol if eq_vol else None
-    eq_sharpe, eq_reason = _ratio_or_none(eq_raw, eq_vol)
+    eq_reason = _ratio_undefined_reason(eq_raw, eq_vol)
+    eq_sharpe = _ratio_or_none(eq_raw, eq_vol)
 
     return {
         "weights":                 dict(zip(tickers, weights.tolist())),
@@ -312,7 +326,8 @@ def optimize_black_litterman(
         cleaned   = ef.clean_weights()
         weights   = np.array([cleaned[t] for t in tickers])
         exp_ret, vol, sharpe = ef.portfolio_performance(risk_free_rate=risk_free_rate)
-        sharpe, sharpe_reason = _ratio_or_none(sharpe, vol)
+        sharpe_reason = _ratio_undefined_reason(sharpe, vol)
+        sharpe = _ratio_or_none(sharpe, vol)
         posterior_arr = posterior_returns.values
     else:
         method = "NumPy Black-Litterman" + (" (View 없음→시장균형)" if not has_views else "")
@@ -322,14 +337,16 @@ def optimize_black_litterman(
         weights, exp_ret, vol, sharpe = _max_sharpe_numpy(
             posterior_arr, posterior_cov_arr, risk_free_rate, weight_bounds
         )
-        sharpe, sharpe_reason = _ratio_or_none(sharpe, vol)
+        sharpe_reason = _ratio_undefined_reason(sharpe, vol)
+        sharpe = _ratio_or_none(sharpe, vol)
 
     eq_w      = np.full(n, 1.0 / n)
     eq_ret    = float(eq_w @ posterior_arr)
     eq_vol    = float(np.sqrt(eq_w @ cov_annual @ eq_w))
     # 동일비중 비교군의 샤프도 같은 규칙·같은 판정자를 쓴다.
     eq_raw = (eq_ret - risk_free_rate) / eq_vol if eq_vol else None
-    eq_sharpe, eq_reason = _ratio_or_none(eq_raw, eq_vol)
+    eq_reason = _ratio_undefined_reason(eq_raw, eq_vol)
+    eq_sharpe = _ratio_or_none(eq_raw, eq_vol)
     frontier  = _compute_efficient_frontier(posterior_arr, cov_annual, weight_bounds, n_points=40)
 
     return {
