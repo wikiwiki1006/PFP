@@ -629,8 +629,9 @@ def calculate_metrics(
     # `include_market=False` 로 불러서, `^KS11` 열이 아예 오지 않는다.
     # 그 라우터가 시장 기준지수를 함께 실어 주면 값이 돌아온다. 그때까지는
     # '—' 가 맞다 — S&P 대비 0.2306 을 "베타" 라고 보여주는 것보다 정직하다.
-    from backend.services.markets import benchmark_for
-    beta = calculate_portfolio_beta(holdings, close_df, benchmark_for(market))
+    from backend.services.markets import benchmark_for, get_market
+    bench = benchmark_for(market)
+    beta = calculate_portfolio_beta(holdings, close_df, bench)
     # `.get()` 의 기본값 18.0(VIX 장기 평균)은 **열이 없을 때만** 쓰인다.
     # 열은 있는데 값이 전부 NaN 이면 NaN 이 그대로 나오고, ffill 도 전량 NaN 열은
     # 채우지 못한다 — yfinance 가 ^VIX 를 빈 열로 주는 일이 있다. 그러면 폴백을
@@ -638,8 +639,14 @@ def calculate_metrics(
     # 바꿔 주므로 요청이 깨지지는 않는다. 그 안전망이 이 누락을 가려 왔다.)
     vix  = _num_or_none(curr.get("^VIX"))
 
-    alpha = 0.0
-    if "^GSPC" in close_df.columns:
+    # 알파도 시장 기준 지수 대비다. 예전에는 `"^GSPC"` 가 하드코딩돼 한국
+    # 포트폴리오의 알파가 S&P500 대비로 나갔고, 응답 키 이름까지
+    # `alpha_vs_sp500` 이라 계산을 고쳐도 이름이 거짓말을 계속했다.
+    #
+    # 초기값을 `0.0` 에서 `None` 으로 바꾼다. 기준 지수 열이 없으면 알파는
+    # 계산 불가인데 `0.0` 은 "시장과 정확히 같았다" 는 단정이다 (§1.3).
+    alpha = None
+    if bench in close_df.columns:
         try:
             # 에쿼티 곡선은 첫 거래 이전 구간이 0 이므로 iloc[0] 으로 나누면 inf 가 되고,
             # NaN 검사(a_val == a_val)는 inf 를 잡지 못해 alpha 가 항상 null 로 나갔다.
@@ -651,7 +658,7 @@ def calculate_metrics(
             eq_w  = equity_curve.loc[start:]
             base  = float(eq_w.iloc[0])
 
-            b_sp = close_df["^GSPC"].reindex(equity_curve.index).ffill().bfill().loc[start:]
+            b_sp = close_df[bench].reindex(equity_curve.index).ffill().bfill().loc[start:]
             b_valid = b_sp.dropna()
             if base > 0 and not b_valid.empty and float(b_valid.iloc[0]) != 0:
                 p_last = float(eq_w.iloc[-1]) / base - 1
@@ -672,11 +679,18 @@ def calculate_metrics(
         "today_change_pct":  _round_keep_none(today_chg_pct, 4),
         "as_of":             as_of_str,
         "market_open":       _market_open_flag(market),
+        # 베타·알파가 무엇에 대비한 값인지 응답에 담는다. 화면이 "베타" 라고만
+        # 쓰면 사용자는 벤치마크를 모르고, 한국 포트폴리오에 S&P500 대비 값이
+        # 나가도 알아챌 수 없다. 라벨이 이름을 붙일 수 있어야 한다.
+        "benchmark":         bench,
+        "benchmark_label":   get_market(market).indices.get(bench, bench),
         "portfolio_beta":    _round_keep_none(beta, 4),
         "vix":               _round_keep_none(vix, 2),
         "perf_1w":           _round_keep_none(_perf(5), 4),
         "perf_1m":           _round_keep_none(_perf(21), 4),
-        "alpha_vs_sp500":    _round_keep_none(alpha, 4),
+        # 키 이름에 벤치마크를 박지 않는다 — `alpha_vs_sp500` 은 계산을 고쳐도
+        # 이름이 거짓말을 계속했다. 무엇 대비인지는 `benchmark` 가 말한다.
+        "alpha_vs_benchmark": _round_keep_none(alpha, 4),
     }
 
 
