@@ -7,6 +7,8 @@
   · 삼성전자 주가가 $255,500 — 통화가 USD 로 박혀 있었다
   · 한국 산업 리포트의 대표 종목이 NVDA·TSLA — 산업 목록이 하나뿐이었다
 """
+from unittest import mock
+
 import pytest
 
 from backend.services import markets
@@ -123,12 +125,63 @@ def test_macro_agent_prompts_switch_index_by_market():
     assert "국내 상장 종목만" in kr
 
 
-def test_display_name_resolves_korean_codes():
-    """'034020.KS' 는 사람이 보고 어느 회사인지 알 수 없다."""
-    from backend.services.markets import display_name
-    # DB 가 없는 환경에서는 티커를 그대로 돌려주기만 하면 된다 (예외 없이).
-    assert display_name("AAPL")
-    assert display_name("005930.KS")
+def test_display_name_resolves_a_korean_code_to_a_company_name():
+    """'005930.KS' 는 사람이 보고 어느 회사인지 알 수 없다 — 이름을 찾아 준다.
+
+    예전 이 테스트는 `display_name(...)` 이 **truthy 인지만** 봤다. 못 찾으면
+    티커를 그대로 돌려주므로 그 단언은 **조회가 되든 안 되든 통과**했다.
+    이름이 "코드를 이름으로 바꾼다" 인데 검사는 "빈 문자열이 아니다" 였다.
+
+    게다가 유니버스 조회가 모킹돼 있지 않아 실행마다 KRX 로 나갔다. 그래서
+    실제로 재던 것은 "KRX 가 응답할 때든 아닐 때든 뭔가는 돌아온다" 였다.
+    """
+    from backend.services import markets
+
+    with mock.patch.object(markets, "universe_lookup",
+                           lambda t, m=None: {"name": "삼성전자"}):
+        assert markets.display_name("005930.KS") == "삼성전자"
+
+
+def test_display_name_falls_back_to_the_ticker_when_the_name_is_unknown():
+    """이름을 못 찾으면 티커를 그대로 돌려준다. 빈 문자열이 아니다.
+
+    빈 문자열이면 화면의 그 자리가 통째로 비어 어느 종목의 행인지 알 수 없다.
+    조회 실패와 이름 없음 둘 다 같은 처리다.
+    """
+    from backend.services import markets
+
+    for label, lookup in (
+        ("행이 없다", lambda t, m=None: None),
+        ("이름 칸이 비어 있다", lambda t, m=None: {"name": "   "}),
+    ):
+        with mock.patch.object(markets, "universe_lookup", lookup):
+            assert markets.display_name("005930.KS") == "005930.KS", label
+
+
+def test_display_name_survives_an_unreachable_listing_source():
+    """상장 목록 출처(KRX·네이버)를 못 받아도 티커를 돌려준다. 예외가 새면 안 된다.
+
+    이건 **실제로 도달하는** 실패다 — 이 테스트가 모킹 없이 매 실행 KRX 로
+    나가고 있었다는 사실 자체가 그 경로가 살아 있다는 증거다.
+
+    `universe_lookup` 이 직접 예외를 던지는 경우는 단언하지 않는다. 그 함수는
+    `korea_universe.lookup` 으로 위임만 하고, 실패는 그 안에서 흡수된다 —
+    없는 상황을 단언하면 **코드가 하지 않는 약속**을 테스트가 적어 두는 꼴이다.
+    실패를 실제 출처 쪽에 넣어 도달 가능한 형태로 잰다.
+    """
+    from backend.services import korea_universe, markets
+
+    with mock.patch.object(korea_universe, "get_listed_all",
+                           side_effect=RuntimeError("listing source down")):
+        try:
+            out = markets.display_name("005930.KS")
+        except Exception as exc:            # 예외가 새면 그 행이 통째로 안 그려진다
+            raise AssertionError(f"display_name 이 예외를 냈다 — {exc}")
+
+    assert out == "005930.KS", (
+        f"got {out!r} -- with no listing source the ticker itself is the only "
+        "honest label. An empty string leaves the row unidentifiable."
+    )
 
 
 def test_news_gathering_is_market_aware():
