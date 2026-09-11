@@ -30,6 +30,7 @@ from backend.services.portfolio_calculator import (
     get_holdings_detail,
     build_return_pct_curve,
     return_pct_to_records,
+    realized_pnl_from_log,
 )
 
 # ─── 시세·현금·섹터 로직은 services 로 분리 ──────────────────────────────────
@@ -863,6 +864,7 @@ def get_metrics(_auth: dict = Depends(current_user), market: str = Depends(marke
         # 여기서 따로 지어내면 두 경로가 서로 다른 이름을 말하게 된다.
         from backend.services.markets import benchmark_for, get_market
         _bench = benchmark_for(market)
+        _rp = realized_pnl_from_log([])
         # 보유가 없는 것은 **새 사용자의 정상 상태**다 (§1.3 마지막 항목).
         # 예전에는 400 을 던졌는데, 그러면 서버가 정상 상태를 클라이언트
         # 오류라고 부르고 그 사용자는 화면을 열 때마다 콘솔에 400 을 둘씩
@@ -897,6 +899,18 @@ def get_metrics(_auth: dict = Depends(current_user), market: str = Depends(marke
             "change_counted":     0,
             "change_holdings":    0,
             "change_stale":       [],
+            # 정상 경로와 **같은 함수**로 낸다. 값을 손으로 적으면 그 함수가
+            # 바뀔 때 여기만 옛 계약을 계속 말한다 — 빈 포트폴리오는 테스트가
+            # 없어서(400→200 을 바꿔도 게이트가 통과했다) 아무도 못 본다.
+            # 거래 이력이 실제로 없으므로 `[]` 다. `None` 은 "호출자가 안
+            # 알려줬다" 라는 다른 뜻이고 reason 도 달라진다.
+            **{
+                "realized_pnl":        _rp.pnl,
+                "realized_cost":       _rp.cost,
+                "realized_pnl_pct":    _rp.pct,
+                "realized_pnl_reason": _rp.reason,
+                "realized_sales":      _rp.sales,
+            },
             # 벤치마크는 보유와 무관하게 시장이 정한다. 빈 포트폴리오라고
             # 라벨까지 지울 이유가 없다 — 차트 범례가 '벤치마크' 로 떨어진다.
             "benchmark":          _bench,

@@ -42,6 +42,15 @@ export const DEMO_METRICS: PortfolioMetrics = {
   benchmark_label:  'S&P 500',
   as_of:            null,
   market_open:      false,
+  // 실현손익. 데모 보유 표에는 매도 이력이 없으므로 "확정한 손익이 없다" 가 참이다.
+  // 기능을 보여주려고 0 이 아닌 값을 넣지 않는다 — 표와 안 맞는 집계를 넣는 것이
+  // 바로 위 주석이 기록한 결함이고, 미국·한국 양쪽에서 같은 형태로 났다.
+  // 비율은 분모(매도된 주식의 취득원가)가 0 이라 없다. 0% 는 '본전' 이라는 단정이다.
+  realized_pnl:        0,
+  realized_cost:       0,
+  realized_pnl_pct:    null,
+  realized_pnl_reason: null,
+  realized_sales:      0,
   // 일변동 집계 근거. 데모는 전 종목이 반영된 상태로 둔다 — 미리보기에서
   // "일부만 반영" 경고가 뜨면 방문자는 그게 데모의 한계인지 서비스의 상태인지
   // 구분할 수 없다. DEMO_HOLDINGS_DETAIL 의 CASH 제외 6종목과 맞춘다.

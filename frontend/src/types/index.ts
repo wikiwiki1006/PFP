@@ -28,6 +28,24 @@ export interface PortfolioMetrics {
    *  6ceb29e 에서 지웠는데 주석만 남아 있었다 — 없어진 동작을 설명하는
    *  주석은 틀린 코드보다 오래 산다.) */
   total_return_pct: number | null
+  /** 매도로 **확정된** 손익 금액. `total_return_pct` 가 답하지 않는 쪽이다.
+   *
+   *      0     실현한 것이 없다 (매도 이력이 없다) — 참이다
+   *      null  계산 불가 — 이유는 `realized_pnl_reason`
+   *
+   *  둘을 화면에서 같게 보이면 안 된다. 0 은 "안 팔았다", null 은 "팔았는데
+   *  얼마인지 모른다" 이고 후자는 사용자가 조치할 수 있는 상태다 (§1.3). */
+  realized_pnl: number | null
+  /** 위 비율의 분모 — **매도된 주식의** 취득원가. `total_cost` 가 아니다.
+   *  둘을 같은 기준으로 읽으면 비율이 다른 것을 말한다. */
+  realized_cost: number | null
+  /** `realized_pnl / realized_cost`. null = 매도가 없거나(분모 0) 계산 불가. */
+  realized_pnl_pct: number | null
+  /** 계산 불가 이유 코드. 문구가 아니라 코드다 — 표시 문안은 화면의 결정이다.
+   *  `no_trade_log` · `no_cost_basis` · `missing_sale_price` · `missing_buy_price` */
+  realized_pnl_reason: string | null
+  /** 집계에 들어간 매도 건수. 0 이면 `realized_pnl` 0 이 "안 팔았다" 라는 뜻. */
+  realized_sales: number
   /** null = 전일 종가를 못 구해 계산 불가. 0%(보합)와 구분해야 한다. */
   today_change_pct: number | null
   /** null = 베타를 계산하지 못함. 서버는 원래부터 null 을 줄 수 있었는데
