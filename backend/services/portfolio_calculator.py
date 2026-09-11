@@ -15,8 +15,19 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
-def _safe(v, default: float = 0.0) -> float:
-    """NaN/Inf/None → default. JSON-safe 숫자 보장."""
+def _safe_or(v, default: float) -> float:
+    """NaN/Inf/None → default. JSON-safe 숫자 보장.
+
+    **`default` 에 기본값을 두지 않는다.** 이름이 `_safe` 이고 `default=0.0` 이던
+    동안, 호출 33곳 중 30곳이 그 기본값에 의존했다. 그러면 "0 이 참값이라고
+    판단한 자리" 와 "그냥 굴러온 자리" 가 구별되지 않는다 — §1.3 위반이 숨는 곳이
+    정확히 그 구별의 부재다. 각 호출부가 무엇을 원하는지 적게 한다.
+
+    같은 이름이 `routers/ticker.py` 에는 `default=None` 으로 있었고
+    `portfolio_optimizer` 에는 둘째 인자가 **자릿수**인 동명 함수가 있었다
+    (지금은 `_round_or_none`). 이름을 `_safe_or` 로 바꾼 것은 그 셋을 구별하기
+    위한 것이기도 하다.
+    """
     try:
         f = float(v)
         return f if math.isfinite(f) else default
@@ -71,10 +82,10 @@ def _price_or_cost(price, cost: float) -> float:
     상장 직후 종목처럼 이력을 아무리 백필해도 채울 수 없는 구간이 존재하므로
     데이터 수집을 고쳐도 이 방어는 별도로 필요하다.
     """
-    p = _safe(price, default=0.0)
+    p = _safe_or(price, default=0.0)
     if p > 0:
         return p
-    return max(0.0, _safe(cost, default=0.0))
+    return max(0.0, _safe_or(cost, default=0.0))
 
 
 def _price_matrix(prices: pd.DataFrame, tickers: list[str]) -> np.ndarray:
@@ -206,7 +217,7 @@ def build_equity_curve(
         running_qty: dict[str, float] = {t: static_qty.get(t, 0.0) for t in all_tickers}
         # 시세가 없는 날 대체 평가에 쓸 취득원가 (매수 시 갱신)
         running_cost: dict[str, float] = {
-            t: _safe(holdings.get(t, {}).get("avg", 0)) for t in all_tickers
+            t: _safe_or(holdings.get(t, {}).get("avg", 0), 0.0) for t in all_tickers
         }
 
         equity_vals = np.zeros(len(idx), dtype=float)
@@ -240,7 +251,7 @@ def build_equity_curve(
                         running_qty[ticker] = max(0.0, q)
 
             row_prices = px_mat[i]
-            # 가격이 없는 날(상장 전·데이터 미수집)에 _safe(...)→0 으로 평가하면
+            # 가격이 없는 날(상장 전·데이터 미수집)에 _safe_or(...)→0 으로 평가하면
             # 보유 중인 포지션이 그날만 0원이 되어 곡선에 절벽이 생긴다.
             # 시세가 없으면 취득원가로 이월해 평가한다.
             stock_val = sum(
@@ -475,13 +486,17 @@ def calculate_metrics(
 
     def _price(t):
         v = curr.get(t, 0)
-        return _safe(v) if t != "CASH" else 1.0
+        return _safe_or(v, 0.0) if t != "CASH" else 1.0
 
     stock_tickers = [t for t in holdings if t != "CASH" and t in close_df.columns]
     cash_val = holdings.get("CASH", {}).get("q", 0)
 
-    total_equity = _safe(sum(_price(t) * holdings[t]["q"] for t in stock_tickers) + cash_val)
-    total_cost   = _safe(sum(_safe(holdings[t]["avg"]) * _safe(holdings[t]["q"]) for t in stock_tickers) + cash_val)
+    # `total_equity` 의 `0.0` 도 센티넬이다 — 아래 `== 0` 검사가 그걸 받아
+    # 에쿼티 곡선의 마지막 값으로 회복한다. 수량이 NaN 이면 합이 NaN 이 되고
+    # 그 경로로 넘어간다. (그 회복이 있어서 "수량 NaN → 총수익률 -100%" 는
+    # 일어나지 않는다. 의심해서 실측으로 확인했다.)
+    total_equity = _safe_or(sum(_price(t) * holdings[t]["q"] for t in stock_tickers) + cash_val, 0.0)
+    total_cost   = _safe_or(sum(_safe_or(holdings[t]["avg"], 0.0) * _safe_or(holdings[t]["q"], 0.0) for t in stock_tickers) + cash_val, 0.0)
 
     # 보유 종목이 없어도 equity curve 마지막 값을 현재 자산으로 사용
     # (전량 매도 후 현금 보유 또는 CASH 항목 없는 경우 대응)
@@ -492,10 +507,12 @@ def calculate_metrics(
     # 총 수익률: 에쿼티 커브 첫 양수 시점 대비 현재 (거래 이력 기반, 더 정확)
     eq_meaningful = equity_curve[equity_curve > 0]
     if not eq_meaningful.empty:
+        # `eq_first` 는 `equity_curve[equity_curve > 0]` 의 첫 값이라 항상 양수다.
+        # 예전에 있던 `if eq_first else 0.0` 은 도달하지 않는 분기였다.
         eq_first = float(eq_meaningful.iloc[0])
-        total_rtn = _safe((total_equity / eq_first - 1) * 100 if eq_first else 0.0)
+        total_rtn = _safe_or((total_equity / eq_first - 1) * 100, 0.0)
     else:
-        total_rtn = _safe((total_equity / total_cost - 1) * 100 if total_cost else 0.0)
+        total_rtn = _safe_or((total_equity / total_cost - 1) * 100 if total_cost else 0.0, 0.0)
 
     # 1D 변화 — 종목별 '마지막 두 실제 관측치' 합산이 1순위.
     # 에쿼티 커브의 위치 기반 차분(iloc[-1]-iloc[-2])은 마지막 두 행이
@@ -508,8 +525,8 @@ def calculate_metrics(
             from backend.services.price_series import portfolio_daily_change
             _v, _p, _a = portfolio_daily_change(holdings, raw_df, live, now)
             if _v is not None:
-                today_chg_val = _safe(_v)
-                today_chg_pct = _safe(_p)
+                today_chg_val = _safe_or(_v, 0.0)
+                today_chg_pct = _safe_or(_p, 0.0)
                 as_of_str = _a.strftime("%Y-%m-%d") if _a is not None else None
         except Exception:
             # 실패하면 아래 폴백이 에쿼티 곡선의 마지막 두 점으로 계산한다 —
@@ -523,8 +540,8 @@ def calculate_metrics(
         if len(equity_curve) >= 2:
             _cur_eq = float(equity_curve.iloc[-1])
             _pre_eq = float(equity_curve.iloc[-2])
-            today_chg_val = _safe(_cur_eq - _pre_eq)
-            today_chg_pct = _safe((_cur_eq / _pre_eq - 1) * 100 if _pre_eq else 0.0)
+            today_chg_val = _safe_or(_cur_eq - _pre_eq, 0.0)
+            today_chg_pct = _safe_or((_cur_eq / _pre_eq - 1) * 100 if _pre_eq else 0.0, 0.0)
         else:
             today_chg_val = 0.0
             today_chg_pct = 0.0
@@ -545,8 +562,11 @@ def calculate_metrics(
         """
         if len(_sessions) < days + 1:
             return None
-        cur = _safe(equity_curve.get(_sessions[-1]))
-        base = _safe(equity_curve.get(_sessions[-(days + 1)]))
+        # 여기서 `0.0` 은 표시값이 아니라 **센티넬**이다 — 바로 아래 `<= 0` 검사가
+        # 그걸 받아 None 을 돌려준다. `None` 으로 바꾸면 `None <= 0` 이 TypeError 다.
+        # 위 docstring 이 말하는 '위장하지 않는다' 는 이 경로로 구현돼 있다.
+        cur = _safe_or(equity_curve.get(_sessions[-1]), 0.0)
+        base = _safe_or(equity_curve.get(_sessions[-(days + 1)]), 0.0)
         if base <= 0 or cur <= 0:
             return None
         return (cur / base - 1) * 100
@@ -557,7 +577,7 @@ def calculate_metrics(
     # 채우지 못한다 — yfinance 가 ^VIX 를 빈 열로 주는 일이 있다. 그러면 폴백을
     # 두었는데도 화면에는 '—' 가 뜬다 (앱 전역 SafeJSONResponse 가 NaN 을 null 로
     # 바꿔 주므로 요청이 깨지지는 않는다. 그 안전망이 이 누락을 가려 왔다.)
-    vix  = _safe(curr.get("^VIX", 18.0), 18.0)
+    vix  = _safe_or(curr.get("^VIX", 18.0), 18.0)
 
     alpha = 0.0
     if "^GSPC" in close_df.columns:
@@ -638,10 +658,10 @@ def get_holdings_detail(
             ticker_px[t] = (p, p, None, None, bool(live.get(t)))
 
     total_equity = sum(
-        ticker_px.get(t, (0.0,))[0] * _safe(info.get("q", 0))
+        ticker_px.get(t, (0.0,))[0] * _safe_or(info.get("q", 0), 0.0)
         for t, info in holdings.items() if t != "CASH"
-    ) + _safe(holdings.get("CASH", {}).get("q", 0))
-    total_equity = _safe(total_equity)
+    ) + _safe_or(holdings.get("CASH", {}).get("q", 0), 0.0)
+    total_equity = _safe_or(total_equity, 0.0)
 
     rows = []
     for t, info in holdings.items():
@@ -650,15 +670,15 @@ def get_holdings_detail(
             as_of, is_live = None, False
         else:
             price, _prev, chg_pct, as_of, is_live = ticker_px.get(t, (0.0, 0.0, None, None, False))
-            avg     = _safe(info.get("avg", 0))
+            avg     = _safe_or(info.get("avg", 0), 0.0)
             # 취득원가가 없으면 수익률이 정의되지 않는다 — 0% 로 내려보내면
             # '손익 없음(보합)' 으로 읽힌다. CASH 는 손익 자체가 없어 0.0 이 맞다.
-            pnl_pct = _safe((price / avg - 1) * 100) if avg > 0 else None
+            pnl_pct = _safe_or((price / avg - 1) * 100, 0.0) if avg > 0 else None
 
-        avg_cost = _safe(info.get("avg", 0))
-        qty      = _safe(info.get("q", 0))
-        value    = _safe(price * qty)
-        pnl      = _safe((price - avg_cost) * qty)
+        avg_cost = _safe_or(info.get("avg", 0), 0.0)
+        qty      = _safe_or(info.get("q", 0), 0.0)
+        value    = _safe_or(price * qty, 0.0)
+        pnl      = _safe_or((price - avg_cost) * qty, 0.0)
 
         rows.append({
             "ticker":        t,
@@ -674,7 +694,7 @@ def get_holdings_detail(
             "market_value":  round(value, 2),
             # 평가액 합이 0 이면 비중이 정의되지 않는다. 이 조건은 전 종목에
             # 동시에 걸리므로 '일부만 null' 인 상태는 생기지 않는다.
-            "weight":        round(_safe(value / total_equity), 4) if total_equity else None,
+            "weight":        round(_safe_or(value / total_equity, 0.0), 4) if total_equity else None,
             "as_of":         as_of.strftime("%Y-%m-%d") if as_of is not None else None,
             "is_live":       bool(is_live),
         })
@@ -734,7 +754,7 @@ def build_return_pct_curve(
             for t in all_tickers
             if t not in logged_tickers and holdings.get(t, {}).get("q", 0) > 0
         }
-        static_avg: dict[str, float] = {t: _safe(holdings[t].get("avg", 0)) for t in static_qty}
+        static_avg: dict[str, float] = {t: _safe_or(holdings[t].get("avg", 0), 0.0) for t in static_qty}
 
         # 모든 이벤트(주식 + 현금)를 날짜 포지션에 매핑 — 날짜 보정 없음
         # 행은 Series 가 아니라 dict 로 들고 간다 (build_equity_curve 와 같은 이유).
@@ -747,14 +767,14 @@ def build_return_pct_curve(
     else:
         all_tickers       = sorted(current_tickers & set(prices.columns))
         static_qty        = {t: float(holdings[t]["q"]) for t in all_tickers}
-        static_avg        = {t: _safe(holdings[t].get("avg", 0)) for t in all_tickers}
+        static_avg        = {t: _safe_or(holdings[t].get("avg", 0), 0.0) for t in all_tickers}
         all_events_by_pos = {}
 
     # ── 순방향 워크: 현금 0, 보유 0에서 시작 ────────────────────────────────
     running_cash: float = 0.0
     running_qty: dict[str, float] = {t: static_qty.get(t, 0.0) for t in all_tickers}
     running_avg: dict[str, float] = {
-        t: static_avg.get(t, _safe(holdings.get(t, {}).get("avg", 0)))
+        t: static_avg.get(t, _safe_or(holdings.get(t, {}).get("avg", 0), 0.0))
         for t in all_tickers
     }
 
@@ -821,11 +841,11 @@ def build_return_pct_curve(
         holdings_by_date[date_str] = [
             {
                 "ticker": t,
-                "return_pct": round(_safe(
-                    (_safe(row_prices[j]) / running_avg[t] - 1) * 100
+                "return_pct": round(_safe_or(
+                    (_safe_or(row_prices[j], 0.0) / running_avg[t] - 1) * 100
                     if running_avg[t] > 0 else 0.0
-                ), 2),
-                "price": round(_safe(row_prices[j]), 2),
+                , 0.0), 2),
+                "price": round(_safe_or(row_prices[j], 0.0), 2),
             }
             for j, t in enumerate(all_tickers)
             if running_qty[t] > 0
