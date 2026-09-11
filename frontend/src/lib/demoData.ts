@@ -94,36 +94,41 @@ export const DEMO_SECTOR_WEIGHTS: SectorWeights = {
  *
  *  데모 상수는 타입 선언이 아니라 **실제 응답**을 따라야 한다. 타입이 틀리면
  *  데모가 그 틀린 모양을 성실히 따라가고, 그게 화면에서만 드러난다. */
-export const DEMO_EQUITY_CURVE: EquityCurvePoint[] = (() => {
-  const pts: EquityCurvePoint[] = []
-  let v = 100_000
-  let b = 100_000
-  const v0 = 100_000
-  const b0 = 100_000
-  const start = new Date('2024-08-01T00:00:00Z')
+function makeCurve(finalEquity: number): EquityCurvePoint[] {
   // 결정적 유사난수 — 렌더마다 곡선이 달라지지 않도록 시드를 고정한다.
   let seed = 42
   const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648 }
 
+  const vs: number[] = []
+  const bs: number[] = []
+  let v = 1, b = 1
   for (let i = 0; i < 105; i++) {
-    const d = new Date(start.getTime() + i * 7 * 86400_000)
     // 20~32주 구간에 조정을 넣어 곡선이 밋밋하지 않게 한다
     const drawdown = i > 20 && i < 32 ? -0.004 : 0
     v *= 1 + drawdown + (rnd() - 0.42) * 0.022
     b *= 1 + drawdown * 0.7 + (rnd() - 0.44) * 0.016
-    pts.push({
-      date:          d.toISOString().slice(0, 10),
-      // 서버는 금액이 아니라 **누적 수익률(%)** 을 준다.
-      port:          +((v / v0 - 1) * 100).toFixed(2),
-      benchmark_pct: +((b / b0 - 1) * 100).toFixed(2),
-      total_equity:  Math.round(v),
-      cash_flow:     null,
-      trades:        [],
-      holdings:      [],
-    })
+    vs.push(v); bs.push(b)
   }
-  return pts
-})()
+
+  // 마지막 점을 선언된 총 자산에 맞춘다. 배율은 `port`(누적 수익률)를 바꾸지
+  // 않는다 — v 를 통째로 곱해도 v/v0 가 같기 때문이다. 곡선이 끝나는 자리와
+  // 상단 "총 자산" 이 다른 숫자를 말하면 미리보기가 자기와 안 맞는다.
+  const scale = finalEquity / vs[vs.length - 1]
+  const startDate = new Date('2024-08-01T00:00:00Z')
+
+  return vs.map((vi, i) => ({
+    date:          new Date(startDate.getTime() + i * 7 * 86400_000).toISOString().slice(0, 10),
+    // 서버는 금액이 아니라 **누적 수익률(%)** 을 준다.
+    port:          +((vi / vs[0] - 1) * 100).toFixed(2),
+    benchmark_pct: +((bs[i] / bs[0] - 1) * 100).toFixed(2),
+    total_equity:  Math.round(vi * scale),
+    cash_flow:     null,
+    trades:        [],
+    holdings:      [],
+  }))
+}
+
+export const DEMO_EQUITY_CURVE: EquityCurvePoint[] = makeCurve(128_450)
 
 
 
@@ -263,3 +268,37 @@ export const demoMetrics        = (): PortfolioMetrics => getMarket() === 'KR' ?
 export const demoHoldingsDetail = (): HoldingDetail[]  => getMarket() === 'KR' ? DEMO_HOLDINGS_DETAIL_KR : DEMO_HOLDINGS_DETAIL
 export const demoHoldingsRaw    = (): HoldingsMap      => getMarket() === 'KR' ? DEMO_HOLDINGS_RAW_KR : DEMO_HOLDINGS_RAW
 export const demoSectorWeights  = (): SectorWeights    => getMarket() === 'KR' ? DEMO_SECTOR_WEIGHTS_KR : DEMO_SECTOR_WEIGHTS
+
+/* ── 나머지 셋도 시장을 가른다 ────────────────────────────────────────────────
+ *
+ * 보유 표는 갈리는데 **바로 아래 실적/배당 표는 미국 종목**이었다. 한 화면
+ * 안에서 한쪽은 갈리고 한쪽은 안 갈리면 눈으로 보면 정상으로 읽힌다 —
+ * 티커가 여섯 개나 있어도 "이 표는 원래 이런가 보다" 가 된다. 테스트 창이
+ * G3(한국 화면에 미국 지수 문자열 없음)를 켜면서 찾았다.
+ *
+ * 곡선은 `total_equity` 가 달러 스케일이었다. 화면이 원화 기호만 붙이므로
+ * 툴팁에 ₩128,450 같은 값이 뜬다 — DEMO_METRICS 가 같은 이유로 틀렸던 자리다.
+ */
+const DEMO_EQUITY_CURVE_KR: EquityCurvePoint[] = makeCurve(170_895_000)
+
+const DEMO_EARNINGS_KR: EarningsEvent[] = [
+  { ticker: '005930.KS', earn_date: '2026-10-29', div_date: '2026-11-14', div_yield: '0.56%' },
+  { ticker: '000660.KS', earn_date: '2026-10-24', div_date: '2026-12-30', div_yield: '0.08%' },
+  { ticker: '005380.KS', earn_date: '2026-10-23', div_date: '2026-12-30', div_yield: '4.71%' },
+  { ticker: '035420.KS', earn_date: '2026-11-06', div_date: '2026-12-30', div_yield: '0.34%' },
+]
+
+const DEMO_NEWS_KR: NewsItem[] = [
+  { ticker: '000660.KS', headline: 'SK하이닉스, HBM 증설 투자 확대 — 고대역폭 메모리 공급 부족 지속',
+    url: '#', datetime: 1_755_000_000 },
+  { ticker: '005930.KS', headline: '삼성전자 파운드리 가동률 회복, 하반기 수익성 개선 전망',
+    url: '#', datetime: 1_754_900_000 },
+  { ticker: 'MACRO',     headline: '한국은행 기준금리 동결 — "물가 둔화 흐름 확인 필요"',
+    url: '#', datetime: 1_754_820_000 },
+  { ticker: '005380.KS', headline: '현대차 미국 공장 증산, 전기차 라인 가동률 상향',
+    url: '#', datetime: 1_754_700_000 },
+]
+
+export const demoEquityCurve = (): EquityCurvePoint[] => getMarket() === 'KR' ? DEMO_EQUITY_CURVE_KR : DEMO_EQUITY_CURVE
+export const demoEarnings    = (): EarningsEvent[]    => getMarket() === 'KR' ? DEMO_EARNINGS_KR : DEMO_EARNINGS
+export const demoNews        = (): NewsItem[]         => getMarket() === 'KR' ? DEMO_NEWS_KR : DEMO_NEWS
