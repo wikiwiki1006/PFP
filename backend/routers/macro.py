@@ -92,7 +92,6 @@ def analyze_macro(
     req_model    = req.model
     req_mode     = req.mode
     req_port     = req.portfolio
-    req_provider = req.provider if hasattr(req, "provider") else "claude"
     uid          = _auth["uid"]
 
     # 심층 분석이 잠겨 있으면 sonnet 요청을 basic(haiku)으로 낮춘다.
@@ -128,7 +127,6 @@ def analyze_macro(
                 portfolio=portfolio,
                 model_key="sonnet" if tier == "deep" else "haiku",
                 mode=req_mode,
-                provider=req_provider,
                 should_cancel=should_cancel,
                 market=market,
             )
@@ -297,7 +295,9 @@ def analyst_feedback_auto(
         get_close_df(tickers, period="1mo", ttl=1800, include_market=False, fill=False)
         if tickers else None
     )
-    metrics = calculate_metrics(holdings, close_df, equity_curve, raw_df=raw_df, market=market)
+    # trade_log 를 그대로 넘긴다 (None 과 [] 의 의미가 다르다 — portfolio.py 참고).
+    metrics = calculate_metrics(holdings, close_df, equity_curve, raw_df=raw_df,
+                                market=market, trade_log=trade_log)
 
     # 포트폴리오 보유 종목 섹터 비중 계산
     sector_weights: dict[str, float] = {}

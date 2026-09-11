@@ -881,8 +881,11 @@ def get_metrics(_auth: dict = Depends(current_user), market: str = Depends(marke
     # 가격이 변할 수 있는지는 _get_live_prices 가 티커별로 판단한다
     # (market_calendar.price_can_move).
     live = _get_live_prices(_1d_tickers) if _1d_tickers else {}
+    # trade_log 를 **그대로** 넘긴다. `or []` 로 뭉개면 안 된다 —
+    # None 은 "호출자가 안 알려줬다", [] 는 "거래 이력이 실제로 없다" 로
+    # 의미가 다르고, calculate_metrics 가 그 둘을 갈라 판정한다.
     metrics = calculate_metrics(holdings, close_df, equity_curve, raw_df=raw_df,
-                                live=live, market=market)
+                                live=live, market=market, trade_log=trade_log)
 
     # total_return_pct: TWRR(날짜 보정 없는 시간가중수익률)의 마지막 값으로 덮어쓰기
     # calculate_metrics는 equity_curve(날짜 보정 포함)를 쓰므로 추가 입금 시 왜곡 가능
