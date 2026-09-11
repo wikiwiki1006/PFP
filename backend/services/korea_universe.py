@@ -93,13 +93,26 @@ def get_listed_all(refresh: bool = False) -> list[dict]:
     return rows
 
 
-_NAVER_SUM = "https://finance.naver.com/sise/sise_market_sum.naver"
-# 표 본문의 종목 링크. class="tltle" 이 붙은 것만 종목명 링크다
-# (같은 행에 토론실 링크가 또 있어 이걸로 구분하지 않으면 두 배로 잡힌다).
-_NAVER_ROW = re.compile(r'href="/item/main\.naver\?code=(\d{6})"\s+class="tltle">([^<]+)</a>')
+# 네이버 시총 순위 — **JSON API 를 쓴다. HTML 을 긁지 않는다.**
+#
+# 예전에는 `finance.naver.com/sise/sise_market_sum.naver` 를 정규식으로 파싱했다.
+# 네이버가 그 주소를 `stock.naver.com` 으로 **302 리다이렉트**하도록 바꿨고,
+# 그쪽은 JS 로 그리는 페이지라 정규식이 한 행도 못 잡는다. 결과:
+#
+#     .KS 목표 200 중 0종목만 수집
+#     .KQ 목표 150 중 0종목만 수집
+#
+# 그래서 한국 신호 스캔 유니버스가 **비어 있었다** — `/timing` 화면의 한국
+# 매매 신호에 후보가 하나도 없다. 로그는 남고 있었지만(§1.3 대로) 아무도
+# 그 줄을 읽지 않았다. 오늘 네 번째 "외부 계약이 움직였다" 다
+# (야후 미확정 종가, dividendYield 단위, pandas Series(None), 그리고 이것).
+#
+# JSON API 는 마크업 변경에 훨씬 덜 취약하다. 필드가 사라지면 KeyError 로
+# 즉시 드러나지, 0행으로 조용히 성공하지 않는다.
+_NAVER_MV = "https://m.stock.naver.com/api/stocks/marketValue/{board}"
 
-# 네이버 sosok 파라미터 → 야후 티커 접미사
-_NAVER_BOARDS = ((0, ".KS", KOSPI_TOP), (1, ".KQ", KOSDAQ_TOP))
+# 네이버 보드 이름 → 야후 티커 접미사
+_NAVER_BOARDS = (("KOSPI", ".KS", KOSPI_TOP), ("KOSDAQ", ".KQ", KOSDAQ_TOP))
 
 
 def _is_common_stock(code: str) -> bool:
@@ -123,34 +136,45 @@ def fetch_top_by_marketcap() -> tuple[list[str], dict[str, str]]:
     import requests
 
     sess = requests.Session()
-    # 기본 UA 로는 응답이 달라진다.
-    sess.headers.update({"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                                       "AppleWebKit/537.36 Chrome/120"})
+    # Referer 가 없으면 API 가 거부한다.
+    sess.headers.update({
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                      "AppleWebKit/537.36 Chrome/120",
+        "Referer": "https://m.stock.naver.com/",
+    })
 
     universe: list[str] = []
     names: dict[str, str] = {}
-    for sosok, suffix, want in _NAVER_BOARDS:
+    for board, suffix, want in _NAVER_BOARDS:
         picked: list[str] = []
         page = 1
-        # 우선주를 걸러내면 한 페이지에서 50개를 다 못 채우므로 넉넉히 돈다.
-        while len(picked) < want and page <= 12:
+        # 우선주를 걸러내면 한 페이지에서 100개를 다 못 채우므로 넉넉히 돈다.
+        while len(picked) < want and page <= 8:
             try:
-                r = sess.get(_NAVER_SUM, params={"sosok": sosok, "page": page}, timeout=20)
-                r.encoding = "euc-kr"
-                rows = _NAVER_ROW.findall(r.text)
+                r = sess.get(_NAVER_MV.format(board=board),
+                             params={"page": page, "pageSize": 100}, timeout=20)
+                r.raise_for_status()
+                rows = r.json().get("stocks") or []
             except Exception as e:
-                logger.warning(f"네이버 시총 {sosok}/{page} 실패: {e}")
+                logger.warning("네이버 시총 %s/page%d 실패: %s", board, page, e)
                 break
             if not rows:
                 break
-            for code, name in rows:
+            for row in rows:
+                code = str(row.get("itemCode") or "")
+                name = str(row.get("stockName") or "").strip()
+                # 코드나 이름이 없으면 응답 형태가 바뀐 것이다. 조용히 넘기면
+                # 다시 "0종목만 수집" 으로 돌아가므로 무엇이 비었는지 남긴다.
+                if len(code) != 6 or not name:
+                    logger.warning("네이버 시총 %s: 예상 밖의 행 %r", board, list(row)[:6])
+                    continue
                 if _is_common_stock(code):
                     ticker = f"{code}{suffix}"
                     picked.append(ticker)
-                    names[ticker] = name.strip()
+                    names[ticker] = name
             page += 1
         if len(picked) < want:
-            logger.warning(f"{suffix} 목표 {want} 중 {len(picked)}종목만 수집")
+            logger.warning("%s 목표 %d 중 %d종목만 수집", suffix, want, len(picked))
         universe += picked[:want]
     return universe, {t: n for t, n in names.items() if t in set(universe)}
 
@@ -173,7 +197,17 @@ def rebuild_scan_universe(max_probe: Optional[int] = None) -> dict:
     if len(fast) >= (KOSPI_TOP + KOSDAQ_TOP) * 0.8:
         save_common(_SCAN_KEY, fast, ttl_seconds=86400 * 7)
         if fast_names:
-            save_common(_NAME_KEY, fast_names, ttl_seconds=86400 * 7)
+            # **덮어쓰지 않고 합친다.** 시총 상위 350종의 이름으로 통째로
+            # 갈아치우면 그 밖의 종목은 화면에 코드만 남는다 (상장 전체는
+            # 2,600종이 넘는다). 이 자리가 예전에는 안 도는 경로였는데
+            # (네이버가 302 로 바뀌어 fast 가 항상 비었다) 그걸 고치자
+            # 이름 사전이 2,651 → 350 으로 줄어드는 것으로 드러났다.
+            #
+            # 새로 받은 이름이 이기게 둔다 — 상장목록 캐시는 30일이고
+            # 시총 페이지는 방금 받은 것이라 개명·재상장이 반영돼 있다.
+            merged = dict(get_common(_NAME_KEY) or {})
+            merged.update(fast_names)
+            save_common(_NAME_KEY, merged, ttl_seconds=86400 * 7)
         logger.info(f"한국 스캔 유니버스 {len(fast)}종목 (네이버 시총순)")
         return {"ok": True, "universe": len(fast), "source": "naver", "remaining": 0}
     logger.warning(f"네이버 시총 수집 부족({len(fast)}종목) — yfinance 폴백")
@@ -306,16 +340,24 @@ def name_map() -> dict[str, str]:
 
     # 캐시가 없으면 직접 채운다. 유니버스가 이미 만들어져 있으면 재생성이
     # 걸리지 않아 이름만 영영 비는데, 시총 페이지 조회는 2초면 끝난다.
+    # 넓은 쪽(상장 전체)을 바닥에 깔고 좁고 신선한 쪽(시총 상위)을 위에 얹는다.
+    # 순서를 뒤집으면 시총 상위 350종만 남아 나머지가 코드로 보인다.
+    names: dict[str, str] = {}
     try:
-        _, names = fetch_top_by_marketcap()
-        if names:
-            save_common(_NAME_KEY, names, ttl_seconds=86400 * 7)
-            return names
+        names.update({r["ticker"]: r.get("name", "") for r in get_listed_all()
+                      if r.get("ticker") and r.get("name")})
     except Exception as e:
-        logger.warning(f"네이버 종목명 수집 실패: {e}")
+        logger.warning("상장목록에서 종목명 조회 실패: %s", e)
 
     try:
-        return {r["ticker"]: r.get("name", "") for r in get_listed_all()}
+        _, top = fetch_top_by_marketcap()
+        names.update(top)
     except Exception as e:
-        logger.warning(f"종목명 조회 실패: {e}")
-        return {}
+        logger.warning("네이버 종목명 수집 실패: %s", e)
+
+    if names:
+        save_common(_NAME_KEY, names, ttl_seconds=86400 * 7)
+    else:
+        # 둘 다 실패했다. 빈 사전을 캐시에 넣으면 그 상태가 7일 굳는다.
+        logger.warning("한국 종목명을 한 곳에서도 받지 못했습니다 — 화면에 코드만 나옵니다")
+    return names
