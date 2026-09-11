@@ -192,7 +192,8 @@ def gather_yfinance_market_data(market: str = "US") -> str:
         # 맨 위에 두고 섹터가 전부 미국 ETF 면 모델은 그 숫자를 근거로 답한다.
         # 실제로 한국 시나리오 결과에 KOSPI 는 0회, S&P·NVDA 만 나왔다.
         # 근거 데이터부터 그 시장 것으로 바꿔야 한다.
-        from backend.services.markets import get_market as _gm, normalize as _nz
+        from backend.services.markets import (get_market as _gm, normalize as _nz,
+                                              sector_label as _sector_label)
         if _nz(market) == "KR":
             _spec = _gm("KR")
             _kr_first = [
@@ -210,7 +211,11 @@ def gather_yfinance_market_data(market: str = "US") -> str:
             # 작은 섹터가 아니다. 더 나쁜 건 아래 '미수집' 알림이 그 셋을
             # 못 잡는다는 것이다 — 요청조차 안 했으니 실패한 적도 없고,
             # 짧아진 목록이 전부인 것처럼 보인다.
-            SECTOR_TICKERS = [(etf, f"{label}({etf})") for label, etf in _spec.sector_etfs]
+            #
+            # 이름은 `sector_label` 로 한글화한다. `ENERGY_CHEM` 같은 내부 키가
+            # 한국어 리포트에 그대로 실리면 모델이 뭘로 옮길지 모른다.
+            SECTOR_TICKERS = [(etf, f"{_sector_label(label)}({etf})")
+                              for label, etf in _spec.sector_etfs]
         all_price_tickers  = [t for t, *_ in PRICE_TICKERS]
         all_sector_tickers = [t for t, _ in SECTOR_TICKERS]
         all_tickers = all_price_tickers + all_sector_tickers
@@ -407,33 +412,35 @@ Do NOT quote index levels or rates — narrative and commentary only.
     return _call_perplexity(prompt, max_tokens=1200, market=market)
 
 
-def gather_context(ev: str, market: str = "US") -> str:
-    """yfinance(시장 지표) + Perplexity(뉴스)를 합쳐 에이전트 컨텍스트 반환."""
-    market_data = gather_yfinance_market_data(market)
-    news_data   = gather_perplexity_context(ev, market)
+def gather_news_block(ev: str, market: str = "US") -> str:
+    """뉴스 블록만. 못 받았으면 **못 받았다고 적은 블록**을 돌려준다(빈 문자열 아님).
 
-    parts = [market_data]
+    시장 지표와 분리해 둔다. 예전에는 `gather_context` 가 둘을 한 문자열로
+    합쳤고, `inject_perplexity` 플래그가 그 합친 것을 통째로 막았다 — 이름은
+    뉴스를 말하는데 실제로는 시장 지표까지 잘랐다. 둘을 나누면 "어느
+    에이전트에 무엇을 주는가" 가 서로 독립된 결정이 된다.
+    """
+    news_data = gather_perplexity_context(ev, market)
     if news_data.strip():
-        parts.append("")
         from backend.services.perplexity import window_notice
-        parts.append("[Latest news & expert commentary — Perplexity]")
-        # 요청한 범위는 `gather_perplexity_context` 의 "last 48 hours" 다.
-        parts.append(window_notice("48시간"))
-        parts.append(news_data)
-    else:
-        # 뉴스 블록을 조용히 빼면, 받아 본 모델은 뉴스가 없다는 사실 자체를
-        # 알 수 없어 "최근 보도에 따르면" 같은 서술을 그대로 쓴다. 없다는
-        # 것을 적어 두면 모델도 사용자도 그 리포트의 근거 범위를 안다.
-        parts.append("")
-        parts.append("[News unavailable]")
-        parts.append(
-            "  News collection failed or returned nothing for this run. "
-            "Base the analysis on the market data above only. "
-            "Do NOT cite recent news, press coverage or analyst commentary, "
-            "and state plainly that current news was unavailable."
-        )
+        return ("[Latest news & expert commentary — Perplexity]\n"
+                # 요청한 범위는 `gather_perplexity_context` 의 "last 48 hours" 다.
+                + window_notice("48시간") + "\n" + news_data)
+    # 뉴스 블록을 조용히 빼면, 받아 본 모델은 뉴스가 없다는 사실 자체를
+    # 알 수 없어 "최근 보도에 따르면" 같은 서술을 그대로 쓴다. 없다는
+    # 것을 적어 두면 모델도 사용자도 그 리포트의 근거 범위를 안다.
+    return (
+        "[News unavailable]\n"
+        "  News collection failed or returned nothing for this run. "
+        "Base the analysis on the market data above only. "
+        "Do NOT cite recent news, press coverage or analyst commentary, "
+        "and state plainly that current news was unavailable."
+    )
 
-    return "\n".join(parts)
+
+def gather_context(ev: str, market: str = "US") -> str:
+    """시장 지표 + 뉴스를 합친 문자열. 둘을 함께 원하는 호출자를 위해 남긴다."""
+    return gather_yfinance_market_data(market) + "\n\n" + gather_news_block(ev, market)
 
 
 # ── Claude: 분석·출력 전담 ────────────────────────────────────────────────────
@@ -856,7 +863,8 @@ def _run_parallel_agents(
     ev: str,
     portfolio_str: str,
     model_key: str,
-    perplexity_ctx: str,
+    market_ctx: str,
+    news_ctx: str,
     should_cancel: Optional[Callable[[], bool]] = None,
     market: str = "US",
 ) -> dict[int, tuple[str, float]]:
@@ -876,7 +884,14 @@ def _run_parallel_agents(
             # 큐에서 대기하다 취소된 에이전트 — LLM 을 부르지 않고 끝낸다.
             return ag["id"], "[취소됨]", 0.0
         try:
-            ctx = perplexity_ctx if ag.get("inject_perplexity") else ""
+            # 시장 지표는 **전원**에게 준다. 예전에는 이 한 줄이 뉴스와 시장
+            # 지표를 함께 막아서, 9개 중 2개만 지수·섹터·거시를 받았다.
+            # 나머지 7개는 빈 문자열을 받았는데 그건 '데이터 없음' 이 아니라
+            # 아무 지시도 아니라서, 모델이 기억으로 채웠다 — 판정 카드가
+            # KOSPI 를 2,800 이라고 썼고 실제는 7,034 였다.
+            ctx = market_ctx
+            if ag.get("inject_perplexity") and news_ctx:
+                ctx = ctx + "\n\n" + news_ctx
             model = _resolve_model(ag["id"], model_key)
             text = call_claude(ag["prompt"], model, ag["max_tokens"], perplexity_ctx=ctx,
                                should_cancel=should_cancel)
@@ -901,7 +916,8 @@ def _run_contextual_agents(
     portfolio_str: str,
     model_key: str,
     context_texts: list[str],
-    perplexity_ctx: str,
+    market_ctx: str,
+    news_ctx: str,
     should_cancel: Optional[Callable[[], bool]] = None,
     market: str = "US",
 ) -> dict[int, tuple[str, float]]:
@@ -920,7 +936,14 @@ def _run_contextual_agents(
         if should_cancel is not None and should_cancel():
             raise JobCancelled()
         try:
-            ctx = perplexity_ctx if ag.get("inject_perplexity") else ""
+            # 시장 지표는 **전원**에게 준다. 예전에는 이 한 줄이 뉴스와 시장
+            # 지표를 함께 막아서, 9개 중 2개만 지수·섹터·거시를 받았다.
+            # 나머지 7개는 빈 문자열을 받았는데 그건 '데이터 없음' 이 아니라
+            # 아무 지시도 아니라서, 모델이 기억으로 채웠다 — 판정 카드가
+            # KOSPI 를 2,800 이라고 썼고 실제는 7,034 였다.
+            ctx = market_ctx
+            if ag.get("inject_perplexity") and news_ctx:
+                ctx = ctx + "\n\n" + news_ctx
             model = _resolve_model(ag_id, model_key)
             text = call_claude(ag["prompt"], model, ag["max_tokens"], perplexity_ctx=ctx,
                                should_cancel=should_cancel)
@@ -959,9 +982,13 @@ def run_macro_agents(
         if should_cancel is not None and should_cancel():
             raise JobCancelled()
 
-    # Pre-phase: yfinance로 시장 지표 + Perplexity로 뉴스 수집
+    # Pre-phase: yfinance로 시장 지표 + Perplexity로 뉴스 수집.
+    # **따로 들고 다닌다.** 시장 지표는 모든 에이전트에게, 뉴스는 필요한
+    # 에이전트에게만 간다. 한 문자열로 합쳐 두면 하나를 막을 때 나머지가
+    # 딸려 간다.
     _check()
-    perplexity_ctx = gather_context(event, market)
+    market_ctx = gather_yfinance_market_data(market)
+    news_ctx   = gather_news_block(event, market)
     _check()
 
     phase1_ids = [i for i in selected_ids if i <= 7]
@@ -971,7 +998,7 @@ def run_macro_agents(
     if phase1_ids:
         all_results.update(
             _run_parallel_agents(phase1_ids, event, portfolio_str, effective_model_key,
-                                 perplexity_ctx, should_cancel, market)
+                                 market_ctx, news_ctx, should_cancel, market)
         )
     _check()
 
@@ -982,7 +1009,7 @@ def run_macro_agents(
         ]
         all_results.update(
             _run_contextual_agents(phase2_ids, event, portfolio_str, effective_model_key,
-                                   p1_texts, perplexity_ctx, should_cancel, market)
+                                   p1_texts, market_ctx, news_ctx, should_cancel, market)
         )
     _check()
 
