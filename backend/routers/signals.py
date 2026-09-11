@@ -177,7 +177,7 @@ def pairs_signal(
 
     return {
         "current_z":      round(result["current_z"], 4),
-        "current_signal": str(result["current_signal"]) if result["current_signal"] else None,
+        "current_signal": _signal_or_none(result["current_signal"]),
         "beta":           round(result["beta"], 4),
         "correlation":    round(result["correlation"], 4),
         "is_valid_pair":  result["is_valid_pair"],
@@ -202,7 +202,7 @@ def mean_reversion(
     result = mean_reversion_signal(close_df[ticker].dropna(), window=window, n_std=n_std)
 
     return {
-        "current_signal": str(result["current_signal"]) if result["current_signal"] else None,
+        "current_signal": _signal_or_none(result["current_signal"]),
         "current_price":  round(float(result["current_price"]), 2),
         "upper_band":     round(float(result["upper_band"].iloc[-1]), 2),
         "lower_band":     round(float(result["lower_band"].iloc[-1]), 2),
@@ -210,6 +210,42 @@ def mean_reversion(
         "pct_b":          round(float(result.get("pct_b", 0.5)), 4),
         "current_z":      round(float(result.get("current_z", 0.0)), 4),
     }
+
+
+def _volume_for(ticker: str) -> Optional[pd.Series]:
+    """DB 의 일별 거래량. 없으면 None.
+
+    예전에는 호출부가 `volume=None` 을 하드코딩했다. 그러면 서비스 쪽이
+    `breakout_vol = pd.Series(True, ...)` 로 채워 **거래량 조건이 항상 참**이
+    되고, 응답에는 `volume_surge: true` · `volume_ratio: 1.0` 이 측정값인 척
+    나갔다 — docstring 은 "거래량 급증" 을 조건으로 내걸고 있는데도.
+
+    데이터는 있었다. 같은 순간 /signals/signal-score 는 같은 종목에
+    volume_ratio 0.18 을 준다. 이 경로만 안 쓰고 있었다.
+    """
+    from backend.db.market_cache import get_volume_from_db
+    vol_df = get_volume_from_db([ticker], period="1y")
+    if vol_df is None or ticker not in getattr(vol_df, "columns", []):
+        return None
+    s = vol_df[ticker].dropna()
+    return s if not s.empty else None
+
+
+def _signal_or_none(v) -> Optional[str]:
+    """신호 이름. 값이 없거나 NaN 이면 None.
+
+    `str(v) if v else None` 이었다. **float('nan') 은 truthy** 라 그 가드를
+    통과하고 `str(nan)` = "nan" 이 프론트로 나갔다 — 화면이 그걸 신호 이름으로
+    받는다.
+    """
+    if v is None:
+        return None
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return str(v) or None
 
 
 @router.get("/momentum")
@@ -226,12 +262,12 @@ def momentum_breakout(
         raise HTTPException(status_code=400, detail=f"{ticker} 데이터 없음")
 
     price  = close_df[ticker].dropna()
-    result = momentum_breakout_signal(price, volume=None, lookback=lookback)
+    result = momentum_breakout_signal(price, volume=_volume_for(ticker), lookback=lookback)
 
     resistance = result["resistance"].iloc[-1]
 
     return {
-        "current_signal":    str(result["current_signal"]) if result["current_signal"] else None,
+        "current_signal":    _signal_or_none(result["current_signal"]),
         "current_price":     round(float(result["current_price"]), 2),
         "resistance":        round(float(resistance), 2) if not pd.isna(resistance) else None,
         "is_breakout_today": bool(result["is_breakout_today"]),
@@ -254,7 +290,7 @@ def multi_signal(
 
     price = close_df[ticker].dropna()
     mr    = mean_reversion_signal(price)
-    mb    = momentum_breakout_signal(price, volume=None)
+    mb    = momentum_breakout_signal(price, volume=_volume_for(ticker))
 
     mr_signal = mr["current_signal"]
     mb_signal = mb["current_signal"]
@@ -266,12 +302,12 @@ def multi_signal(
     return {
         "ticker": ticker,
         "mean_reversion": {
-            "current_signal": str(mr_signal) if mr_signal else None,
+            "current_signal": _signal_or_none(mr_signal),
             "current_z":      round(float(mr["current_z"]), 4),
             "pct_b":          round(float(mr.get("pct_b", 0.5)), 4),
         },
         "momentum": {
-            "current_signal":    str(mb_signal) if mb_signal else None,
+            "current_signal":    _signal_or_none(mb_signal),
             "is_breakout_today": bool(mb["is_breakout_today"]),
         },
         "signals_agree": agreement,
@@ -285,10 +321,12 @@ def multi_signal(
 
 @router.get("/regime")
 def market_regime(
-    ticker:    str   = Query(default="^GSPC", description="분석 티커 (기본: S&P500)"),
+    ticker:    Optional[str] = Query(default=None,
+                                     description="분석 티커. 생략하면 시장의 대표 지수"),
     years:     int   = Query(default=1, ge=1, le=5, description="표시 기간 (1-5년)"),
     window:    int   = Query(default=20, ge=5, le=120, description="ER 계산 기간(거래일)"),
     threshold: float = Query(default=0.30, ge=0.05, le=0.90, description="추세 판정 임계값"),
+    market:    str   = Depends(market_param),
 ):
     """효율성 비율(ER) 기반 시장 국면 분류 (상승/횡보/하락).
 
@@ -303,7 +341,12 @@ def market_regime(
     내려받던 K-Means 방식과 달리 네트워크 호출이 없다. 계산도 결정적이라
     같은 입력이면 항상 같은 결과가 나온다.
     """
-    ticker = ticker.upper()
+    # 티커를 안 주면 그 시장의 대표 지수를 쓴다. 예전에는 기본값이 ^GSPC
+    # 하드코딩이라, `?market=KR` 만 준 호출자가 S&P500 국면을 받으면서
+    # 시장이 반영됐다고 믿었다 — 무시되는데 무시된다는 신호가 없었다.
+    # (화면은 RegimePanel 이 ^KS11 을 명시적으로 넘겨서 영향이 없었다.)
+    from backend.services.markets import benchmark_for
+    ticker = (ticker or benchmark_for(market)).upper()
 
     from backend.services.market_data import _cache_get, _cache_put
     from backend.services.market_calendar import is_us_extended_hours
@@ -373,14 +416,40 @@ def market_regime(
 # ══════════════════════════════════════════════════════════════════════════════
 
 @router.get("/market-situation")
-def market_situation():
-    """금리차(10Y-2Y) / 하이일드 스프레드의 과거 백분위 기반 Low/Normal/High 분류."""
-    cached = get_common("market_situation")
+def market_situation(market: str = Depends(market_param)):
+    """금리차(10Y-2Y) / 하이일드 스프레드의 과거 백분위 기반 Low/Normal/High 분류.
+
+    **미국 지표다.** 한국은 대응물을 만들 수 없어 `available: false` 를 준다.
+
+    왜 못 만드는가:
+      · 하이일드 스프레드 — 한국에 FRED 의 BAMLH0A0HYM2 같은 일별 공개
+        시계열이 없다.
+      · 금리차 — 국고채 10년·3년이 ECOS 에 있지만 **일별 조회가 90일까지만**
+        온다 (korea_macro._ecos_series 가 cycle="D" 에서 months_back 을 무시
+        하고 90일로 고정한다). 백분위 분류는 미국 쪽이 10년 이력으로 내는데,
+        3개월 표본으로 같은 Low/Normal/High 를 내면 그건 분류가 아니라 최근
+        변동의 재표현이고 **화면에서는 구분되지 않는다.**
+
+    없는 것을 다른 시장 값으로 채우지 않는다. 대신 왜 없는지 내려보내
+    화면이 "원래 없는 기능" 과 "오늘 고장" 을 구분할 수 있게 한다.
+    """
+    if market == "KR":
+        return {
+            "available": False,
+            "reason": "한국 국고채 일별 시리즈는 90일까지만 제공돼 "
+                      "장기 백분위를 낼 수 없습니다. 하이일드 스프레드는 "
+                      "대응 지표가 없습니다.",
+        }
+
+    # 캐시 키에 시장을 넣는다. 하나로 두면 먼저 조회한 시장의 값이 다른
+    # 시장에 그대로 나간다 (§1.1).
+    cache_key = f"market_situation:{market}"
+    cached = get_common(cache_key)
     if cached:
         return cached
 
-    result = compute_macro_spread_levels()
-    save_common("market_situation", result, ttl_seconds=86400)
+    result = {**compute_macro_spread_levels(), "available": True}
+    save_common(cache_key, result, ttl_seconds=86400)
     return result
 
 

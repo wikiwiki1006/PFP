@@ -2511,11 +2511,19 @@ export default function AlphaTerminal() {
               <Pill label="1Week"        value={fp(m.perf_1w)}   color={chgColor(m.perf_1w)} />
               <Pill label="1Month"       value={fp(m.perf_1m)}   color={chgColor(m.perf_1m)} />
               <Pill label="누적 수익"  value={fp(m.total_return_pct)}  color={chgColor(m.total_return_pct)} />
-              <Pill label="베타"       value={fn(m.portfolio_beta)} />
-              {/* VIX 는 구간 색이라 chgColor(증감 기준)를 못 쓴다. 대신 null 을
+              {/* 무엇 대비 베타인지 라벨에 적는다. 서버가 시장별 벤치마크로
+                  계산하는데(^GSPC / ^KS11) 화면에 안 보이면 한국 사용자는
+                  S&P500 대비로 읽는다. */}
+              <Pill label={m.benchmark_label ? `베타 (${m.benchmark_label} 대비)` : '베타'}
+                    value={fn(m.portfolio_beta)} />
+              {/* VIX 는 **미국 지수다.** VKOSPI 는 야후가 주지 않아(^VKOSPI ·
+                  ^VKOSPI200 · VKOSPI.KS · ^KSVKOSPI 전부 0건) 한국 화면에서도
+                  미국 것을 쓴다. 값이 틀린 게 아니라 출처를 안 밝히는 것이
+                  문제이므로 라벨로 밝힌다 — 시장별로 갈리지 않는다.
+                  색은 구간 기준이라 chgColor(증감 기준)를 못 쓴다. 대신 null 을
                   먼저 갈라낸다 — fv 로 0 을 만들면 `0 > 25`·`0 > 18` 이 둘 다
                   거짓이라 **읽지 못한 상태가 초록(정상)** 으로 칠해진다. */}
-              <Pill label="변동성"        value={fn(m.vix)}
+              <Pill label="변동성 (미국 VIX)" value={fn(m.vix)}
                     color={m.vix == null ? '#64748b'
                            : m.vix > 25 ? '#ef4444' : m.vix > 18 ? '#f59e0b' : '#10b981'} />
             </div>

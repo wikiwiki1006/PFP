@@ -28,7 +28,9 @@ export const DEMO_METRICS: PortfolioMetrics = {
   vix:              16.8,
   perf_1w:          2.41,
   perf_1m:          5.83,
-  alpha_vs_sp500:   4.12,
+  alpha_vs_benchmark: 4.12,
+  benchmark:        '^GSPC',
+  benchmark_label:  'S&P 500',
   as_of:            null,
   market_open:      false,
 }

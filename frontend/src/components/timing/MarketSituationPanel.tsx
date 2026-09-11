@@ -45,13 +45,21 @@ function MetricCard({
       <div className="text-2xl font-mono font-bold" style={{ color: metric.color }}>
         {valueFmt(metric.value)}{unit}
       </div>
-      <div className="mt-2 h-1.5 rounded-full bg-[#0f172a] overflow-hidden">
-        <div
-          className="h-full rounded-full transition-all"
-          style={{ width: `${metric.percentile}%`, backgroundColor: metric.color }}
-        />
-      </div>
-      <div className="text-[10px] text-[#374151] mt-1">과거 10년 대비 백분위 {metric.percentile.toFixed(0)}%</div>
+      {/* 백분위를 못 구하면 막대를 그리지 않는다. null 을 0 으로 쓰면 빈 막대가
+          '최저 수준'으로 읽히고, .toFixed() 는 TypeError 로 패널을 통째로 날린다. */}
+      {metric.percentile != null && (
+        <>
+          <div className="mt-2 h-1.5 rounded-full bg-[#0f172a] overflow-hidden">
+            <div
+              className="h-full rounded-full transition-all"
+              style={{ width: `${metric.percentile}%`, backgroundColor: metric.color }}
+            />
+          </div>
+          <div className="text-[10px] text-[#374151] mt-1">
+            과거 10년 대비 백분위 {metric.percentile.toFixed(0)}%
+          </div>
+        </>
+      )}
     </div>
   )
 }
@@ -72,9 +80,23 @@ export default function MarketSituationPanel() {
 
   const d = q.data
 
+  // 지표를 만들 수 없는 시장은 빈 자리로 두지 않고 이유를 적는다. 패널이 그냥
+  // 사라지면 "원래 없는 기능" 인지 "오늘 고장난 것" 인지 구분할 수 없다.
+  if (d.available === false || !d.rate_spread || !d.hy_spread) {
+    return (
+      <div className="p-4 space-y-2">
+        <div className="text-[11px] text-[#64748b] font-bold tracking-widest uppercase">시장 상황 — 매크로 지표</div>
+        <div className="text-sm text-[#64748b] leading-relaxed">
+          이 시장은 해당 지표를 제공하지 않습니다.
+          {d.reason && <div className="text-[11px] text-[#475569] mt-1">{d.reason}</div>}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="p-4 space-y-4">
-      <div className="text-[11px] text-[#64748b] font-bold tracking-widest uppercase">시장 상황 — 매크로 지표</div>
+      <div className="text-[11px] text-[#64748b] font-bold tracking-widest uppercase">시장 상황 — 매크로 지표 (미국)</div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <MetricCard
           title="금리차 (10Y-2Y)"

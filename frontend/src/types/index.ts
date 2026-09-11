@@ -13,7 +13,15 @@ export interface PortfolioMetrics {
   /** 포트폴리오가 해당 기간보다 짧으면 null (계산 불가와 보합을 구분) */
   perf_1w: number | null
   perf_1m: number | null
-  alpha_vs_sp500: number
+  /** 베타·알파의 기준 지수 티커 (예: '^GSPC' · '^KS11'). */
+  benchmark?: string
+  /** 그 지수의 표시 이름 (예: 'S&P 500' · '코스피'). 라벨에 쓴다 — 무엇 대비
+   *  인지 화면에 없으면 벤치마크를 시장별로 갈라도 사용자는 모른다. */
+  benchmark_label?: string
+  /** 벤치마크 대비 알파. 키 이름에 지수를 박지 않는다 — `alpha_vs_sp500` 은
+   *  계산이 ^KS11 로 바뀐 뒤에도 이름이 거짓말을 계속했다. */
+  alpha_vs_benchmark: number | null
+  portfolio_beta_unavailable?: boolean
   /** 일변동률의 기준 거래일 (YYYY-MM-DD). 장 외에는 마지막 확정 거래일. */
   as_of?: string | null
   /** 미국 증시 개장 여부 — true면 today_change_*가 실시간 값이다. */
@@ -222,15 +230,20 @@ export type MarketSituationLevel = 'Low' | 'Normal' | 'High'
 
 export interface MarketSituationMetric {
   value: number
-  percentile: number
+  /** null = 백분위를 낼 수 없음 (이력 부족). 0(최저 수준)과 구분해야 한다. */
+  percentile: number | null
   level: MarketSituationLevel
   color: string
 }
 
 export interface MarketSituation {
-  rate_spread: MarketSituationMetric
-  hy_spread: MarketSituationMetric
-  source: string
+  /** false = 이 시장에는 해당 지표가 없다. 그때 rate_spread·hy_spread 는 오지 않고
+   *  `reason` 에 이유가 온다 (한국: 국고채 일별 이력 90일 한계). */
+  available?: boolean
+  reason?: string
+  rate_spread?: MarketSituationMetric
+  hy_spread?: MarketSituationMetric
+  source?: string
 }
 
 /** SMA 1차 필터 + MACD/RSI 스코어링 매매신호 스캔 결과 종목. */
