@@ -717,24 +717,27 @@ def compute_macro_spread_levels() -> dict:
         # Low=빨강(역전 위험), HY 는 Low=초록(안전)이라 **서로 모순된 신호**를
         # 동시에 냈다.
         #
-        # 빈 시리즈를 넘기면 `_percentile_rank` 가 문서화된 중립값 50 을 주고
-        # 둘 다 Normal(주황)이 된다. 여전히 지어낸 값이지만 방향을 단정하지
-        # 않는다. **제대로 고치려면 값과 백분위를 None 으로 내보내야 하고**,
-        # 그건 `MarketSituationPanel.tsx:51,54` 가 `percentile.toFixed(0)` 를
-        # 직접 불러서 프론트 수정이 함께 필요하다.
+        # 이제 백분위를 **내보내지 않는다** (None). 프론트가
+        # `metric.percentile != null` 로 막대와 "백분위 N%" 를 건너뛴다
+        # (fe9e0f5). 없는 것을 없다고 말하는 자리다.
         logger.warning(
-            "FRED 매크로 스프레드 조회 실패 — 중립값으로 표시한다 (source=fallback). "
-            "화면은 이 표시를 읽지 않으므로 사용자에게는 실측값처럼 보인다.",
+            "FRED 매크로 스프레드 조회 실패 — 백분위 없이 내보낸다 "
+            "(source=fallback). value·level 은 아직 지어낸 값이다.",
             exc_info=True,
         )
-        rate_series = hy_series = pd.Series(dtype=float)
         rate_spread, hy_spread = 0.5, 3.5
+        rate_pct = hy_pct = None
         source = "fallback"
+    else:
+        rate_pct = _percentile_rank(rate_series, rate_spread)
+        hy_pct   = _percentile_rank(hy_series, hy_spread)
 
-    rate_pct = _percentile_rank(rate_series, rate_spread)
-    hy_pct   = _percentile_rank(hy_series, hy_spread)
-
-    def _level(pct: float) -> str:
+    def _level(pct: "float | None") -> str:
+        # 백분위가 없으면 방향을 말할 수 없다. `Normal` 을 쓰는 것은 프론트
+        # `badge()` 가 Low/High 가 아닌 모든 값을 '정상' 으로 그리기 때문이고,
+        # 즉 None 을 보내도 화면은 같다. 그 표시를 고치는 것은 프론트 몫이다.
+        if pct is None:
+            return "Normal"
         if pct < 33:
             return "Low"
         if pct > 67:
@@ -751,11 +754,13 @@ def compute_macro_spread_levels() -> dict:
 
     return {
         "rate_spread": {
-            "value": round(rate_spread, 3), "percentile": round(rate_pct, 1),
+            "value": round(rate_spread, 3),
+            "percentile": round(rate_pct, 1) if rate_pct is not None else None,
             "level": rate_level, "color": rate_color,
         },
         "hy_spread": {
-            "value": round(hy_spread, 3), "percentile": round(hy_pct, 1),
+            "value": round(hy_spread, 3),
+            "percentile": round(hy_pct, 1) if hy_pct is not None else None,
             "level": hy_level, "color": hy_color,
         },
         "source": source,
