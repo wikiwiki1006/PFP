@@ -119,6 +119,21 @@ def get_market(code: str | None) -> MarketSpec:
     return MARKETS.get((code or "").upper(), MARKETS[DEFAULT_MARKET])
 
 
+def benchmark_for(market: str | None) -> str:
+    """그 시장의 기준 지수 티커. 베타·상대수익률의 비교 대상이다.
+
+    `indices` 의 첫 항목이라는 것을 아는 코드는 여기 하나여야 한다. 예전에는
+    `calculate_portfolio_beta` 가 `^GSPC` 를 기본값으로 들고 있어서, 한국
+    포트폴리오의 베타가 "한국 주식이 S&P 를 얼마나 안 따라가는가" 를
+    쟀다 — 계산은 맞고 질문이 틀렸는데 맞는 답처럼 보였다.
+
+    호출부마다 `next(iter(get_market(m).indices))` 를 쓰면 그 지식이 사본으로
+    퍼진다. 이 리포는 같은 규칙이 여러 곳에 구현돼 한쪽만 고쳐지는 사고를
+    반복해서 냈다 (§1.4 통화 표기가 그 예다).
+    """
+    return next(iter(get_market(market).indices))
+
+
 def normalize(code: str | None) -> str:
     """저장·조회에 쓸 정규화된 시장 코드."""
     return get_market(code).code
