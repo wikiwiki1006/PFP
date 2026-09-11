@@ -27,12 +27,38 @@ def _safe_or(v, default: float) -> float:
     `portfolio_optimizer` 에는 둘째 인자가 **자릿수**인 동명 함수가 있었다
     (지금은 `_round_or_none`). 이름을 `_safe_or` 로 바꾼 것은 그 셋을 구별하기
     위한 것이기도 하다.
+
+    값이 없을 때 **아무 값도 만들고 싶지 않으면** `_num_or_none` 을 쓴다.
     """
     try:
         f = float(v)
         return f if math.isfinite(f) else default
     except (TypeError, ValueError):
         return default
+
+
+def _num_or_none(v) -> "float | None":
+    """숫자면 float, 아니면 None. **지어낸 값을 넣지 않는다.**
+
+    퍼센트 자리에 쓴다. `_safe_or(x, 0.0)` 은 거기서 "계산 불가" 를 "보합" 으로
+    바꾸는데, 그 둘은 사용자에게 전혀 다른 말이다 (CLAUDE.md §1.3). 응답은
+    `SafeJSONResponse` 를 지나 `null` 이 되고 화면은 `—` 를 그린다.
+
+    금액·수량처럼 0 이 참값일 수 있는 자리는 `_safe_or` 를 쓴다 — 어느 쪽이
+    맞는지는 자리마다 다르고, 그 판단을 호출부가 하도록 두 함수를 나눠 뒀다.
+    """
+    f = _safe_or(v, float("nan"))
+    return None if math.isnan(f) else f
+
+
+def _round_keep_none(v, digits: int) -> "float | None":
+    """반올림하되 `None` 은 그대로 둔다 — `round(None)` 은 TypeError 다.
+
+    이름을 `_round_or_none` 으로 하지 않은 이유가 있다. `portfolio_optimizer` 에
+    같은 이름의 함수가 있고 그쪽은 숫자가 아닌 값도 None 으로 바꾼다. 같은
+    이름에 다른 동작을 두는 것이 이 리포에서 반복해 사고를 낸 형태다.
+    """
+    return None if v is None else round(v, digits)
 
 
 def _trim_to_session(close_df: pd.DataFrame, market: str = "US") -> pd.DataFrame:
@@ -510,9 +536,11 @@ def calculate_metrics(
         # `eq_first` 는 `equity_curve[equity_curve > 0]` 의 첫 값이라 항상 양수다.
         # 예전에 있던 `if eq_first else 0.0` 은 도달하지 않는 분기였다.
         eq_first = float(eq_meaningful.iloc[0])
-        total_rtn = _safe_or((total_equity / eq_first - 1) * 100, 0.0)
+        total_rtn = _num_or_none((total_equity / eq_first - 1) * 100)
     else:
-        total_rtn = _safe_or((total_equity / total_cost - 1) * 100 if total_cost else 0.0, 0.0)
+        # 원가도 0 이면 기준점이 없다 — 0% 는 "본전" 이라는 단정이다.
+        total_rtn = (_num_or_none((total_equity / total_cost - 1) * 100)
+                     if total_cost else None)
 
     # 1D 변화 — 종목별 '마지막 두 실제 관측치' 합산이 1순위.
     # 에쿼티 커브의 위치 기반 차분(iloc[-1]-iloc[-2])은 마지막 두 행이
@@ -526,7 +554,7 @@ def calculate_metrics(
             _v, _p, _a = portfolio_daily_change(holdings, raw_df, live, now)
             if _v is not None:
                 today_chg_val = _safe_or(_v, 0.0)
-                today_chg_pct = _safe_or(_p, 0.0)
+                today_chg_pct = _num_or_none(_p)
                 as_of_str = _a.strftime("%Y-%m-%d") if _a is not None else None
         except Exception:
             # 실패하면 아래 폴백이 에쿼티 곡선의 마지막 두 점으로 계산한다 —
@@ -541,10 +569,14 @@ def calculate_metrics(
             _cur_eq = float(equity_curve.iloc[-1])
             _pre_eq = float(equity_curve.iloc[-2])
             today_chg_val = _safe_or(_cur_eq - _pre_eq, 0.0)
-            today_chg_pct = _safe_or((_cur_eq / _pre_eq - 1) * 100 if _pre_eq else 0.0, 0.0)
+            today_chg_pct = (_num_or_none((_cur_eq / _pre_eq - 1) * 100)
+                             if _pre_eq else None)
         else:
+            # 관측치가 한 개뿐이면 전일 대비가 정의되지 않는다.
+            # today_change_val 은 프론트 타입이 아직 non-nullable 이라 0.0 을
+            # 유지한다 (라우팅되는 화면에서는 쓰이지 않는다).
             today_chg_val = 0.0
-            today_chg_pct = 0.0
+            today_chg_pct = None
 
     # 실제 NYSE 거래일만 추린 인덱스 — 행 개수로 세면 공휴일·합성 today 행이 섞여
     # '5행 전'이 5거래일 전이 아니게 된다 (24/7 자산과 인덱스를 합치면 공휴일 행이 남는다).
@@ -577,7 +609,7 @@ def calculate_metrics(
     # 채우지 못한다 — yfinance 가 ^VIX 를 빈 열로 주는 일이 있다. 그러면 폴백을
     # 두었는데도 화면에는 '—' 가 뜬다 (앱 전역 SafeJSONResponse 가 NaN 을 null 로
     # 바꿔 주므로 요청이 깨지지는 않는다. 그 안전망이 이 누락을 가려 왔다.)
-    vix  = _safe_or(curr.get("^VIX", 18.0), 18.0)
+    vix  = _num_or_none(curr.get("^VIX"))
 
     alpha = 0.0
     if "^GSPC" in close_df.columns:
@@ -606,17 +638,18 @@ def calculate_metrics(
     return {
         "total_equity":      round(total_equity, 2),
         "total_cost":        round(total_cost, 2),
-        "total_return_pct":  round(total_rtn, 4),
+        # 계산 불가는 null 로 내려간다 — `_round_keep_none` 이 None 을 통과시킨다.
+        # 0 으로 바꾸면 '보합'·'본전'·'변동성 낮음' 이라는 단정이 된다 (§1.3).
+        "total_return_pct":  _round_keep_none(total_rtn, 4),
         "today_change_val":  round(today_chg_val, 2),
-        "today_change_pct":  round(today_chg_pct, 4),
+        "today_change_pct":  _round_keep_none(today_chg_pct, 4),
         "as_of":             as_of_str,
         "market_open":       _market_open_flag(market),
-        "portfolio_beta":    (round(beta, 4) if beta is not None else None),
-        "vix":               round(vix, 2),
-        # 계산 불가면 null — round(None) 은 TypeError 이므로 반드시 분기해야 한다
-        "perf_1w":           (lambda v: round(v, 4) if v is not None else None)(_perf(5)),
-        "perf_1m":           (lambda v: round(v, 4) if v is not None else None)(_perf(21)),
-        "alpha_vs_sp500":    round(alpha, 4) if alpha is not None else None,
+        "portfolio_beta":    _round_keep_none(beta, 4),
+        "vix":               _round_keep_none(vix, 2),
+        "perf_1w":           _round_keep_none(_perf(5), 4),
+        "perf_1m":           _round_keep_none(_perf(21), 4),
+        "alpha_vs_sp500":    _round_keep_none(alpha, 4),
     }
 
 
