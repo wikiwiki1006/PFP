@@ -426,12 +426,18 @@ Claude Code 세션 여러 개가 역할을 나눠 이 리포를 **동시에** �
 #### 스키마 변경은 창 수만큼 따로 적용된다
 
 DB 를 갈라 놓은 대가다. `schema.py` 를 고친 커밋을 받아도 **내 DB 는 아직 옛
-스키마다.** 기동 시 적용은 `dev.sh` 로 백엔드를 띄울 때만 일어나고, `pytest`
-직접 실행은 스키마를 건드리지 않는다.
+스키마다.**
+
+`pytest` 는 이제 `conftest.py` 가 적용해 준다 (로컬 도커이고 `postgres` 템플릿이
+아닐 때만 — 아니면 skip 이 아니라 실패한다). 그래서 게이트를 돌리는 경로는
+이 함정을 안 밟는다. 남는 것은 **`python -c` 로 직접 부르는 경로와 운영 기동**
+이다.
 
 증상이 원인을 가리키지 않는다 — **"내 테스트가 이상하게 깨진다"** 로 나타난다.
 실제로 `reports` 인덱스를 바꾼 날 세 창이 같은 데 걸렸고, 전부 첫 반응이
-"내 코드가 틀렸나" 였다. 단서는 에러 메시지에 있지만 연결해야 알 수 있다:
+"내 코드가 틀렸나" 였다. `conftest` 가 없는 자리(운영 기동·스크립트)에서는
+같은 증상이 그대로 나오므로 단서를 적어 둔다 — 에러 메시지에 있지만
+연결해야 알 수 있다:
 
 ```
 no unique or exclusion constraint matching the ON CONFLICT specification
@@ -446,8 +452,13 @@ no unique or exclusion constraint matching the ON CONFLICT specification
 PYTHONPATH=$PWD <venv>/python -c "
 from dotenv import load_dotenv; load_dotenv('backend/.env')
 import backend.db as db; db.init_pool(1,2)
-from backend.db.schema import init_schema; init_schema()"
+from backend.db.schema import init_schema; print(init_schema())"
 ```
+
+`init_schema()` 의 반환값을 봐라. 예전에는 반환값이 없고 예외를 삼켜서
+**불러도 적용됐는지 알 수 없었다** — 실패해도 앱은 정상 기동하고 로그 한
+줄만 남는다. 지금은 `True`/`False` 를 준다. 그래도 확실히 하려면 인덱스
+정의를 직접 읽어라. 로그는 "뭔가 돌았다" 만 잰다.
 
 **돌리기 전에 붙은 곳을 확인해라.** `conn.info.host` 가 로컬인지, DB 이름이
 자기 것인지 본다. `postgres` 템플릿에 적용하면 이후 만들어지는 모든 창이
