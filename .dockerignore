@@ -16,6 +16,13 @@ backend/scripts/backup_*.csv
 **/.env
 **/.env.*
 !**/.env.example
+
+# secrets/firebase-admin.json — setup.sh 가 Secret Manager 에서 받아 만든다.
+# 지금은 없지만(사용자가 지움) 새 머신에서 setup.sh 를 돌리면 생기고, 그러면
+# 빌드 컨텍스트에 들어간다. .gitignore 에만 있어서 git 에는 안 올라가지만
+# 도커 컨텍스트는 작업 디렉터리를 통째로 읽는다 — §8 의 `.env` 사고와 같은
+# 형태다(그때도 .gitignore 는 막고 있었다).
+secrets/
 **/*.pem
 **/*.key
 **/serviceAccount*.json
