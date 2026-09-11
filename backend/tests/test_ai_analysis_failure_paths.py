@@ -114,10 +114,15 @@ def test_market_data_says_unavailable_when_every_source_fails(caplog):
     조용히 빈 문자열을 주면 그 블록만 사라지고, 모델은 시장 상황을 자기
     기억에서 꺼내 쓴다. 없다고 적으면 안 쓴다.
     """
+    # 거시지표도 같이 막는다. 안 막으면 `build_macro_block` 이 FRED 로
+    # **실제로 나간다** — 이 테스트는 DB 와 yfinance 만 막고 있었고, 그 호출은
+    # 네트워크 가드가 생기기 전까지 매 실행 나갔다. 여기서 재는 것은 시장
+    # 지표 수집 실패이지 거시지표가 아니다.
     with mock.patch("backend.db.market_cache.get_prices_from_db",
                     side_effect=RuntimeError("db down")), \
          mock.patch("backend.db.is_available", return_value=True), \
          mock.patch("yfinance.download", side_effect=RuntimeError("net down")), \
+         mock.patch.object(ai_analysis, "build_macro_block", return_value=""), \
          caplog.at_level(logging.WARNING):
         text = ai_analysis.gather_yfinance_market_data("US")
 
