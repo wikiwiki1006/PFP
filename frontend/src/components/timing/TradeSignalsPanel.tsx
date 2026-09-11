@@ -8,6 +8,15 @@ import type { SignalScanPick, HoldingsMap } from '@/types'
 import TickerLabel from '@/components/TickerLabel'
 import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
 
+/** 서버가 준 실패 사유. 없으면 null (호출부가 기본 문구를 쓴다).
+ *
+ *  FastAPI 는 HTTPException 의 detail 을 `{ "detail": "..." }` 로 보낸다.
+ *  그 문장이 "무엇을 기다려야 하는지" 를 담고 있으므로 버리지 않는다. */
+function scanErrorMessage(err: unknown): string | null {
+  const d = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+  return typeof d === 'string' && d.trim() ? d : null
+}
+
 interface TradeSignalsPanelProps {
   holdings?: HoldingsMap
 }
@@ -196,8 +205,18 @@ export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelPr
           )}
 
           {/* S&P500 scan results */}
-          {scanQ.isLoading && <div className="text-sm text-[#64748b]">S&P500 스캔 중… (최초 1회)</div>}
-          {scanQ.isError   && <div className="text-sm text-[#ef4444]">스캔 데이터를 불러올 수 없습니다.</div>}
+          {scanQ.isLoading && <div className="text-sm text-[#64748b]">스캔 중… (최초 1회)</div>}
+          {/* 서버가 왜 안 되는지 말해 주면 그대로 보여 준다.
+              "불러올 수 없습니다" 로 뭉개면 **"데이터가 아직 없다" 와 "신호가
+              없다" 가 같은 문장**이 된다 — 둘은 다른 사실이고, 사용자가 기다려야
+              하는지 아닌지가 갈린다. 실제로 서버는 503 에 "종목 목록을 준비하는
+              중입니다. 잠시 후 다시 시도하세요." 를 담아 보내는데 화면이 그걸
+              버리고 있었다. */}
+          {scanQ.isError && (
+            <div className="text-sm text-[#ef4444]">
+              {scanErrorMessage(scanQ.error) ?? '스캔 데이터를 불러올 수 없습니다.'}
+            </div>
+          )}
 
           {scanQ.data && (
             <>
