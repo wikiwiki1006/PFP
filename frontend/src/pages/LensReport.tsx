@@ -708,7 +708,15 @@ function EquityTab() {
             </div>
             <div className="overflow-y-auto flex-1 divide-y divide-[#1e2d40]">
               {histQ.isLoading && <p className="text-center text-[#64748b] py-8 text-sm">로딩 중...</p>}
-              {!histQ.isLoading && equityHistRows.length === 0 && (
+              {/* 조회 실패와 "저장된 게 없음" 을 구분한다. isError 를 안 보면
+                  서버가 죽어도 "레포트 없음" 이 뜨고, 사용자는 자기가 만든 것이
+                  사라진 줄 안다 — 기다려야 하는 상황을 빈 목록으로 읽는다. */}
+              {histQ.isError && (
+                <p className="text-center text-[#ef4444] py-8 text-sm">
+                  {(histQ.error as any)?.response?.data?.detail ?? '레포트 목록을 불러오지 못했습니다.'}
+                </p>
+              )}
+              {!histQ.isLoading && !histQ.isError && equityHistRows.length === 0 && (
                 <p className="text-center text-[#64748b] py-8 text-sm">저장된 주식 레포트 없음</p>
               )}
               {equityHistRows.map(r => (
@@ -1139,7 +1147,12 @@ function IndustryTab() {
             </div>
             <div className="overflow-y-auto flex-1 divide-y divide-[#1e2d40]">
               {histQ.isLoading && <p className="text-center text-[#64748b] py-8 text-sm">로딩 중...</p>}
-              {!histQ.isLoading && indHistRows.length === 0 && (
+              {histQ.isError && (
+                <p className="text-center text-[#ef4444] py-8 text-sm">
+                  {(histQ.error as any)?.response?.data?.detail ?? '레포트 목록을 불러오지 못했습니다.'}
+                </p>
+              )}
+              {!histQ.isLoading && !histQ.isError && indHistRows.length === 0 && (
                 <p className="text-center text-[#64748b] py-8 text-sm">저장된 산업 레포트 없음</p>
               )}
               {indHistRows.map(r => (
