@@ -808,7 +808,14 @@ def _run_pypfopt(
                 if pt:
                     frontier.append({"return": pt["expected_return"], "volatility": pt["volatility"]})
     except Exception:
-        pass
+        # 루프 중간에 죽으면 그때까지 쌓인 점이 남는다. 그 절반짜리 곡선이
+        # 화면에서는 **전체 효율적 프론티어**로 그려진다 — 짧아진 것이
+        # 데이터 한계인지 계산 실패인지 구별되지 않는다.
+        #
+        # 지우지 않는다. 점 몇 개라도 있는 것이 없는 것보다 낫고, 몇 개까지
+        # 만들어졌는지가 로그에 남으면 그 판단을 사람이 할 수 있다.
+        logger.warning("효율적 프론티어 생성 실패 — %d개 점까지만 만들어졌다 "
+                       "(곡선이 잘린 채 그려진다)", len(frontier), exc_info=True)
 
     # 상관관계
     corr = daily_rets_raw.corr()
@@ -861,7 +868,10 @@ def run_ai_optimization(
             if on_stage:
                 on_stage(n, text)
         except Exception:
-            pass
+            # 진행 알림 실패가 최적화를 막을 이유는 없다. 다만 콜백이 깨져
+            # 있으면 단계마다 터지므로 warning 은 소음이 된다 — debug 로 둔다.
+            logger.debug("진행 알림 실패 (단계 %d) — 최적화는 계속한다", n,
+                         exc_info=True)
 
     # ① 투자기간 기반 데이터 기간 자동 선택 (user 입력 period 무시)
     auto_period = _select_data_period(holding_period_years)
@@ -887,6 +897,12 @@ def run_ai_optimization(
             col = "Close" if "Close" in spy.columns else spy.columns[0]
             return spy[col].squeeze()
         except Exception:
+            # 벤치마크가 없으면 `_compute_extended_metrics` 가 베타를 계산하지
+            # 않는다 (그쪽은 None 으로 정직하게 비운다). 다만 왜 비었는지가
+            # 어디에도 안 남아서, 화면에서 "베타 —" 를 보고도 원인을 알 수
+            # 없었다.
+            logger.warning("SPY 벤치마크 수집 실패 — 확장 지표의 베타가 빠진다",
+                           exc_info=True)
             return None
 
     with ThreadPoolExecutor(max_workers=4) as ex:

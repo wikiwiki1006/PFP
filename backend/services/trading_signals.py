@@ -840,9 +840,23 @@ def technical_chart_detail(
         close = round(float(price.iloc[i]), 2)
         series.append({
             "date":       date.strftime("%Y-%m-%d"),
-            "open":       _ohlc(date, "Open")  or close,
-            "high":       _ohlc(date, "High")  or close,
-            "low":        _ohlc(date, "Low")   or close,
+            # OHLC 가 없으면 **없다고 내보낸다.** 예전에는 `or close` 로 종가를
+            # 채워서, 시가·고가·저가를 모르는 날이 **도지 캔들**(범위 0)로
+            # 그려졌다 — "그날 하루 종일 한 가격이었다" 는 관측처럼 보인다.
+            #
+            # `ohlc_df` 가 None 이 되는 경로가 실제로 있다: 라우터가
+            # `_fetch_ohlc` 실패 시 DB 종가로만 진행한다(`signals.py:649-659`).
+            # 그러면 **전 구간이 도지**가 된다.
+            #
+            # 프론트는 이미 null 을 정직하게 다룬다 — `BollingerChart` 가
+            # `p.open ?? p.price` 로 선을 그리고, 툴팁은 `p.open != null &&` 로
+            # O/H/L 줄을 아예 빼고, y축 범위 계산도 null 을 건너뛴다. `or close`
+            # 가 그 정직함을 무력화하고 있었다.
+            #
+            # `or` 가 아니라 None 검사를 쓴다 — `0.0` 도 falsy 라 같이 삼켜진다.
+            "open":       _ohlc(date, "Open"),
+            "high":       _ohlc(date, "High"),
+            "low":        _ohlc(date, "Low"),
             "price":      close,
             "mid":        _r(mid.iloc[i]),
             "upper":      _r(upper.iloc[i]),
