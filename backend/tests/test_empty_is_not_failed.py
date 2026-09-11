@@ -200,8 +200,6 @@ _KNOWN = {
         "거래 조회가 실패해도 '거래 기록 없음'",
     "pages/AlphaTerminal.tsx::SectorPerfPanel::sectorTableQ":
         "섹터표 조회가 실패해도 '데이터 없음'",
-    "pages/LensReport.tsx::HistoryTab::histQ":
-        "위 둘과 같은 파일인데 **안 고쳐졌다** — 세 번째 자리",
     "pages/MacroScenario.tsx::MacroScenario::histQ":
         "`histQ.data?.length === 0` 이라 실패하면 아무것도 안 그린다 — 빈 패널",
 }

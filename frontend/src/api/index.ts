@@ -65,18 +65,15 @@ export function isAuthError(err: unknown): boolean {
   return (err as { response?: { status?: number } })?.response?.status === 401
 }
 
-/**
- * "보유 종목이 없어서" 실패한 요청인지.
- *
- * 서버는 빈 포트폴리오에 400 "보유 종목 없음" 을 돌려준다. 이걸 일반 오류와
- * 뭉뚱그리면 방금 가입한 사용자에게 "불러오지 못했습니다"라는 잘못된 안내가
- * 뜬다 — 조회에 실패한 게 아니라 보여줄 게 없는 것이다.
- */
-export function isEmptyPortfolioError(err: unknown): boolean {
-  const r = (err as { response?: { status?: number; data?: { detail?: unknown } } })?.response
-  if (r?.status !== 400) return false
-  return typeof r.data?.detail === 'string' && r.data.detail.includes('보유 종목')
-}
+// isEmptyPortfolioError 는 지웠다. 서버가 빈 포트폴리오에 400 을 주던 시절의
+// 헬퍼인데, 이제 200 + 빈 값 + `is_empty` 를 준다 (develop bd3461b).
+//
+// 남겨 두면 다음 사람이 **400 을 기준으로 빈 상태를 판단하는 분기를 다시**
+// 만든다. 실제로 그랬다 — AlphaTerminal 의 보유 표 분기가 `isEmptyPortfolioError`
+// 로 걸려 있었는데 `/holdings-detail` 은 처음부터 200 + [] 를 줘서, 보유가 없는
+// 사용자는 안내 대신 **빈 표**를 보고 있었다. 한 번도 그려진 적이 없는 분기였다.
+//
+// 빈 상태는 오류가 아니라 **데이터**로 판단한다.
 
 // ── Portfolio ──────────────────────────────────────────────────────────────────
 export const getPortfolioMetrics = async (): Promise<PortfolioMetrics> =>
