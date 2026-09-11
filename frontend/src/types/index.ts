@@ -195,9 +195,10 @@ export interface MomentumSignal {
   current_signal: string | null
   current_price: number
   resistance: number | null
-  is_breakout_today: boolean
-  volume_surge: boolean
-  volume_ratio: number
+  is_breakout_today: boolean | null   // 거래량 미확인이면 null (판정 불가)
+  volume_surge: boolean | null
+  volume_ratio: number | null
+  volume_known: boolean
 }
 
 export interface RegimeChartPoint {

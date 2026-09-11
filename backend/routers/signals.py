@@ -34,6 +34,17 @@ from backend.services.trading_signals import (
 
 router = APIRouter(prefix="/api/signals", tags=["signals"])
 
+
+def _none_or(v, cast):
+    """값이 None 이면 None 을 그대로, 아니면 cast 를 적용.
+
+    `bool(None)` 은 False 고 `float(None)` 은 TypeError 다. 둘 다 '모른다' 를
+    지운다 — 앞은 조용히 '아니다' 로 바꾸고, 뒤는 500 을 낸다. 실제로 둘 다
+    일어났다: momentum_breakout_signal 이 거래량 미확인 시 None 을 돌려주도록
+    바뀌자 volume_surge 는 false 로 표시되고 volume_ratio 는 500 이 됐다.
+    """
+    return None if v is None else cast(v)
+
 _scan_cache: dict = {}
 
 
@@ -270,9 +281,16 @@ def momentum_breakout(
         "current_signal":    _signal_or_none(result["current_signal"]),
         "current_price":     round(float(result["current_price"]), 2),
         "resistance":        round(float(resistance), 2) if not pd.isna(resistance) else None,
-        "is_breakout_today": bool(result["is_breakout_today"]),
-        "volume_surge":      bool(result.get("volume_surge", False)),
-        "volume_ratio":      round(float(result.get("volume_ratio", 1.0)), 2),
+        # 거래량을 못 받으면 이 셋은 None 이다. bool()/float() 로 감싸면
+        # '모름' 이 '아님'·0 으로 바뀐다 — 서비스가 위장을 그만둔 의미가 없어진다.
+        #
+        # `.get(k, 1.0)` 은 여기서 아무것도 막지 못했다. 키는 있고 값이 None
+        # 이라 기본값이 쓰이지 않고 float(None) 이 500 을 냈다. 기본값 인자는
+        # '키 없음' 만 처리한다.
+        "is_breakout_today": _none_or(result["is_breakout_today"], bool),
+        "volume_surge":      _none_or(result["volume_surge"], bool),
+        "volume_ratio":      _none_or(result["volume_ratio"], lambda v: round(float(v), 2)),
+        "volume_known":      bool(result["volume_known"]),
     }
 
 
@@ -308,7 +326,7 @@ def multi_signal(
         },
         "momentum": {
             "current_signal":    _signal_or_none(mb_signal),
-            "is_breakout_today": bool(mb["is_breakout_today"]),
+            "is_breakout_today": _none_or(mb["is_breakout_today"], bool),
         },
         "signals_agree": agreement,
         "combined_view": (

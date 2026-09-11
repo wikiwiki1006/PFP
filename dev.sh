@@ -179,12 +179,39 @@ else
   echo "▸ 백엔드 ($BE_PORT) — 로컬 DB"
 fi
 
+# ⚠ --reload 를 믿지 마라. 이 환경에서는 조용히 동작하지 않는다.
+#
+# 측정한 것 (Windows · watchfiles 1.2.0 · uvicorn):
+#
+#   --reload 만          → 한 번도 발동하지 않는다. cwd 전체를 감시하는데
+#                          venv/(664M) 와 frontend/node_modules(402M) 가 그
+#                          아래에 있다. main.py 를 touch 해도 워커 PID 가
+#                          그대로다.
+#   --reload-dir backend → 처음 한 번만 발동하고 그 뒤로 죽는다. 같은 파일을
+#                          두 번째 touch 하면 아무 반응이 없다.
+#
+# 둘 다 **조용히** 실패한다. 프로세스는 --reload 를 달고 정상 기동하고 로그에
+# "Started reloader process ... using WatchFiles" 까지 찍힌다.
+#
+# 실제로 09:36 에 띄운 서버가 오후까지 09:36 코드를 서빙했고, 그날 고친 것을
+# 브라우저로 확인한 것이 전부 옛 코드였다. 고친 것을 화면에서 확인했다고
+# 믿는 상태가 제일 나쁘다 — 검증이 실패할 수 없는 형태다.
+#
+# 그래서: **백엔드를 고쳤으면 이 스크립트를 다시 띄워라.** 리로드 로그가
+# 찍혔는지 확인하려면
+#     grep "detected changes" <로그>
+# 가 편집할 때마다 늘어나는지 보면 된다. 안 늘어나면 워처는 죽은 것이다.
+#
+# --reload-dir backend 는 남겨 둔다. 한 번이라도 도는 편이 낫고, cwd 전체를
+# 훑느라 느려지는 것도 막는다.
+RELOAD_OPTS="--reload --reload-dir backend"
 if [ -n "$DB_URL" ]; then
-  DATABASE_URL="$DB_URL" "$PY" -m uvicorn backend.main:app --reload --port "$BE_PORT" &
+  DATABASE_URL="$DB_URL" "$PY" -m uvicorn backend.main:app $RELOAD_OPTS --port "$BE_PORT" &
 else
-  "$PY" -m uvicorn backend.main:app --reload --port "$BE_PORT" &
+  "$PY" -m uvicorn backend.main:app $RELOAD_OPTS --port "$BE_PORT" &
 fi
 BE_PID=$!
 
+echo "▸ 리로드: 믿지 마세요 — 백엔드를 고쳤으면 이 스크립트를 다시 띄우세요"
 echo "▸ 프론트엔드 ($FE_PORT)  ·  로그인: test@gmail.com / 10october@"
 (cd frontend && PFP_FE_PORT="$FE_PORT" PFP_BE_PORT="$BE_PORT" npm run dev)
