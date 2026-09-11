@@ -463,16 +463,25 @@ def get_quote(ticker: str, max_age: int = DEFAULT_MAX_AGE, force: bool = False,
 def seed_closing_prices() -> int:
     """장 마감 후: 확정 종가를 스냅샷에 반영해 장외에 종가가 보이도록 한다.
 
-    24시간 자산(암호화폐·선물·환율·해외지수)은 '마감'이 없으므로 제외한다 —
+    24시간 자산(암호화폐·선물·환율)은 '마감'이 없으므로 제외한다 —
     포함하면 계속 움직이는 실시간 가격을 낡은 종가로 덮어쓰게 된다.
+
+    **한국 주식은 24시간 자산이 아니다.** 예전에는 `uses_us_session_calendar`
+    하나로 걸러서 `.KS`/`.KQ` 가 그 주석의 "24시간 자산" 과 같은 취급을
+    받았고, 그래서 **한국 종목의 확정 종가가 스냅샷에 영원히 안 들어갔다.**
+    기준일도 미국 것 하나였다 — 두 시장의 마지막 확정 세션은 날짜가 다를 수
+    있다(오늘 US 09-10 / KR 09-11).
     """
     from backend.db import get_conn, is_available
     from backend.services.market_calendar import (
-        last_completed_session, uses_us_session_calendar,
+        last_completed_kr_session, last_completed_session,
+        uses_kr_session_calendar, uses_session_calendar,
     )
     if not is_available():
         return 0
-    d = last_completed_session()
+    d_us = last_completed_session()
+    d_kr = last_completed_kr_session()
+    d = max(d_us, d_kr)          # 넓게 뽑고 티커별로 자른다
     with get_conn() as conn:
         with conn.cursor() as cur:
             # 마지막 확정 거래일 종가 + 그 직전 종가로 변동률까지 계산
@@ -482,7 +491,7 @@ def seed_closing_prices() -> int:
                             ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY price_date DESC) rn
                      FROM market_prices WHERE price_date <= %s
                    )
-                   SELECT c.ticker, c.close_price, p.close_price
+                   SELECT c.ticker, c.price_date, c.close_price, p.close_price
                    FROM ranked c LEFT JOIN ranked p
                      ON p.ticker = c.ticker AND p.rn = 2
                    WHERE c.rn = 1""",
@@ -490,9 +499,12 @@ def seed_closing_prices() -> int:
             )
             rows = cur.fetchall()
     quotes = {}
-    for ticker, close, prev in rows:
-        if not uses_us_session_calendar(ticker):
-            continue   # 24시간 자산은 실시간 값을 유지
+    for ticker, pdate, close, prev in rows:
+        if not uses_session_calendar(ticker):
+            continue   # 24시간 자산은 실시간 값을 유지 (확정 종가가 없다)
+        # 티커가 속한 시장의 마지막 확정 세션을 넘는 행은 아직 종가가 아니다.
+        if pdate > (d_kr if uses_kr_session_calendar(ticker) else d_us):
+            continue
         q = {"price": close, "prev_close": prev}
         if prev:
             q["change_1d"] = close - prev

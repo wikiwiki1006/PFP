@@ -513,6 +513,22 @@ def price_can_move(ticker: str) -> bool:
     return True
 
 
+def uses_session_calendar(ticker: str) -> bool:
+    """이 티커에 **확정 종가라는 개념이 있는가.**
+
+    "미국이 아니다" 와 "24시간 자산이다" 는 다른 말인데 한동안 같이 쓰였다.
+    `uses_us_session_calendar()` 는 `.KS`/`.KQ` 에 False 를 주는데, 한국
+    주식은 24시간 자산이 아니라 **자기 캘린더와 확정 종가를 가진 종목**이다.
+    그 둘을 섞은 탓에 `seed_closing_prices` 가 한국 종목을 통째로 건너뛰어,
+    확정 종가가 스냅샷에 영원히 반영되지 않았다.
+
+    남는 한계: 일본·홍콩·유럽 주식은 종가가 있지만 이 리포에 그 캘린더가
+    없어 여전히 False 다. 넓히려면 먼저 캘린더를 들여와야 한다 — 캘린더
+    없이 True 로 만들면 휴장일 종가를 지어내게 된다.
+    """
+    return uses_us_session_calendar(ticker) or uses_kr_session_calendar(ticker)
+
+
 def market_session(ticker: str) -> str:
     """이 티커가 속한 거래소의 **현재** 세션 (pre/open/post/closed).
 
