@@ -871,18 +871,25 @@ def build_return_pct_curve(
         )
         equity_arr[i] = running_cash + stock_val
 
-        holdings_by_date[date_str] = [
-            {
-                "ticker": t,
-                "return_pct": round(_safe_or(
-                    (_safe_or(row_prices[j], 0.0) / running_avg[t] - 1) * 100
-                    if running_avg[t] > 0 else 0.0
-                , 0.0), 2),
-                "price": round(_safe_or(row_prices[j], 0.0), 2),
-            }
-            for j, t in enumerate(all_tickers)
-            if running_qty[t] > 0
-        ]
+        # 시세가 없는 날은 값을 만들지 않는다. 예전에는 가격을 0 으로 채워
+        # `(0 / avg - 1) * 100` = **-100%** 를 보고했다 — 유한한 값이라 NaN
+        # 가드에 걸리지 않고, 화면에는 "전액 손실"이 빨간 글씨로 떴다.
+        # 선행 결측(상장 전·백필 불가 구간)에서 실제로 나온다. 에쿼티 곡선은
+        # `_price_or_cost` 가 취득원가로 대체해 보호되는데 이 표시 필드만
+        # 그 보호를 받지 않았다.
+        rows_today: list[dict] = []
+        for j, t in enumerate(all_tickers):
+            if running_qty[t] <= 0:
+                continue
+            px_t = _num_or_none(row_prices[j])
+            ret = (_num_or_none((px_t / running_avg[t] - 1) * 100)
+                   if px_t is not None and running_avg[t] > 0 else None)
+            rows_today.append({
+                "ticker":     t,
+                "return_pct": _round_keep_none(ret, 2),
+                "price":      _round_keep_none(px_t, 2),
+            })
+        holdings_by_date[date_str] = rows_today
 
     equity = pd.Series(equity_arr, index=idx, dtype=float)
 
