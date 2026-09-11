@@ -321,13 +321,24 @@ def get_sector_etf_df(ttl: int = 60, market: str = "US") -> pd.DataFrame:
 
 
 def get_sector_changes(market: str = "US") -> dict[str, float]:
-    """{ 'XLK': 1.23, 'XLF': -0.45, ... } 형태로 섹터 ETF 1일 등락률 반환."""
+    """{ 'XLK': 1.23, 'XLF': -0.45, ... } 형태로 섹터 ETF 1일 등락률 반환.
+
+    빈 dict 는 **"등락을 구할 수 없었다"** 이지 "모든 섹터가 보합" 이 아니다.
+    예전에는 세 갈래(데이터 없음 · 관측 부족 · 예외)가 전부 로그 없이 `{}` 로
+    합쳐져, 호출자도 운영자도 무엇이 일어났는지 알 수 없었다 (§1.3).
+    지금은 어느 쪽인지 로그에 남는다. 반환값은 그대로 `{}` 다 — 호출자
+    계약을 바꾸지 않는다.
+    """
     try:
         df = _get_sector_etf_df_1mo(market=market)
         if df.empty or len(df) < 2:
+            _logger.warning("[%s] 섹터 등락: 가격 프레임이 %s — 등락을 구할 수 없다",
+                            market, "비어 있다" if df.empty else f"{len(df)}행뿐이다")
             return {}
         df = df[df.index.dayofweek < 5]  # 주말 행 제거
         if df.empty or len(df) < 2:
+            _logger.warning("[%s] 섹터 등락: 주말 제거 후 %d행 — 등락을 구할 수 없다",
+                            market, len(df))
             return {}
         cur, prev = df.iloc[-1], df.iloc[-2]
         result = {}
@@ -336,8 +347,16 @@ def get_sector_changes(market: str = "US") -> dict[str, float]:
                 c, p = cur.get(etf), prev.get(etf)
                 if pd.notna(c) and pd.notna(p) and p:
                     result[etf] = (float(c) / float(p) - 1) * 100
+        want = len(sector_etfs_for(market))
+        if len(result) < want:
+            # 일부만 구해진 것도 신호다. 짧아진 목록은 "그 섹터가 없다" 로
+            # 읽히지 "값을 못 구했다" 로 읽히지 않는다.
+            missing = [e for _, e in sector_etfs_for(market) if e not in result]
+            _logger.warning("[%s] 섹터 등락 %d/%d — 빠짐: %s",
+                            market, len(result), want, ", ".join(missing[:6]))
         return result
     except Exception:
+        _logger.warning("[%s] 섹터 등락 계산 실패 — 빈 dict 를 돌려준다", market, exc_info=True)
         return {}
 
 
@@ -398,6 +417,7 @@ def get_sector_table(market: str = "US") -> list[dict]:
             })
         return rows
     except Exception:
+        _logger.warning("[%s] 섹터 테이블 계산 실패 — 빈 목록을 돌려준다", market, exc_info=True)
         return []
 
 
