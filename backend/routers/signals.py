@@ -467,7 +467,25 @@ def market_situation(market: str = Depends(market_param)):
         return cached
 
     result = {**compute_macro_spread_levels(), "available": True}
-    save_common(cache_key, result, ttl_seconds=86400)
+
+    # 폴백 응답을 하루 동안 박지 않는다.
+    #
+    # compute_macro_spread_levels 는 FRED 조회에 실패하면 값을 전부 None 으로
+    # 두고 `source: "fallback"` 을 붙인다. 그 응답이 86400초 캐시에 들어가면
+    # **하루 종일 재시도 없이** 빈 값이 나간다. Cloud Run 은 프로세스 내
+    # 스케줄러가 돌지 않아 이 라우터가 유일한 조회 경로이므로, 폴백이 한 번
+    # 뜬 날은 그날이 끝날 때까지 복구되지 않는다.
+    #
+    # 저장을 아예 안 하는 쪽은 택하지 않았다. 그러면 FRED 가 느리거나 죽어
+    # 있는 **바로 그 상황에서** 매 요청이 그 지연을 탄다 — 실패를 처리하려던
+    # 코드가 실패를 증폭시킨다. 있는 값은 쓰되 다음 요청이 이어받게 한다.
+    ttl = 86400 if result.get("source") == "FRED" else 600
+    if result.get("source") != "FRED":
+        logger.warning(
+            f"매크로 스프레드가 폴백으로 내려간다 — {ttl}초만 캐시한다 "
+            f"(market={market}, source={result.get('source')!r})"
+        )
+    save_common(cache_key, result, ttl_seconds=ttl)
     return result
 
 
