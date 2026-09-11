@@ -117,7 +117,24 @@ def _recalculate_holding_from_trades(ticker: str, uid: str,
                 total_cost = total_cost * (1.0 - ratio)
             qty = max(0.0, qty - q)
         elif ttype == "UPDATE":
-            qty = q   # avg 는 그대로 유지
+            # 수량만 정정한다 — 주당 평단은 보존한다.
+            #
+            # 여기 total_cost 는 **합계**라서, qty 만 바꾸고 두면
+            # avg = total_cost / qty 가 수량에 반비례해 움직인다. 10주를 100에
+            # 사고 수량을 20으로 정정하면 평단이 100 → 50 이 되고, 반대로 5로
+            # 줄이면 200 이 된다. 사용자는 주식 수만 고쳤는데 취득원가가 바뀐다.
+            #
+            # 같은 사건을 다루는 다른 세 곳은 전부 **주당** 값을 들고 있어서
+            # 손대지 않는 것이 곧 보존이었다 (routers/portfolio.py 의 UPDATE 는
+            # cur["avg"] 를 그대로 넘기고, portfolio_calculator 의 두 재생은
+            # running_cost·running_avg 를 건드리지 않는다). 표현이 달라서 같은
+            # 한 줄이 정반대 결과를 냈다 — 여기서 비율로 옮겨 맞춘다.
+            #
+            # qty 가 0 이면 옮길 원가가 없다. 그 경우 total_cost 도 0 이라
+            # 평단이 0 으로 남는데, 이건 고치기 전과 같은 동작이다.
+            if qty > 0:
+                total_cost = total_cost / qty * q
+            qty = q
 
     holdings = get_holdings(uid, market=market)
     existing = holdings.get(ticker, {})
