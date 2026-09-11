@@ -61,20 +61,44 @@ _PAIRS_PRECOMPUTE_TICKERS = [
 ]
 
 
+# 요청 안에서 도는 yfinance 탐색의 상한. 종목당 1초가 넘으므로 이 수가 곧
+# 최악의 소요 시간(초)이다. 수집 배치(120)와 같은 눈금으로 둔다.
+_KR_PROBE_CAP = 120
+
+
 def _universe_for(market: str) -> list[str]:
     """수집·스캔 대상 종목. 미국은 S&P500, 한국은 시총 상위(KOSPI200·KOSDAQ150).
 
     한국 유니버스는 캐시에 있으면 읽고, 비어 있으면 즉석에서 만든다.
-    네이버 시총 순위는 7 요청 · 2초면 끝나 요청 경로에서 만들어도 부담이 없다.
-    이게 없으면 새 환경은 누군가 수동으로 채워 줄 때까지 한국 화면이 계속 빈다.
+
+    **탐색량에 상한을 준다.** "네이버 시총 순위는 7 요청 · 2초" 는 네이버
+    경로가 살아 있을 때만 맞다. 네이버가 부족하면 yfinance 폴백이 도는데,
+    `max_probe` 없이 부르면 상장 2,600여 종목을 캡 캐시에 없는 만큼 전부
+    `yf.Ticker(t).info` 로 훑는다 — 종목당 1초가 넘으므로 **45분이 이 함수
+    안에서 돈다.** 그리고 이 함수는 Cloud Scheduler 의 HTTP 요청 안에서,
+    한 수집 주기에 세 번 불린다 (`_update_daily_prices`·`_precompute_pairs`
+    ·`_update_signal_scan`).
+
+    `korea_universe.rebuild_scan_universe` 의 docstring 이 "요청 경로에서
+    부르면 그대로 타임아웃" 이라고 적어 두었는데, 여기가 그 요청 경로다.
+    실제로 그 폴백은 한 번 돌았다 — 네이버가 302 로 바뀌어 fast 가 항상
+    비었던 동안이다.
+
+    상한을 주면 한 번에 다 못 채우지만 진척은 캐시에 남고(`kr_market_caps`)
+    다음 주기가 이어받는다. 부족한 결과는 짧은 TTL 로 저장되므로 반쪽
+    유니버스가 7일 굳지도 않는다.
     """
     if market == "KR":
         from backend.services.korea_universe import get_scan_universe, rebuild_scan_universe
         u = get_scan_universe()
         if not u:
-            logger.info("한국 유니버스 없음 — 즉석 생성")
-            rebuild_scan_universe()
+            logger.info("한국 유니버스 없음 — 즉석 생성 (탐색 상한 %d)", _KR_PROBE_CAP)
+            res = rebuild_scan_universe(max_probe=_KR_PROBE_CAP)
             u = get_scan_universe()
+            if not u:
+                # 반환값을 버리지 않는다. 빈 유니버스로 내려가면 이번 주기의
+                # 수집·스캔·페어가 전부 조용히 "대상 없음" 이 된다.
+                logger.warning("한국 유니버스 재생성 실패 %s — 이번 주기는 대상이 없다", res)
         return u
     from backend.services.trading_signals import get_sp500_universe
     return get_sp500_universe()

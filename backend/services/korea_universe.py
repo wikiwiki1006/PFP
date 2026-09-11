@@ -242,12 +242,29 @@ def rebuild_scan_universe(max_probe: Optional[int] = None) -> dict:
         by_board[suffix].sort(key=lambda t: caps.get(t, 0), reverse=True)
 
     universe = by_board[".KS"][:KOSPI_TOP] + by_board[".KQ"][:KOSDAQ_TOP]
-    save_common(_SCAN_KEY, universe, ttl_seconds=86400 * 7)
-
     remaining = sum(1 for r in listed if r["ticker"] not in caps)
-    logger.info(f"한국 스캔 유니버스 {len(universe)}종목 (시총 조회 완료 {len(caps)}, 남음 {remaining})")
+
+    # 목표에 못 미치면 **짧은 TTL** 로 저장한다.
+    #
+    # 네이버 경로는 `>= 목표의 80%` 일 때만 저장하는데(반쪽 유니버스가 7일
+    # 굳으면 그동안 코스닥 신호가 통째로 없고 그게 "후보 없음" 으로 보인다),
+    # 이 폴백 경로에는 그 가드가 없어 몇 종목만 훑고 끝난 결과도 7일짜리로
+    # 저장했다. max_probe 를 주면 그게 정상 경로가 되므로 더 위험하다.
+    #
+    # 지금 있는 것은 쓰되(빈 것보다 낫다) 다음 주기가 이어받도록 짧게 둔다.
+    enough = len(universe) >= (KOSPI_TOP + KOSDAQ_TOP) * 0.8
+    ttl = 86400 * 7 if enough else 1800
+    save_common(_SCAN_KEY, universe, ttl_seconds=ttl)
+
+    logger.info("한국 스캔 유니버스 %d종목 (시총 조회 완료 %d, 남음 %d, TTL %ds)",
+                len(universe), len(caps), remaining, ttl)
+    if not enough:
+        logger.warning(
+            "한국 스캔 유니버스가 목표(%d)에 못 미친다 — %d종목만 저장했고 %d종목이 "
+            "남았다. 다음 주기가 이어받는다.",
+            KOSPI_TOP + KOSDAQ_TOP, len(universe), remaining)
     return {
-        "ok": True, "universe": len(universe),
+        "ok": enough, "universe": len(universe),
         "probed": len(caps), "remaining": remaining,
     }
 
