@@ -16,8 +16,36 @@ export interface PortfolioMetrics {
   stock_value: number
   cash_value: number
   total_cost: number
-  /** TWRR 보정에 실패하면 null (보정 전 값은 추가 입금 시 왜곡돼 있어 쓰지 않는다) */
+  /** 원가 기준 수익률. `stock_value / total_cost - 1` 로 재현된다.
+   *
+   *  null = 취득원가가 0 이라 기준점이 없음 (portfolio_calculator:640).
+   *  0% 는 "본전" 이라는 단정이므로 그 자리에 쓰지 않는다.
+   *
+   *  **매도로 실현한 손익은 들어오지 않는다** — 매도 대금은 현금으로 가고
+   *  현금은 이 계산에서 빠진다. 그건 realized_* 필드가 답할 문제다.
+   *
+   *  (예전 주석은 "TWRR 보정에 실패하면 null" 이었다. 그 덮어쓰기는
+   *  6ceb29e 에서 지웠는데 주석만 남아 있었다 — 없어진 동작을 설명하는
+   *  주석은 틀린 코드보다 오래 산다.) */
   total_return_pct: number | null
+  /** 매도로 **확정된** 손익 금액. `total_return_pct` 가 답하지 않는 쪽이다.
+   *
+   *      0     실현한 것이 없다 (매도 이력이 없다) — 참이다
+   *      null  계산 불가 — 이유는 `realized_pnl_reason`
+   *
+   *  둘을 화면에서 같게 보이면 안 된다. 0 은 "안 팔았다", null 은 "팔았는데
+   *  얼마인지 모른다" 이고 후자는 사용자가 조치할 수 있는 상태다 (§1.3). */
+  realized_pnl: number | null
+  /** 위 비율의 분모 — **매도된 주식의** 취득원가. `total_cost` 가 아니다.
+   *  둘을 같은 기준으로 읽으면 비율이 다른 것을 말한다. */
+  realized_cost: number | null
+  /** `realized_pnl / realized_cost`. null = 매도가 없거나(분모 0) 계산 불가. */
+  realized_pnl_pct: number | null
+  /** 계산 불가 이유 코드. 문구가 아니라 코드다 — 표시 문안은 화면의 결정이다.
+   *  `no_trade_log` · `no_cost_basis` · `missing_sale_price` · `missing_buy_price` */
+  realized_pnl_reason: string | null
+  /** 집계에 들어간 매도 건수. 0 이면 `realized_pnl` 0 이 "안 팔았다" 라는 뜻. */
+  realized_sales: number
   /** null = 전일 종가를 못 구해 계산 불가. 0%(보합)와 구분해야 한다. */
   today_change_pct: number | null
   /** null = 베타를 계산하지 못함. 서버는 원래부터 null 을 줄 수 있었는데
@@ -646,8 +674,17 @@ export interface TickerDetailQuant {
   /** 4팩터 합성 점수 (0~100). 계산 불가 시 null. */
   score: number | null
   score_label: string
-  /** 팩터별 원점수 — 합성 점수의 근거 */
-  factors?: { momentum?: number; trend?: number; quality?: number; value?: number }
+  /** 팩터별 원점수 — 합성 점수의 근거. **null 은 "재지 못했다"** 이고
+   *  0 과 다르다. ETF 는 펀더멘털이 없어 quality·value 가 통째로 null 이다. */
+  factors?: {
+    momentum?: number | null; trend?: number | null
+    quality?: number | null;  value?: number | null
+  }
+  /** 점수를 **실제로** 만든 가중치. 못 구한 팩터를 빼고 재정규화한 결과라,
+   *  키 개수가 곧 "몇 개로 잰 점수인가" 다. 실측: AAPL 4개 · SPY 2개. */
+  weights_used?: Record<string, number>
+  /** 모멘텀이 실제로 본 창 (예: ['21d','63d','126d']). 이력이 짧으면 줄어든다. */
+  momentum_windows?: string[]
   /** 한국어 국면 라벨 */
   regime: string
   /** 'Bull' | 'Sideways' | 'Bear'. null = 국면 계산 실패 (f13dec1 이후) —

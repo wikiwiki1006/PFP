@@ -15,7 +15,7 @@ import {
 } from 'recharts'
 import { X, Search, TrendingUp, TrendingDown, Minus } from 'lucide-react'
 import { getTickerDetail, searchTickers } from '@/api'
-import type { TickerDetail, OHLCVPoint } from '@/types'
+import type { TickerDetail, OHLCVPoint, TickerDetailQuant } from '@/types'
 import { useTheme } from '@/lib/ThemeContext'
 import { useIsMobile } from '@/lib/useIsMobile'
 import { formatAxisPrice, formatPrice, getMarket } from '@/lib/market'
@@ -171,6 +171,54 @@ function makeCandleRenderer(visData: OHLCVPoint[], priceDomain: [number, number]
 // score 가 null 이면 바늘을 그리지 않는다. 예전에는 호출부가 `?? 0` 으로
 // 채워서 계산 불가가 **0점(최악)** 으로 그려졌다 — 바로 옆 텍스트는 '—/100'
 // 인데 바늘만 바닥을 가리키는 상태였다. 0 은 이 척도에서 실제 판단값이다.
+const FACTOR_KO: Record<string, string> = {
+  momentum: '모멘텀', trend: '추세', quality: '퀄리티', value: '밸류',
+}
+const FACTOR_KEYS = ['momentum', 'trend', 'quality', 'value'] as const
+
+/**
+ * 퀀트 라벨을 **점수의 근거만큼만** 말하게 만든다.
+ *
+ * 서버 라벨은 `"BEARISH / 팩터 약세"` 처럼 두 부분이다. 뒷부분은 방향이
+ * 아니라 **팩터 집합에 대한 주장**이다 — '전 팩터 열위' · '다중 팩터 우위'.
+ * 그런데 점수는 못 구한 팩터를 빼고 남은 것만으로 재정규화해서 나온다.
+ * ETF 는 펀더멘털이 없어 quality·value 가 통째로 빠진다 (실측: SPY·JEPQ 가
+ * 2/4, AAPL·NVDA·삼성전자는 4/4). 드문 경우가 아니라 자산군 하나다.
+ *
+ * 그대로 두면 둘 중 하나도 재지 않고 "전 팩터 열위" 라고 단정한다. 그래서
+ * 부분 측정일 때는 **뒷부분을 버리고 무엇으로 쟀는지로 바꾼다.** 방향
+ * (BEARISH 등)은 남긴다 — 그건 실제로 잰 값에서 나온 판단이다.
+ *
+ * 라벨 문자열을 다시 만들지는 않는다. 그 사전은 백엔드에 있고, 여기서
+ * 베껴 두면 두 곳이 갈린다. ' / ' 가 없으면 통째로 방향으로 취급한다.
+ */
+function quantBasis(q: TickerDetailQuant) {
+  const f = q.factors ?? {}
+  const used = FACTOR_KEYS.filter(k => f[k] != null)
+  const total = FACTOR_KEYS.length
+  // factors 가 아예 안 왔으면(계산 불가) 부분 측정이라고 말하지 않는다 —
+  // '0개로 쟀다' 와 '못 쟀다' 는 다르고, 점수도 null 이라 이미 그렇게 보인다.
+  const partial = q.score != null && used.length > 0 && used.length < total
+  const head = (q.score_label ?? '').split(' / ')[0]
+
+  if (!partial) {
+    return { label: q.score_label, partial: false, note: '', title: undefined as string | undefined }
+  }
+  const names = used.map(k => FACTOR_KO[k]).join('·')
+  const missing = FACTOR_KEYS.filter(k => f[k] == null).map(k => FACTOR_KO[k]).join('·')
+  return {
+    label: head,
+    partial: true,
+    // 구분자를 '·' 로 하면 괄호 안의 팩터 구분자와 겹쳐 한 덩어리로 읽힌다.
+    note: `— ${used.length}/${total} 팩터 (${names})`,
+    // 버린 뒷부분을 툴팁에 남기지 않는다. 틀린 주장이라서 뺀 것이지 자리가
+    // 없어서 뺀 것이 아니다. 대신 왜 빠졌는지를 적는다.
+    title: `${missing} 는 이 종목에서 구할 수 없어 점수에서 제외했습니다`
+         + ` (남은 팩터로 가중치를 다시 맞춤).`
+         + ` 팩터 집합이 다른 종목끼리는 점수를 직접 비교할 수 없습니다.`,
+  }
+}
+
 const QuantGauge = ({ score }: { score: number | null }) => {
   const C = usePalette()
   const r = 52, sw = 12
@@ -988,7 +1036,18 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                       {/* 점수가 없으면 라벨도 '계산 불가' 다. 그걸 초록으로 칠하면
                           긍정 판단처럼 읽힌다 — 값과 색이 같은 말을 해야 한다. */}
                       <div style={{ fontSize: 10, color: C.muted }}>퀀트 점수: <span style={{ color: data.quant.score == null ? C.muted : C.up, fontWeight: 700 }}>{data.quant.score ?? '—'}/100</span></div>
-                      <div style={{ fontSize: 11, color: data.quant.score == null ? C.muted : C.up, fontWeight: 700, marginTop: 2 }}>{data.quant.score_label}</div>
+                      {(() => {
+                        const q = quantBasis(data.quant)
+                        return (
+                          <div style={{ fontSize: 11, color: data.quant.score == null ? C.muted : C.up, fontWeight: 700, marginTop: 2 }}
+                               title={q.title}>
+                            {q.label}
+                            {q.partial && (
+                              <span style={{ color: C.muted, fontWeight: 400, marginLeft: 5 }}>{q.note}</span>
+                            )}
+                          </div>
+                        )
+                      })()}
                       {/* 합성 점수만 보여주면 실제보다 정밀해 보인다 — 팩터별 근거를 함께 표시 */}
                       {data.quant.factors && (
                         <div style={{ display: 'flex', gap: 8, marginTop: 5 }}>

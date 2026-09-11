@@ -43,7 +43,7 @@ import { useMarket } from '@/lib/useMarket'
 import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
 import TickerLabel from '@/components/TickerLabel'
 import { marketSession } from '@/lib/marketStorage'
-import type { EquityCurvePoint } from '@/types'
+import type { EquityCurvePoint, PortfolioMetrics } from '@/types'
 
 // 표시용 포맷터는 계산 불가를 '—'로 그린다. 0으로 위장하지 않는다.
 //
@@ -67,6 +67,48 @@ const fp = (v: number | null | undefined, d = 2, sign = true) => {
 // 계산에만 쓴다 (곱셈·비교·합계). **표시나 색 결정에 쓰지 말 것** — null 이 0 이
 // 되므로, 색에 쓰면 계산 불가가 초록으로 칠해진다. 색은 chgColor 를 쓴다.
 const fv = (v: number | null | undefined) => isNA(v) ? 0 : (v as number)
+
+// 실현손익을 계산하지 못한 이유. 서버는 **코드**로 싣는다 — 문구는 표시
+// 계층의 결정이다 (portfolio_calculator:422-426).
+//
+// 이 사전이 있어야 '—' 가 두 가지를 뜻하지 않는다. 매도가 없어서 0 인 것과
+// 매도는 했는데 원가를 몰라 계산 못 한 것은 사용자가 할 수 있는 일이 다르다
+// — 후자는 거래 이력을 고치면 풀린다 (§1.3).
+const RPNL_REASON: Record<string, string> = {
+  no_trade_log:       '거래 이력을 불러오지 못해 계산할 수 없습니다.',
+  no_cost_basis:      '매수 기록 없는 매도가 있어 취득원가를 알 수 없습니다. 거래 이력에 해당 매수를 추가하면 계산됩니다.',
+  missing_sale_price: '매도 단가가 비어 있는 거래가 있습니다.',
+  missing_buy_price:  '매수 단가가 비어 있어 평단을 만들 수 없습니다.',
+}
+
+/** 실현손익 금액. 부호를 **통화기호 앞**에 둔다.
+ *
+ *  `formatPrice` 는 `기호 + 값` 이라 음수를 그대로 넘기면 `$-300.00` 이
+ *  나온다 (실측). 부호가 숫자 안쪽에 묻혀 손실이 즉시 안 읽힌다. 절댓값을
+ *  포맷하고 부호를 앞에 붙여 `-$300.00` / `-₩300` 으로 만든다.
+ *
+ *  양수에도 `+` 를 붙인다 — 손익은 부호가 값의 일부고, 옆 칸들이 이미
+ *  `+1.06%` 처럼 부호를 달고 있어 여기만 빠지면 기준이 달라 보인다. */
+const fmtRealized = (v: number | null | undefined) => {
+  if (isNA(v)) return NA
+  const n = v as number
+  const sign = n > 0 ? '+' : n < 0 ? '-' : ''
+  return sign + formatPrice(Math.abs(n))
+}
+
+/** 실현손익 칸의 툴팁. **'—' 가 왜 '—' 인지** 를 여기서 말한다. */
+function realizedTitle(m: PortfolioMetrics): string {
+  if (m.realized_pnl == null) {
+    return RPNL_REASON[m.realized_pnl_reason ?? ''] ?? '실현손익을 계산할 수 없습니다.'
+  }
+  if (!m.realized_sales) {
+    return '매도 이력이 없습니다. 0 은 "아직 확정한 손익이 없다" 는 뜻입니다.'
+  }
+  const pct = m.realized_pnl_pct == null
+    ? '수익률은 취득원가가 0 이라 계산할 수 없습니다.'
+    : `수익률 ${fp(m.realized_pnl_pct)} (매도된 주식의 취득원가 ${formatPrice(m.realized_cost)} 기준 — 총 투자원가가 아니다).`
+  return `매도 ${m.realized_sales}건으로 확정한 손익. ${pct}`
+}
 
 // 상승 녹색 / 하락 빨강 / 정확히 0 또는 없음 → 회색 (0%를 녹색으로 칠하지 않는다)
 const chgColor = (v: number | null | undefined) =>
@@ -194,9 +236,10 @@ function Marquee({ snapshot }: { snapshot: any }) {
 }
 
 // ── Metric Pill ───────────────────────────────────────────────────────────────
-function Pill({ label, value, color }: { label: string; value: string; color?: string }) {
+function Pill({ label, value, color, title }: { label: string; value: string; color?: string; title?: string }) {
   return (
-    <div className="metric-pill text-center px-6 py-3 border-r border-[#1e2d40] last:border-r-0 flex-shrink-0">
+    <div className="metric-pill text-center px-6 py-3 border-r border-[#1e2d40] last:border-r-0 flex-shrink-0"
+         title={title}>
       <div className="metric-pill-label text-[14px] text-[#94a3b8] font-bold tracking-widest uppercase">{label}</div>
       {/* 색 미지정(중립) 값은 인라인 style 대신 클래스로 — 라이트모드에서 light-theme.css 가
           text-[#e2e8f0] 를 검정으로 재정의해야 흰 배경에서 읽힌다. 인라인 style 은 그 재정의가 닿지 않는다. */}
@@ -2584,7 +2627,19 @@ export default function AlphaTerminal() {
                 color={chgColor(m.today_change_pct)} />
               <Pill label="1Week"        value={fp(m.perf_1w)}   color={chgColor(m.perf_1w)} />
               <Pill label="1Month"       value={fp(m.perf_1m)}   color={chgColor(m.perf_1m)} />
-              <Pill label="누적 수익"  value={fp(m.total_return_pct)}  color={chgColor(m.total_return_pct)} />
+              <Pill label="누적 수익"  value={fp(m.total_return_pct)}  color={chgColor(m.total_return_pct)}
+                    title="보유 중인 주식의 평가손익. 매도로 확정한 손익은 옆의 '실현 손익' 에 있다." />
+              {/* 값은 **금액**이다. 옆 칸들이 전부 포트폴리오 기준 비율인데
+                  realized_pnl_pct 의 분모는 '매도된 주식의 취득원가' 라, 나란히
+                  놓으면 읽는 사람이 같은 기준으로 비교한다. 금액에는 그 혼동이
+                  없다. 비율은 툴팁에서 분모와 함께 밝힌다.
+
+                  0 과 '—' 를 색으로도 가른다: chgColor 가 0 을 회색으로 주므로
+                  "안 팔았다" 가 초록으로 칠해지지 않는다. */}
+              <Pill label="실현 손익"
+                    value={fmtRealized(m.realized_pnl)}
+                    color={chgColor(m.realized_pnl)}
+                    title={realizedTitle(m)} />
               {/* 무엇 대비 베타인지 라벨에 적는다. 서버가 시장별 벤치마크로
                   계산하는데(^GSPC / ^KS11) 화면에 안 보이면 한국 사용자는
                   S&P500 대비로 읽는다. */}

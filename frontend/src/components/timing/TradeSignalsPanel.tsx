@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Search, ChevronLeft, ChevronRight } from 'lucide-react'
 import { getSignalScan, getSignalScore } from '@/api'
+import { getMarket } from '@/lib/market'
 import BollingerChart from './BollingerChart'
 import { COLOR_UP, COLOR_DOWN } from './colors'
 import type { SignalScanPick, HoldingsMap } from '@/types'
@@ -149,8 +150,18 @@ export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelPr
 
   const holdTickers = Object.keys(holdings).filter(t => t !== 'CASH')
 
+  // 키에 시장이 들어가야 한다 (§1.1). 요청 자체는 axios 인터셉터가 market 을
+  // 붙여 주지만, **캐시는 키로만 갈린다** — 키가 같으면 한 시장의 스캔 결과가
+  // 다른 시장에 그대로 나간다.
+  //
+  // 지금 사고가 안 나는 이유는 시장 전환이 전체 새로고침이라 캐시가 통째로
+  // 비워지기 때문이다. 그건 **다른 컴포넌트의 동작에 기댄 안전**이고, 실제로
+  // 새로고침 없이 setMarket 을 부르는 경로가 둘 있다 (AuthContext 의
+  // syncProfile, SetupWizard 의 시장 선택). 지금은 그 전환 시점에 이 패널이
+  // 마운트돼 있지 않아 닿지 않을 뿐이다 — 마운트 순서는 아무도 고정하고 있지
+  // 않다.
   const scanQ = useQuery({
-    queryKey: ['timing-signal-scan'],
+    queryKey: ['timing-signal-scan', getMarket()],
     queryFn:  () => getSignalScan(10),
     staleTime: 1800_000,
   })

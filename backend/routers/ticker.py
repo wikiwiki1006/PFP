@@ -143,7 +143,8 @@ def _build_quant_block(sym: str, uid: str, closes, hist, info: dict) -> dict:
 
     _KO = {"Bull": "상승 추세", "Bear": "하락 추세", "Sideways": "횡보"}
 
-    quant = {"score": None, "label": "계산 불가", "factors": {}}
+    quant = {"score": None, "label": "계산 불가", "factors": {},
+             "weights_used": {}, "momentum_windows": []}
     try:
         quant = compute_quant_score(closes, info or {}, er=regime_er)
     except Exception as e:
@@ -160,6 +161,15 @@ def _build_quant_block(sym: str, uid: str, closes, hist, info: dict) -> dict:
         "score":        quant.get("score"),
         "score_label":  quant.get("label"),
         "factors":      quant.get("factors", {}),
+        # 점수를 **실제로** 만든 가중치와 모멘텀 창. compute_quant_score 가
+        # 돌려주고 있었는데 여기서 버리고 있었다.
+        #
+        # 이게 없으면 화면이 2팩터 점수와 4팩터 점수를 구별할 수 없다. ETF 는
+        # 펀더멘털이 없어 quality·value 가 통째로 빠지는데(실측: SPY·JEPQ 가
+        # 2/4), 라벨 뒷부분은 '전 팩터 열위'·'다중 팩터 우위' 처럼 **팩터
+        # 집합에 대한 주장**이다. 재지 않은 것을 잰 것처럼 말하게 된다.
+        "weights_used":     quant.get("weights_used", {}),
+        "momentum_windows": quant.get("momentum_windows", []),
         "regime":       _KO.get(regime, regime) if regime else "계산 불가",
         "regime_code":  regime,
         "regime_er":    regime_er,
