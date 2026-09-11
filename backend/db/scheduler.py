@@ -521,15 +521,27 @@ def _update_daily_prices(max_tickers: int | None = None, market: str = "US") -> 
         return {"stale": total_stale, "processed": 0,
                 "remaining": total_stale, "scan_refreshed": False}
 
-    save_prices_to_db(close_df.dropna(axis=1, how="all"), volume_df)
-    save_common(
-        stamp_key,
-        datetime.now(tz=timezone.utc).isoformat(),
-        ttl_seconds=86400 * 2,
-    )
-    processed = close_df.shape[1]
+    # 넘긴 열 수가 아니라 **실제로 기록된 셀 수**를 본다. 예전에는
+    # `processed = close_df.shape[1]` 이라, 캘린더 가드가 전 행을 거부해도
+    # 넘긴 열 수를 그대로 성공 개수로 보고했다 — 운영자는 HTTP 응답의
+    # `processed` 에서 있지 않은 진척을 봤고, 그 아래 타임스탬프까지 찍혀
+    # `_sp500_update_due()` 가 '최신' 으로 판정했다.
+    written = save_prices_to_db(close_df.dropna(axis=1, how="all"), volume_df)
+    if written:
+        save_common(
+            stamp_key,
+            datetime.now(tz=timezone.utc).isoformat(),
+            ttl_seconds=86400 * 2,
+        )
+    else:
+        # 타임스탬프를 찍지 않는다. 찍으면 "받아서 저장했다" 가 되고,
+        # 다음 주기가 그 값을 보고 이미 최신이라고 판단한다.
+        logger.warning(
+            "[%s] 가격 수집: %d종목을 받았지만 **한 행도 저장되지 않았다** — "
+            "캘린더 가드가 전부 거부했거나 DB 기록이 실패했다", market, close_df.shape[1])
+    processed = written
     remaining = max(0, total_stale - len(stale))
-    logger.info(f"[{market}] 가격+거래량 수집 완료: {processed}개 저장 (남은 stale {remaining})")
+    logger.info(f"[{market}] 가격+거래량 수집 완료: {processed}개 셀 저장 (남은 stale {remaining})")
 
     # 아직 받을 종목이 남았으면 스캔은 미룬다 — 반쪽 데이터로 갱신하면
     # 그 결과가 6시간 캐시에 박혀 다음 수집분이 반영되지 않는다.

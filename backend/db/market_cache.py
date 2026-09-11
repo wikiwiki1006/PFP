@@ -267,7 +267,7 @@ def get_volume_from_db(
         return None
 
 
-def save_prices_to_db(df: pd.DataFrame, volume_df: Optional[pd.DataFrame] = None):
+def save_prices_to_db(df: pd.DataFrame, volume_df: Optional[pd.DataFrame] = None) -> int:
     """close_df (DatetimeIndex × tickers) → market_prices upsert.
 
     캘린더 가드: 각 티커가 따르는 증시 캘린더에 대해
@@ -289,7 +289,7 @@ def save_prices_to_db(df: pd.DataFrame, volume_df: Optional[pd.DataFrame] = None
     같은 행을 덮어써도 손실이 없다.
     """
     if not is_available() or df is None or df.empty:
-        return
+        return 0
     try:
         from psycopg2.extras import execute_values
         from backend.services.market_calendar import (
@@ -338,7 +338,16 @@ def save_prices_to_db(df: pd.DataFrame, volume_df: Optional[pd.DataFrame] = None
         if skipped:
             logger.debug(f"market_prices 캘린더 가드로 {skipped}개 셀 저장 스킵")
         if not rows:
-            return
+            # 한 행도 안 남았다. 호출자가 이걸 '저장 성공' 과 구별할 수 있어야
+            # 한다 — 예전에는 항상 None 을 돌려줘서, 캘린더 가드가 전 행을
+            # 거부해도 호출자는 넘긴 열 수를 그대로 성공 개수로 보고했다.
+            # 운영자는 HTTP 응답에서 있지 않은 진척을 봤고, 저장 0건이
+            # 타임스탬프를 갱신해 '최신' 판정까지 갔다.
+            if skipped:
+                logger.warning(
+                    "market_prices 저장 0건 — %d개 셀이 전부 캘린더 가드에 걸렸다 "
+                    "(비거래일이거나 종가 미확정)", skipped)
+            return 0
         # 배치 크기 제한 (너무 크면 DB 타임아웃)
         batch = 5000
         with get_conn() as conn:
@@ -355,8 +364,10 @@ def save_prices_to_db(df: pd.DataFrame, volume_df: Optional[pd.DataFrame] = None
                         rows[i:i + batch],
                     )
         logger.debug(f"market_prices 저장: {len(rows)}행")
+        return len(rows)
     except Exception as e:
         logger.warning(f"DB save_prices_to_db 실패: {e}")
+        return 0
 
 
 def get_stale_tickers(tickers: list[str], max_age_hours: int = _STALE_HOURS) -> list[str]:

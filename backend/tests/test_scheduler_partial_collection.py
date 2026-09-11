@@ -58,7 +58,11 @@ class _Collector:
         return _frame(got), _frame(got)
 
     def save(self, close_df, volume_df=None):
+        # 실물 `save_prices_to_db` 는 **실제로 기록한 셀 수**를 돌려준다.
+        # None 을 돌려주면 호출자의 `processed` 가 None 이 되어, 이 대역이
+        # 실물과 다른 계약을 갖게 된다. 여기서는 열 하나당 한 셀로 센다.
         self.fresh.update(c for c in close_df.columns)
+        return len(close_df.columns)
 
 
 def _run(collector, **kw):
