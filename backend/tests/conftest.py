@@ -131,11 +131,61 @@ def live_db():
             "이 워크트리 전용 DB 인지 확인하라.)"
         )
     try:
-        yield _assert_safe_target()
+        target = _assert_safe_target()
+        _ensure_schema(target)
+        yield target
     finally:
         if previous is None:
             db.close_pool()          # 우리가 연 것만 닫는다
         db._pool = previous
+
+
+_schema_applied: set[str] = set()
+
+
+def _ensure_schema(dbname: str) -> None:
+    """이 창 DB 에 앱 스키마를 맞춘다 — **가드를 통과한 뒤에만.**
+
+    테스트는 이미 앱 스키마를 전제하고 있다. `save_report` 를 부르는 검사는
+    그 인덱스가 있다고 가정한다. 여기서 맞추는 것은 새 권한을 주는 게 아니라
+    **이미 하고 있던 가정을 명시**하는 것이다. `init_schema()` 는 앱이 기동할
+    때마다 스스로 돌리는 바로 그 DDL 이고 멱등이다.
+
+    이게 없을 때 무슨 일이 나는지는 실측했다: 창 DB 가 옛 스키마면
+    `save_report` 가 **전부** 실패하고(`no unique or exclusion constraint
+    matching the ON CONFLICT specification`), 증상은 "내 테스트가 이상하게
+    깨진다" 로 나온다. 같은 데 세 창이 걸렸고 수동 절차는 세 번 다 실패했다.
+
+    **진짜 위험은 "테스트가 DDL 을 돈다" 가 아니라 "그 DDL 이 엉뚱한 DB 에
+    간다" 이다.** `postgres` 템플릿에 걸면 이후 만들어지는 모든 창이
+    물려받고, Neon 은 실데이터다. 그래서 `_assert_safe_target()` 를 통과한
+    뒤에만 부른다 — 호스트가 로컬이고 이름이 `pfp_*` 이며 `postgres` 가
+    아닐 때만.
+
+    실패하면 **조용히 건너뛰지 않는다.** 건너뛰면 "스키마가 안 맞는데
+    테스트는 돈다" 가 되어 이 함수가 없던 상태로 되돌아간다.
+    """
+    if dbname in _schema_applied:
+        return
+    from backend.db import schema
+
+    # `init_schema()` 를 부르지 않고 같은 DDL 을 직접 돌린다. 그 함수는 자기
+    # 실패를 삼키고(`except ... logger.error`) 아무것도 돌려주지 않아서,
+    # 불러 봐야 **적용됐는지 알 수 없다.** 여기서 조용히 넘어가면 이 함수가
+    # 없던 상태와 같아진다 — 그게 막으려는 것이다.
+    try:
+        with db.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(schema._DDL)
+    except Exception as e:
+        pytest.fail(
+            f"could not apply the app schema to '{dbname}': {e} -- tests assume "
+            "the same DDL the app runs at startup, and running them against an "
+            "older schema fails in ways that look like broken tests "
+            "(e.g. 'no unique or exclusion constraint matching the ON CONFLICT "
+            "specification'). (창 DB 에 스키마를 못 맞췄다.)"
+        )
+    _schema_applied.add(dbname)
 
 
 def _assert_safe_target() -> str:
