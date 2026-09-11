@@ -312,15 +312,24 @@ def _fmt_amount(value, currency: str) -> str:
             # 필요할 때만 붙여서 ₩850만 은 그대로 두고 ₩1.2만 을 얻는다.
             return f"{sign}₩{_max_frac(a / 1e4, 1)}만"
         return f"{sign}₩{_round_half_up(a):,}"
+
+    # USD 가 아닌 통화에 `$` 를 붙이지 않는다. 모르는 통화는 ISO 코드로 적는다.
+    #
+    # 이 함수는 `info["currency"]` / `info["financialCurrency"]` 를 그대로 받는데
+    # 그 값은 USD·KRW 만이 아니다 — TSMC 는 거래는 USD, 재무제표는 TWD 다.
+    # 예전에는 KRW 가 아니면 전부 달러로 적어서 TSMC 연매출 4.44조 TWD(약
+    # $137B)가 `$4.44T` 로 프롬프트에 실렸다. §1.4 의 '$333605.94B' 와 같은
+    # 형태다 — 숫자는 맞고 통화만 틀렸는데 규모가 32배로 읽힌다.
+    unit = "$" if currency in ("USD", "") or not currency else f"{currency} "
     if a >= 1e12:
-        return f"{sign}${_to_fixed(a / 1e12, 2)}T"
+        return f"{sign}{unit}{_to_fixed(a / 1e12, 2)}T"
     if a >= 1e9:
-        return f"{sign}${_to_fixed(a / 1e9, 2)}B"
+        return f"{sign}{unit}{_to_fixed(a / 1e9, 2)}B"
     if a >= 1e6:
-        return f"{sign}${_to_fixed(a / 1e6, 2)}M"
+        return f"{sign}{unit}{_to_fixed(a / 1e6, 2)}M"
     if a >= 1e3:
-        return f"{sign}${_to_fixed(a / 1e3, 1)}K"
-    return f"{sign}${_to_fixed(a, 2)}"
+        return f"{sign}{unit}{_to_fixed(a / 1e3, 1)}K"
+    return f"{sign}{unit}{_to_fixed(a, 2)}"
 
 
 def _fmt_price(value, currency: str) -> str:
@@ -330,7 +339,12 @@ def _fmt_price(value, currency: str) -> str:
     except (TypeError, ValueError):
         return "—"
     # 원화는 호가 단위가 1원이라 소수점이 없다. ₩71,900.00 은 없는 정밀도다.
-    return f"₩{v:,.0f}" if currency == "KRW" else f"${v:,.2f}"
+    if currency == "KRW":
+        return f"₩{v:,.0f}"
+    # `_fmt_amount` 와 같은 이유로, USD 가 아닌 통화에 `$` 를 붙이지 않는다.
+    if currency and currency != "USD":
+        return f"{currency} {v:,.2f}"
+    return f"${v:,.2f}"
 
 
 def gather_equity_yfinance(ticker: str, market: str = "US") -> tuple[str, str, dict]:
@@ -432,7 +446,11 @@ def gather_equity_yfinance(ticker: str, market: str = "US") -> tuple[str, str, d
         if raw_dict["trailingEps"]:
             lines.append(f"EPS (TTM): {_fmt_price(raw_dict['trailingEps'], cur)} [A]")
         if raw_dict["totalRevenue"]:
-            lines.append(f"연매출: {_fmt_amount(raw_dict['totalRevenue'], cur)} [A]")
+            # 매출은 재무제표 수치라 `financialCurrency` 다. `cur`(거래 통화)로
+            # 적으면 TSMC 처럼 둘이 다른 종목에서 통화가 바뀐다 — 바로 아래
+            # 연간 실적 블록은 이미 `fin_cur` 를 쓰고 통화까지 적어 둔다.
+            # 같은 종목의 매출이 두 줄에서 다른 통화로 나가고 있었다.
+            lines.append(f"연매출: {_fmt_amount(raw_dict['totalRevenue'], fin_cur)} [A]")
         if raw_dict["revenueGrowth"] is not None:
             lines.append(f"매출성장률 (YoY): {float(raw_dict['revenueGrowth'])*100:.1f}% [A]")
         if raw_dict["grossMargins"] is not None:
@@ -448,7 +466,16 @@ def gather_equity_yfinance(ticker: str, market: str = "US") -> tuple[str, str, d
         if raw_dict["fiftyTwoWeekLow"]:
             lines.append(f"52주 최저: {_fmt_price(raw_dict['fiftyTwoWeekLow'], cur)}")
         if raw_dict["dividendYield"] is not None:
-            lines.append(f"배당수익률: {float(raw_dict['dividendYield'])*100:.2f}%")
+            # yfinance 의 `dividendYield` 는 **이미 퍼센트**다. 실측:
+            #   AAPL 0.34 · MSFT 0.74 · KO 2.42 · 005930.KS 0.56
+            # `*100` 을 하면 코카콜라 배당수익률이 242% 로 프롬프트에 실린다.
+            # 어떤 종목이든 '이례적 고배당' 이 되고 리포트 논조가 뒤집힌다.
+            #
+            # 위의 마진·성장률 필드에는 이 수정을 적용하지 않는다. **같은 info
+            # dict 안에서 필드마다 단위가 다르다** — grossMargins 0.48653,
+            # profitMargins 0.27619, revenueGrowth 0.164 는 전부 분수라
+            # `*100` 이 맞다. 크기로 추측하지 말고 필드마다 실측해야 한다.
+            lines.append(f"배당수익률: {float(raw_dict['dividendYield']):.2f}%")
         if raw_dict["sector"]:
             lines.append(f"섹터: {raw_dict['sector']}")
         if raw_dict["industry"]:
