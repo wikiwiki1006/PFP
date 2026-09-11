@@ -18,6 +18,7 @@ import type {
   PortfolioMetrics, EquityCurvePoint, HoldingDetail, HoldingsMap,
   SectorWeights, NewsItem, EarningsEvent,
 } from '@/types'
+import { getMarket } from './market'
 
 export const DEMO_METRICS: PortfolioMetrics = {
   total_equity:     128_450,
@@ -165,3 +166,69 @@ export const DEMO_NEWS: NewsItem[] = [
   { ticker: 'MSFT',  headline: '마이크로소프트 클라우드 매출 성장률 시장 기대치 상회',
     url: '#', datetime: 1_754_600_000 },
 ]
+
+
+/* ── 한국 데모 ────────────────────────────────────────────────────────────────
+ *
+ * 예시 데이터가 시장과 무관한 상수 하나였다. 통화 포맷터만 시장을 따라가서
+ * 한국 탭에서 이렇게 보였다 (익명 /terminal 실측):
+ *
+ *     총 자산 ₩128,450   ← 달러 규모 숫자에 원화 기호만 붙은 것
+ *     베타 (S&P 500 대비)
+ *     보유에 SPY · JEPQ
+ *
+ * `LockedPreview` 의 흐림이 덮어서 심각도는 낮았지만, 미리보기는 **서비스가
+ * 무엇을 하는지 보여 주는 화면**이다. 한국 사용자에게 미국 종목과 달러
+ * 규모를 보여 주면 그 화면이 하는 일을 잘못 말한다.
+ *
+ * 금액은 실제 한국 개인 계좌 규모(1.7억)로 두었다. 종목·평단은 실재 종목의
+ * 대략적인 값이고, 미리보기용 예시임은 LockedPreview 가 밝힌다.
+ */
+const DEMO_METRICS_KR: PortfolioMetrics = {
+  ...DEMO_METRICS,
+  total_equity:     172_400_000,
+  total_cost:       140_000_000,
+  // stock_value·cash_value 는 서버가 주는데 PortfolioMetrics 에 선언이 없다
+  // (develop 에 넘겼다). 선언이 생기면 여기도 채운다 — 158,900,000 / 13,500,000.
+  benchmark:        '^KS11',
+  benchmark_label:  '코스피',
+}
+
+const DEMO_HOLDINGS_DETAIL_KR: HoldingDetail[] = [
+  { ticker: '005930.KS', name: '삼성전자',   qty: 200, avg_cost: 71_900,  current_price: 260_250,
+    market_value: 52_050_000, pnl: 37_670_000, pnl_pct: 261.96, sector: 'Technology',        weight: 30.2, chg_pct: -0.19 },
+  { ticker: '000660.KS', name: 'SK하이닉스', qty:  20, avg_cost: 245_000, current_price: 1_807_500,
+    market_value: 36_150_000, pnl: 31_250_000, pnl_pct: 637.76, sector: 'Technology',        weight: 21.0, chg_pct:  1.24 },
+  { ticker: '005380.KS', name: '현대차',     qty: 120, avg_cost: 198_500, current_price: 241_000,
+    market_value: 28_920_000, pnl:  5_100_000, pnl_pct:  21.41, sector: 'Consumer Cyclical', weight: 16.8, chg_pct:  0.62 },
+  { ticker: '035420.KS', name: 'NAVER',      qty: 150, avg_cost: 186_000, current_price: 268_500,
+    market_value: 40_275_000, pnl: 12_375_000, pnl_pct:  44.35, sector: 'Communication',     weight: 23.4, chg_pct: -1.03 },
+  { ticker: 'CASH', qty: 13_500_000, avg_cost: 1, current_price: 1, market_value: 13_500_000,
+    pnl: 0, pnl_pct: 0, sector: 'Cash', weight: 7.8, chg_pct: 0 },
+]
+
+const DEMO_HOLDINGS_RAW_KR: HoldingsMap = {
+  '005930.KS': { q: 200,        avg:  71_900, sector: 'Technology' },
+  '000660.KS': { q:  20,        avg: 245_000, sector: 'Technology' },
+  '005380.KS': { q: 120,        avg: 198_500, sector: 'Consumer Cyclical' },
+  '035420.KS': { q: 150,        avg: 186_000, sector: 'Communication' },
+  CASH:        { q: 13_500_000, avg: 1,       sector: 'Cash' },
+}
+
+const DEMO_SECTOR_WEIGHTS_KR: SectorWeights = {
+  Technology:          51.2,
+  Communication:       23.4,
+  'Consumer Cyclical': 16.8,
+  Cash:                 7.8,
+}
+
+/* ── 시장별 선택자 ────────────────────────────────────────────────────────────
+ *
+ * 호출 시점에 `getMarket()` 을 읽는다. 모듈 최상위에서 한 번 고르면 시장
+ * 전환이 전체 새로고침을 유지하는 동안만 맞고, 그 동작이 바뀌면 조용히
+ * 틀려진다 — 미리보기라서 아무도 안 눈치챈다.
+ */
+export const demoMetrics        = (): PortfolioMetrics => getMarket() === 'KR' ? DEMO_METRICS_KR : DEMO_METRICS
+export const demoHoldingsDetail = (): HoldingDetail[]  => getMarket() === 'KR' ? DEMO_HOLDINGS_DETAIL_KR : DEMO_HOLDINGS_DETAIL
+export const demoHoldingsRaw    = (): HoldingsMap      => getMarket() === 'KR' ? DEMO_HOLDINGS_RAW_KR : DEMO_HOLDINGS_RAW
+export const demoSectorWeights  = (): SectorWeights    => getMarket() === 'KR' ? DEMO_SECTOR_WEIGHTS_KR : DEMO_SECTOR_WEIGHTS
