@@ -997,7 +997,14 @@ def get_holdings_detail_endpoint(_auth: dict = Depends(current_user), market: st
     # 으로 3.6% 과대 표시됐다. _get_live_prices 가 티커별로 거른다.
     live = _get_live_prices(tickers)
 
-    rows = get_holdings_detail(holdings, raw_df, live=live)
+    # 희소 프레임(raw_df)에 관측치가 없는 종목을 채울 **ffill 된 종가 프레임**.
+    # 안 넘기면 그 종목이 가격 ₩0 행으로 표시되고, 표 합계가 총자산과
+    # 어긋난다 (실측 차이 1,500,000). 채운 행은 마지막 확정 종가를 쓰고
+    # chg_pct·as_of 는 null 로 둔다 — 0.0 을 넣으면 '보합' 이 된다.
+    _period = _period_covering_first_trade(get_trade_log(uid, market=market))
+    close_df = _portfolio_close_df(holdings, period=_period, ttl=300, market=market)
+
+    rows = get_holdings_detail(holdings, raw_df, live=live, fallback_df=close_df)
 
     # 화면용 이름을 붙인다. 한국 종목은 '034020.KS' 처럼 숫자 코드라
     # 목록만 보고는 어느 회사인지 알 수 없다.
