@@ -398,7 +398,7 @@ def equity_curve_to_records(
 def calculate_portfolio_beta(
     holdings: dict,
     close_df: pd.DataFrame,
-    benchmark: str = "^GSPC",
+    benchmark: str,
 ) -> "float | None":
     """포트폴리오 베타. 계산할 수 없으면 None.
 
@@ -407,6 +407,12 @@ def calculate_portfolio_beta(
     AI 피드백에서 **모든 종목이 관측치 부족(<30)으로 1.0** 이 되어 포트폴리오
     베타가 항상 1.00 으로 보고됐다. 화면 상단 지표는 긴 구간을 써서 제대로
     나오는데 피드백만 1.00 이라 서로 어긋났다.
+
+    `benchmark` 에 기본값을 두지 않는다. `"^GSPC"` 가 기본값이던 동안 한국
+    포트폴리오의 베타도 **S&P 500 대비**로 계산됐다 (§1.1). 실측값 0.2306 은
+    "한국 주식이 S&P 를 안 따라간다" 는 뜻인데 화면 라벨은 "베타" 뿐이라
+    사용자는 "내 포트폴리오는 방어적이다" 로 읽는다 — 계산은 맞고 질문이
+    틀렸으며, 그게 맞는 답처럼 제시됐다. 빠뜨리면 TypeError 가 나게 둔다.
     """
     try:
         if benchmark not in close_df.columns:
@@ -603,7 +609,18 @@ def calculate_metrics(
             return None
         return (cur / base - 1) * 100
 
-    beta = calculate_portfolio_beta(holdings, close_df)
+    # 벤치마크는 시장이 정한다. `MarketSpec.indices` 의 **첫 항목**이 그 시장의
+    # 기준 지수라고 markets.py 가 정의한다 (US `^GSPC` · KR `^KS11`).
+    #
+    # 지금 KR 에서는 이 값이 None 이 된다 — `/metrics` 프레임을 만드는
+    # `routers/portfolio.py` 가 `["^GSPC", "^VIX"]` 를 시장과 무관하게 넣고
+    # `include_market=False` 로 불러서, `^KS11` 열이 아예 오지 않는다.
+    # 그 라우터가 시장 기준지수를 함께 실어 주면 값이 돌아온다. 그때까지는
+    # '—' 가 맞다 — S&P 대비 0.2306 을 "베타" 라고 보여주는 것보다 정직하다.
+    from backend.services.markets import get_market
+    beta = calculate_portfolio_beta(
+        holdings, close_df, next(iter(get_market(market).indices)),
+    )
     # `.get()` 의 기본값 18.0(VIX 장기 평균)은 **열이 없을 때만** 쓰인다.
     # 열은 있는데 값이 전부 NaN 이면 NaN 이 그대로 나오고, ffill 도 전량 NaN 열은
     # 채우지 못한다 — yfinance 가 ^VIX 를 빈 열로 주는 일이 있다. 그러면 폴백을
