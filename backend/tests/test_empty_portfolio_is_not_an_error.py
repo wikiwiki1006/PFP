@@ -171,11 +171,14 @@ def test_the_empty_benchmark_matches_what_the_calculator_would_say(empty_account
 # 지금 빠진 것을 적어 둔다. 채워지면 이 목록을 지우라고 요구한다.
 _KNOWN_MISSING = {
     "market_open": "장 개폐는 보유와 무관한 시장 상태다 — 빈 계정에서도 답이 있다",
-    "realized_pnl": "agent/develop 03641c9 이 채운다 — 병합되면 이 줄을 지운다",
-    "realized_cost": "같은 커밋",
-    "realized_pnl_pct": "같은 커밋",
-    "realized_pnl_reason": "같은 커밋",
-    "realized_sales": "같은 커밋",
+    # d833be9 이 추가한 베타 근거. 빈 계정에서는 0 / 0 / None 이 맞다
+    # (센 종목이 없다는 사실이고, 비중은 분모가 없어 값이 없다).
+    # 빈 응답 조립은 routers/portfolio.py 라 develop 이 채운다 — 채워지면
+    # 아래 test_the_missing_list_does_not_outlive_the_gap 이 이 줄을 지우라고
+    # 요구한다.
+    "beta_counted": "agent/develop 이 채운다 — 빈 계정에서는 0",
+    "beta_holdings": "같은 자리 — 빈 계정에서는 0",
+    "beta_value_share": "같은 자리 — 분모가 없어 None",
 }
 
 
