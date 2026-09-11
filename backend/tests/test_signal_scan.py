@@ -108,7 +108,9 @@ def test_scores_and_shape_are_well_formed():
     assert res["as_of"] == IDX[-1].strftime("%Y-%m-%d")
     for p in res["long_picks"] + res["short_picks"]:
         assert 0 <= p["score"] <= 100
-        assert set(p["components"]) == {"volume", "momentum", "trend"}
+        # 'trend' 는 과도기 키다. 값이 RSI 점수인데 프론트가 "추세" 막대로
+        # 그리고 있어서, develop 이 components.rsi 로 옮기기 전까지만 함께 나간다.
+        assert set(p["components"]) == {"volume", "momentum", "rsi", "trend"}
         assert 0.0 <= p["components"]["volume"] <= 40.0
         assert -10.0 <= p["components"]["trend"] <= 30.0
         assert isinstance(p["reason"], str) and p["reason"]

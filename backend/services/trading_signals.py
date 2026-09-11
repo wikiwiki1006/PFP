@@ -54,7 +54,7 @@ def mean_reversion_signal(
     signals[price >= upper] = "SELL"
 
     current_z      = float(zscore.iloc[-1]) if not pd.isna(zscore.iloc[-1]) else 0.0
-    current_signal = signals.iloc[-1]
+    current_signal = _signal_at(signals)
 
     return {
         "mid_band": mid, "upper_band": upper, "lower_band": lower,
@@ -70,6 +70,24 @@ def mean_reversion_signal(
 # 3. 모멘텀 돌파
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _signal_at(series: pd.Series, i: int = -1):
+    """신호 시계열의 한 시점 값. **신호 없음은 None 이다.**
+
+    `pd.Series(None, index=..., dtype=object)` 는 pandas 3.x 에서 None 이 아니라
+    `float('nan')` 으로 채워진다. NaN 은 truthy 라서 `str(x) if x else None`
+    같은 가드를 그대로 통과하고, 화면에는 신호 이름 자리에 **문자열 "nan"**
+    이 나갔다 (`/api/signals/momentum`, `/api/signals/mean-reversion` 에서 실측).
+
+    외부 계약이 바뀐 것을 코드가 못 따라간 형태다 — 야후가 미확정 종가를
+    NaN 대신 실시간 값으로 주기 시작한 것, dividendYield 의 단위가 바뀐 것과
+    같은 계열이고, 여기서는 pandas 쪽이었다. 판정을 한 곳으로 모은다.
+    """
+    if len(series) == 0:
+        return None
+    v = series.iloc[i]
+    return None if pd.isna(v) else v
+
+
 def momentum_breakout_signal(
     price: pd.Series,
     volume: pd.Series | None,
@@ -78,30 +96,48 @@ def momentum_breakout_signal(
 ) -> dict:
     resistance = price.rolling(lookback).max().shift(1)
 
-    if volume is not None and len(volume) > 0:
-        volume_avg    = volume.rolling(lookback).mean().shift(1)
-        breakout_vol  = volume > volume_avg * volume_mult
-        volume_ratio  = float(volume.iloc[-1] / volume_avg.iloc[-1]) if (
-            not pd.isna(volume_avg.iloc[-1]) and volume_avg.iloc[-1] > 0
-        ) else 1.0
-    else:
-        volume_avg   = pd.Series(np.nan, index=price.index)
-        breakout_vol = pd.Series(True, index=price.index)
-        volume_ratio = 1.0
+    volume_known = volume is not None and len(volume) > 0
+    signals = pd.Series(None, index=price.index, dtype=object)
 
-    breakout = (price > resistance) & breakout_vol
-    signals  = pd.Series(None, index=price.index, dtype=object)
-    signals[breakout] = "BREAKOUT"
+    if volume_known:
+        volume_avg   = volume.rolling(lookback).mean().shift(1)
+        breakout_vol = volume > volume_avg * volume_mult
+        last_avg     = volume_avg.iloc[-1]
+        volume_ratio = (float(volume.iloc[-1] / last_avg)
+                        if not pd.isna(last_avg) and last_avg > 0 else None)
+
+        breakout = (price > resistance) & breakout_vol
+        signals[breakout] = "BREAKOUT"
+        is_breakout_today = bool(breakout.iloc[-1]) if len(breakout) > 0 else False
+        volume_surge      = bool(breakout_vol.iloc[-1]) if len(breakout_vol) > 0 else False
+    else:
+        # 거래량을 모를 때 breakout_vol 을 True 로 채우면 이 신호의 정의
+        # ("고가 돌파 + 거래량 급증") 에서 뒤쪽 조건이 공짜로 성립한다. 가격만
+        # 뚫어도 '거래량이 확인된 돌파' 가 되고, volume_surge=True 와
+        # volume_ratio=1.0 이 측정값인 얼굴로 함께 실린다.
+        #
+        # 실제로 그랬다. /api/signals/momentum 은 volume=None 을 하드코딩해서
+        # 부르는데(routers/signals.py) 응답은 volume_surge:true, volume_ratio:1.0
+        # 이었다. 같은 순간 /api/signals/signal-score 는 같은 종목에 0.18 을
+        # 줬다 — 거래량 데이터는 있고 이 경로만 안 쓴 것이다.
+        #
+        # 모르는 것은 모른다고 내보낸다. False 로 채우는 것도 답이 아니다.
+        # 그건 '거래량 급증 없음' 이라는 또 다른 단정이다.
+        volume_avg        = pd.Series(np.nan, index=price.index)
+        volume_ratio      = None
+        is_breakout_today = None
+        volume_surge      = None
 
     return {
-        "resistance":       resistance,
-        "volume_avg":       volume_avg,
-        "signals":          signals,
-        "current_signal":   signals.iloc[-1],
-        "current_price":    float(price.iloc[-1]),
-        "is_breakout_today": bool(breakout.iloc[-1]) if len(breakout) > 0 else False,
-        "volume_surge":     bool(breakout_vol.iloc[-1]) if len(breakout_vol) > 0 else False,
-        "volume_ratio":     round(volume_ratio, 2),
+        "resistance":        resistance,
+        "volume_avg":        volume_avg,
+        "signals":           signals,
+        "current_signal":    _signal_at(signals),
+        "current_price":     float(price.iloc[-1]),
+        "is_breakout_today": is_breakout_today,
+        "volume_surge":      volume_surge,
+        "volume_ratio":      round(volume_ratio, 2) if volume_ratio is not None else None,
+        "volume_known":      volume_known,
     }
 
 
@@ -159,7 +195,7 @@ def pairs_trading_signal(
 
     signal_series  = pd.Series(signals, index=zscore.index)
     current_z      = float(zscore.iloc[-1]) if not pd.isna(zscore.iloc[-1]) else 0.0
-    current_signal = signal_series.iloc[-1]
+    current_signal = _signal_at(signal_series)
 
     return {
         "spread": spread, "zscore": zscore, "beta": float(beta),
@@ -416,8 +452,25 @@ def _score_ticker_side(
 
     score = max(0.0, min(100.0, s_vol + s_mom + s_rsi))
     arrow = "▲" if h_today >= h_prev else "▼"
-    trend = "정배열 (20>50일선)" if side == "long" else "역배열 (20<50일선)"
-    anchor = "100일선 위" if side == "long" else "200일선 아래"
+
+    # 이동평균 상태는 **잰다.** 예전에는 side 로 고른 리터럴이었다:
+    #     trend  = "정배열 (20>50일선)" if side == "long" else "역배열 (20<50일선)"
+    #     anchor = "100일선 위"        if side == "long" else "200일선 아래"
+    #
+    # 이 함수는 docstring 대로 "1차 필터 통과 여부와 무관하게 호출 가능" 하다.
+    # 그래서 필터가 그 조건을 보장해 주지 않는데도 단정했다. 실측 (005930.KS,
+    # long_filter_pass=false · short_filter_pass=false 인데 양쪽 다 나감):
+    #     long  "100일선 위 · 정배열 (20>50일선) · …"
+    #     short "200일선 아래 · 역배열 (20<50일선) · …"
+    # 같은 종목 같은 시각에 20일선이 50일선 위이면서 아래일 수는 없다.
+    # anchor 가 어느 이동평균을 보는지는 side 마다 다른 게 맞다(롱은 100일선,
+    # 숏은 200일선을 기준으로 본다). 틀렸던 것은 **방향을 안 재고 단정한 것**이다.
+    ma20  = float(c.iloc[-20:].mean())
+    ma50  = float(c.iloc[-50:].mean())
+    ma_anchor = float(c.iloc[-100:].mean()) if side == "long" else float(c.iloc[-200:].mean())
+    trend = ("정배열 (20>50일선)" if ma20 > ma50 else
+             "역배열 (20<50일선)" if ma20 < ma50 else "20일선 = 50일선")
+    anchor = f"{'100일선' if side == 'long' else '200일선'} {'위' if price > ma_anchor else '아래'}"
     return {
         "ticker":         ticker,
         "price":          round(price, 2),
@@ -429,6 +482,13 @@ def _score_ticker_side(
         "components": {
             "volume":   round(s_vol, 1),
             "momentum": round(s_mom, 1),
+            # 이 항목은 RSI 점수다. 점수 공식에 추세 항목은 없다 —
+            # s_vol · s_mom · s_rsi 셋뿐인데 마지막이 'trend' 로 나가고 있었고,
+            # TradeSignalsPanel.tsx 가 그것을 "추세" 막대로 그렸다. RSI 53.8 →
+            # s_rsi 30.0 이 화면에 "추세 30/30" 으로 표시됐다.
+            "rsi":      round(s_rsi, 1),
+            # TODO(통합): develop 이 프론트를 components.rsi 로 바꾸면 제거한다.
+            # 지금 지우면 "추세" 막대가 undefined 로 그려진다.
             "trend":    round(s_rsi, 1),
         },
         "reason": f"{anchor} · {trend} · 거래량 {vratio:.1f}배 · RSI {rsi_val:.0f} · MACD {arrow}",
@@ -795,7 +855,7 @@ def technical_chart_detail(
         "series":         series,
         "key_points":     points,
         "current_z":      round(float(current_z), 3),
-        "current_signal": str(mr["current_signal"]) if mr["current_signal"] else None,
+        "current_signal": mr["current_signal"],   # _signal_at 이 이미 None 으로 정규화한다
         "bias":           bias,
     }
 
