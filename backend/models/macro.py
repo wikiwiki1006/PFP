@@ -9,7 +9,13 @@ class MacroAnalysisRequest(BaseModel):
     # 기본값을 비싼 쪽에 두면 실수로 비용이 몇 배가 된다.
     model: str = Field(default="claude-haiku-4-5", description="사용할 Claude 모델")
     mode: str = Field(default="fast", description="fast(3) | standard(5) | full(9)")
-    provider: str = Field(default="claude", description="claude | gpt")
+    # `provider` 를 뺐다. GPT 경로(call_gpt·_GPT_URL·GPT_API_KEY)가 전부
+    # 제거돼 선택지가 하나뿐이었고, 남겨 두면 "고를 수 있다" 는 계약이
+    # 화면·API 에 계속 남는다.
+    #
+    # 옛 클라이언트 호환은 확인했다. 이 모델은 extra 를 지정하지 않아
+    # pydantic v2 기본값(`ignore`)을 따르므로, `provider` 를 보내던 요청은
+    # 422 가 아니라 **조용히 무시되고 통과**한다.
     portfolio: Optional[dict] = None
 
 

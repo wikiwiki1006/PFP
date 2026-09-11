@@ -230,10 +230,13 @@ export interface MarketRegime {
 export type MarketSituationLevel = 'Low' | 'Normal' | 'High'
 
 export interface MarketSituationMetric {
-  value: number
+  /** null = 지표값을 구하지 못함. */
+  value: number | null
   /** null = 백분위를 낼 수 없음 (이력 부족). 0(최저 수준)과 구분해야 한다. */
   percentile: number | null
-  level: MarketSituationLevel
+  /** null = 판정 불가. 'Normal'(실제 판정)과 구분해야 한다 — 예전 화면은
+   *  Low/High 가 아닌 모든 값을 '정상'으로 그려 둘이 같아 보였다. */
+  level: MarketSituationLevel | null
   color: string
 }
 

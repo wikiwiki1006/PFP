@@ -259,7 +259,7 @@ export const getMacroModes = async (): Promise<MacroModes> =>
   (await api.get('/api/macro/modes')).data
 
 export const startMacroAnalysis = async (body: {
-  event: string; model?: string; mode?: string; portfolio?: Record<string, unknown>; provider?: string
+  event: string; model?: string; mode?: string; portfolio?: Record<string, unknown>
 }): Promise<{ job_id: string }> =>
   (await api.post('/api/macro/analyze', body)).data
 

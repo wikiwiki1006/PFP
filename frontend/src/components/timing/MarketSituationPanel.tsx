@@ -13,13 +13,25 @@ const HY_SPREAD_INFO = `하이일드(투기등급) 채권과 국채의 스프레
 정상: 평년 수준의 신용 리스크 프리미엄.
 높음: 신용 경색 우려 확대, 위험 회피 국면(주가에 부정적).`
 
-function badge(metric: MarketSituationMetric, label: string) {
+// 세 갈래가 아니라 네 갈래다.
+//
+// 예전에는 `Low ? '낮음' : High ? '높음' : '정상'` 이라 **Low/High 가 아닌
+// 모든 값이 '정상'** 이었다 — null 도, 오타도, "데이터 없음" 도. 판정하지
+// 못한 상태가 긍정 판정으로 읽히는 형태다. 'Normal' 은 실제 판정이므로
+// 모름과 같은 칸에 두면 안 된다.
+function badge(metric: MarketSituationMetric, label: string | null | undefined) {
+  const known = label === 'Low' || label === 'High' || label === 'Normal'
+  const text = label === 'Low' ? '낮음'
+             : label === 'High' ? '높음'
+             : label === 'Normal' ? '정상'
+             : '판정 불가'
+  const color = known ? metric.color : '#64748b'
   return (
     <span
       className="text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wider"
-      style={{ color: metric.color, backgroundColor: `${metric.color}1a` }}
+      style={{ color, backgroundColor: `${color}1a` }}
     >
-      {label === 'Low' ? '낮음' : label === 'High' ? '높음' : '정상'}
+      {text}
     </span>
   )
 }
@@ -42,8 +54,11 @@ function MetricCard({
         </div>
         {badge(metric, metric.level)}
       </div>
-      <div className="text-2xl font-mono font-bold" style={{ color: metric.color }}>
-        {valueFmt(metric.value)}{unit}
+      {/* 값이 없으면 '—'. valueFmt 는 숫자를 요구하므로 null 을 넘기면
+          TypeError 로 패널이 통째로 날아간다. */}
+      <div className="text-2xl font-mono font-bold"
+           style={{ color: metric.value == null ? '#64748b' : metric.color }}>
+        {metric.value == null ? '—' : `${valueFmt(metric.value)}${unit}`}
       </div>
       {/* 백분위를 못 구하면 막대를 그리지 않는다. null 을 0 으로 쓰면 빈 막대가
           '최저 수준'으로 읽히고, .toFixed() 는 TypeError 로 패널을 통째로 날린다. */}
