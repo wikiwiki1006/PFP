@@ -609,18 +609,16 @@ def calculate_metrics(
             return None
         return (cur / base - 1) * 100
 
-    # 벤치마크는 시장이 정한다. `MarketSpec.indices` 의 **첫 항목**이 그 시장의
-    # 기준 지수라고 markets.py 가 정의한다 (US `^GSPC` · KR `^KS11`).
+    # 벤치마크는 시장이 정한다 (US `^GSPC` · KR `^KS11`). 어느 지수가 기준인지
+    # 아는 코드는 `markets.benchmark_for` 하나다.
     #
     # 지금 KR 에서는 이 값이 None 이 된다 — `/metrics` 프레임을 만드는
     # `routers/portfolio.py` 가 `["^GSPC", "^VIX"]` 를 시장과 무관하게 넣고
     # `include_market=False` 로 불러서, `^KS11` 열이 아예 오지 않는다.
     # 그 라우터가 시장 기준지수를 함께 실어 주면 값이 돌아온다. 그때까지는
     # '—' 가 맞다 — S&P 대비 0.2306 을 "베타" 라고 보여주는 것보다 정직하다.
-    from backend.services.markets import get_market
-    beta = calculate_portfolio_beta(
-        holdings, close_df, next(iter(get_market(market).indices)),
-    )
+    from backend.services.markets import benchmark_for
+    beta = calculate_portfolio_beta(holdings, close_df, benchmark_for(market))
     # `.get()` 의 기본값 18.0(VIX 장기 평균)은 **열이 없을 때만** 쓰인다.
     # 열은 있는데 값이 전부 NaN 이면 NaN 이 그대로 나오고, ffill 도 전량 NaN 열은
     # 채우지 못한다 — yfinance 가 ^VIX 를 빈 열로 주는 일이 있다. 그러면 폴백을
