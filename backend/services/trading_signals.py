@@ -487,9 +487,6 @@ def _score_ticker_side(
             # TradeSignalsPanel.tsx 가 그것을 "추세" 막대로 그렸다. RSI 53.8 →
             # s_rsi 30.0 이 화면에 "추세 30/30" 으로 표시됐다.
             "rsi":      round(s_rsi, 1),
-            # TODO(통합): develop 이 프론트를 components.rsi 로 바꾸면 제거한다.
-            # 지금 지우면 "추세" 막대가 undefined 로 그려진다.
-            "trend":    round(s_rsi, 1),
         },
         "reason": f"{anchor} · {trend} · 거래량 {vratio:.1f}배 · RSI {rsi_val:.0f} · MACD {arrow}",
     }
