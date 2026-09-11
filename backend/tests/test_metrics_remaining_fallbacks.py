@@ -152,10 +152,14 @@ _FACTOR_DEAD = (
     "raises ValueError('The truth value of a Series is ambiguous'), which the "
     "function's own outer `except Exception: return {}` swallows. So the "
     "benchmark is found and then immediately discarded: every call returns an "
-    "empty dict, whatever the data. POST /api/optimizer/factor-analysis is "
-    "wired to it, so that screen has always been blank and nothing says why. "
-    "Pick the column explicitly instead of relying on truthiness. "
-    "(owner: programoptimize)"
+    "empty dict, whatever the data. Reachability, checked rather than assumed: "
+    "POST /api/optimizer/factor-analysis calls it and frontend api/index.ts "
+    "exports runFactorAnalysis, but no component calls that wrapper, so no "
+    "user has ever seen this. Nothing is broken on screen today; what breaks "
+    "is whoever wires it up next, against a function that cannot work. Pick "
+    "the column explicitly instead of relying on truthiness -- or decide the "
+    "feature is dead and remove it. (owner: programoptimize; keep-or-drop is a "
+    "product call for integration)"
 )
 
 
