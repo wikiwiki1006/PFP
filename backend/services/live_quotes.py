@@ -376,15 +376,8 @@ def _can_move(ticker: str) -> bool:
     받았다. 한국 주식은 09:00~15:30 에만 거래되는데도 밤이든 주말이든 60초마다
     다시 받아 오고 있었다 — 하루 스무 시간 넘게 의미 없는 호출이다.
     """
-    from backend.services.market_calendar import (
-        is_us_extended_hours, uses_us_session_calendar,
-        is_kr_extended_hours, uses_kr_session_calendar,
-    )
-    if uses_us_session_calendar(ticker):
-        return is_us_extended_hours()
-    if uses_kr_session_calendar(ticker):
-        return is_kr_extended_hours()
-    return True
+    from backend.services.market_calendar import price_can_move
+    return price_can_move(ticker)
 
 
 def get_quotes(

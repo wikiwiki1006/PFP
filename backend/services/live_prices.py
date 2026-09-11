@@ -34,10 +34,16 @@ _LIVE_RETRY_FAIL = 300   # 실패 시 재시도 간격 — 장애 중 재시도 
 
 
 def _is_market_open() -> bool:
-    """미국 주식 시장 개장 여부. 공휴일까지 반영하는 공용 캘린더에 위임한다.
+    """**미국** 주식 시장 개장 여부. 공휴일까지 반영하는 공용 캘린더에 위임한다.
 
     (이전 구현은 주말만 확인해 공휴일에 '개장'으로 오판했고, 그 결과
      유령 행 제거 로직이 통째로 비활성화되는 버그가 있었다.)
+
+    **실시간 시세 게이트로 쓰지 마라.** 이건 미국 하나만 답한다. 보유 목록에
+    한국 종목이 섞여 있으면 KRX 장중(ET 20:00~02:30)에 False 가 나와 한국
+    종목의 실시간이 통째로 막힌다. 게이트는 `_get_live_prices` 가 티커별로
+    직접 판단하므로 호출부에서 미리 거르면 안 된다.
+    가격이 변할 수 있는지는 `market_calendar.price_can_move(ticker)` 다.
     """
     from backend.services.market_calendar import is_us_market_open
     return is_us_market_open()
@@ -55,6 +61,14 @@ def _get_live_prices(tickers: list[str]) -> dict[str, float]:
     """
     import yfinance as yf
     from backend.db.market_cache import _yf_sem
+    from backend.services.market_calendar import price_can_move
+
+    # 가격이 변할 수 없는 종목은 여기서 뺀다. 게이트가 티커별이어야 하는
+    # 이유는 보유 목록에 시장이 섞이기 때문이다 — 시장 하나로 뭉뚱그리면
+    # 한국장 시간에 한국 종목이 막히고, 미국장 시간에 닫힌 KRX 종목을 조회한다.
+    tickers = [t for t in tickers if price_can_move(t)]
+    if not tickers:
+        return {}
 
     now = _time.time()
     # ET 날짜가 바뀌면 전량 폐기 (어제 가격이 오늘 실시간으로 주입되는 것 방지)

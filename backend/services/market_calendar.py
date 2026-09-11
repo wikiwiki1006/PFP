@@ -488,6 +488,31 @@ def last_completed_kr_session(now: Optional[datetime] = None) -> date:
     return d
 
 
+def price_can_move(ticker: str) -> bool:
+    """이 티커의 가격이 **지금 변할 수 있는가.**
+
+    실시간 시세를 받아올지 결정하는 유일한 판단 지점이다. 가격이 고정인
+    시간대에 조회하면 요청만 늘고 yfinance 차단 위험이 커진다.
+
+      · 미국 주식  → 프리·정규·애프터마켓 (04:00~20:00 ET, 거래일만)
+      · 한국 주식  → 시간외 포함 08:30~18:00 KST, 평일만
+      · 그 외      → 항상 True (암호화폐·환율·선물·해외지수)
+
+    **시장 하나로 뭉뚱그리면 안 된다.** live_prices 는
+    `is_us_market_open()` 하나로 전 종목을 게이트하고 있었다. KRX 정규장
+    (09:00~15:30 KST)은 ET 로 20:00~02:30 이라 미국장이 닫혀 있는 시간이다.
+    그래서 한국 종목은 **한국장이 열려 있는 내내 실시간이 붙지 않았고**,
+    반대로 미국장 시간(22:30~05:00 KST)에는 KRX 가 닫혀 있는데도 한국 종목을
+    계속 조회했다. 같은 응답 안에서 metrics 는 `market_open: true` 를 주고
+    보유 목록은 전부 `is_live: false` 였다.
+    """
+    if uses_us_session_calendar(ticker):
+        return is_us_extended_hours()
+    if uses_kr_session_calendar(ticker):
+        return is_kr_extended_hours()
+    return True
+
+
 def uses_kr_session_calendar(ticker: str) -> bool:
     """KRX 거래일 캘린더를 따르는 티커인지 (.KS / .KQ 와 코스피·코스닥 지수)."""
     t = str(ticker).upper().strip()
