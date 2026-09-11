@@ -330,76 +330,6 @@ def _trades_by_chart_date(trade_markers, chart_dates: list[str]) -> dict:
     return by_date
 
 
-def equity_curve_to_records(
-    curve: pd.Series,
-    benchmark_df: pd.DataFrame | None = None,
-    market: str = "US",
-    cash_event_amounts: dict | None = None,
-    trade_markers: list | None = None,
-) -> list[dict]:
-    """
-    에쿼티 커브를 API 응답용 레코드 리스트로 변환.
-    cash_event_amounts: {date_str: amount}  DEPOSIT(양수) / WITHDRAW(음수)
-    trade_markers:      [{ticker,type,q,price,date}, ...]  주식 매매 이력
-    """
-    # 주말(토·일) 행 제거: 장이 열리지 않는 날은 ffill로 값이 동일하므로
-    # 차트에서 수평 구간으로 나타나고 당일 수익률이 0%로 계산된다.
-    curve = curve[curve.index.dayofweek < 5]
-
-    peak = float(curve.max()) if not curve.empty else 0.0
-    threshold = peak * 0.001
-    meaningful = curve[curve > threshold]
-    if not meaningful.empty:
-        curve = curve.loc[meaningful.index[0]:]
-
-    # 비교선도 시장 기준 지수다. 베타·알파는 `benchmark_for(market)` 로 고쳤는데
-    # 곡선의 비교 시리즈가 `"^GSPC"` 하드코딩으로 남아, 같은 화면이 두 벤치마크를
-    # 쓰고 있었다 — metrics 는 `^KS11`(코스피), 곡선은 S&P 500.
-    from backend.services.markets import benchmark_for
-    bench = benchmark_for(market)
-
-    bench_indexed = None
-    if benchmark_df is not None and bench in benchmark_df.columns:
-        b = benchmark_df[bench].reindex(curve.index).ffill().bfill()
-        b_clean = b.dropna()
-        if len(b_clean) > 0:
-            bench_indexed = b / float(b_clean.iloc[0]) * float(curve.iloc[0])
-
-    # 벤치마크는 위에서 `curve.index` 로 reindex 했으므로 행 위치가 그대로 맞는다.
-    # 날짜 라벨로 매번 `.loc` 을 걸면 날짜 수만큼 인덱스 조회가 생긴다.
-    bench_vals = None if bench_indexed is None else bench_indexed.to_numpy()
-
-    def _bv(i: int):
-        if bench_vals is None:
-            return None
-        v = bench_vals[i]
-        return None if pd.isna(v) else round(float(v), 2)
-
-    cash_evt: dict = cash_event_amounts or {}
-
-    # 날짜 문자열도 한 번에 만든다 — 루프 안에서 Timestamp.strftime 을 날짜마다
-    # 부르면 날짜 수만큼 포맷 파싱이 반복된다.
-    date_strs = curve.index.strftime("%Y-%m-%d").tolist()
-
-    # 날짜별 주식 거래 목록 (포인트 마커용)
-    trade_by_date = _trades_by_chart_date(trade_markers, date_strs)
-
-    records = []
-    for i, val in enumerate(curve.to_numpy()):
-        if pd.isna(val):
-            continue
-        date_str = date_strs[i]
-        records.append({
-            "date":               date_str,
-            "value":              round(float(val), 2),
-            "benchmark_value":    _bv(i),
-            "cash_event":         date_str in cash_evt,
-            "cash_event_amount":  cash_evt.get(date_str, 0),
-            "trades":             trade_by_date.get(date_str, []),
-        })
-    return records
-
-
 # ── 포트폴리오 베타 ────────────────────────────────────────────────────────────
 
 def calculate_portfolio_beta(
@@ -733,7 +663,22 @@ def calculate_metrics(
             pass
 
     return {
+        # 세 값이 서로 맞아떨어지게 싣는다. 예전에는 `total_equity` 가 현금을
+        # 포함하고 `total_cost` 는 제외해서, **`total_return_pct` 를 옆 두
+        # 필드로 재현할 수 없었다.** 실측: equity 75,960,000 / cost 12,090,000
+        # 으로 계산하면 528.29% 인데 표시값은 429.03% 였다 (표시값이 맞다 —
+        # 증권만 본 값이다).
+        #
+        # `total_equity` 는 그대로 둔다. 화면 라벨이 "총 자산" 이고 현금이
+        # 들어가는 것이 사용자 기대이며, `typeof m.total_equity === 'number'`
+        # 가 지표 바 전체의 게이트다. 대신 증권·현금을 따로 실어 소비자가
+        # 검산할 수 있게 한다:
+        #
+        #     total_equity == stock_value + cash_value
+        #     total_return_pct == stock_value / total_cost - 1
         "total_equity":      round(total_equity, 2),
+        "stock_value":       round(stock_equity, 2),
+        "cash_value":        round(_safe_or(cash_val, 0.0), 2),
         "total_cost":        round(total_cost, 2),
         # 계산 불가는 null 로 내려간다 — `_round_keep_none` 이 None 을 통과시킨다.
         # 0 으로 바꾸면 '보합'·'본전'·'변동성 낮음' 이라는 단정이 된다 (§1.3).
@@ -870,6 +815,19 @@ def build_return_pct_curve(
     이 방식은 외부 현금흐름이 있는 날에도 수익률 왜곡(스파이크) 없이
     순수 운용 성과만 추적한다.
     반환: (return_pct, holdings_by_date, initial_equity, cash_events, equity)
+
+    ## `holdings_by_date` 의 계약
+
+    `holdings[].price is None` 은 **그 종목이 그날 취득원가로 대체 평가됐다**는
+    뜻이다 (`_price_or_cost`). 시세를 모르는 날이고, `return_pct` 도 None 이다.
+
+    그래서 `equity` 와 `return_pct` 는 그 날짜에 **관측이 아니라 원가**를
+    반영한다. 한 날짜의 모든 종목이 `price is None` 이면 그 날 포트폴리오
+    가치는 관측된 적이 없다 — 소비자는 그 사실을 이 필드로만 알 수 있다
+    (`return_pct_to_records` 가 그 날짜를 레코드에서 빼는 근거이기도 하다).
+
+    별도 coverage 필드를 두지 않는 이유: 그 사실이 이미 여기 있다. 파생 필드를
+    만들면 같은 사실이 두 곳에 생기고 한쪽만 갱신되는 형태가 된다.
     """
     if close_df.empty:
         return _empty_curve(), {}, 0.0, {}, _empty_curve()
@@ -1143,6 +1101,22 @@ def return_pct_to_records(
         if pd.isna(pct):
             continue
         date_str = date_strs[i]
+
+        # 보유는 있는데 **관측된 가격이 하나도 없는 날**은 레코드로 내보내지
+        # 않는다. `_price_or_cost` 가 그 날을 취득원가로 평가하므로 곡선이
+        # 평평해지고, TWRR 은 그 평평함을 정직하게 0% 로 읽는다. 결과는
+        # "변동 없음" 으로 그려지는 관측 아닌 포인트다.
+        #
+        # 실측: KR 포트폴리오의 앞 71포인트가 `port=0.0` 으로 그려졌다. 같은
+        # 구간에서 벤치마크 선은 움직여서(그쪽은 데이터가 있다) 포트폴리오가
+        # 3개월간 정체한 것처럼 보였다 — 실제로는 시세를 모르는 구간이다.
+        #
+        # 하나라도 관측된 날은 남긴다. 부분 관측을 버리면 실제 관측이 있는 날을
+        # 버리게 되고, 그건 같은 오류의 반대 방향이다. 몇 개 미만이면 못 믿는가는
+        # 표시 계층이 판단한다 — 종목별 `price` 가 레코드에 그대로 실려 있다.
+        rows_today = holdings_by_date.get(date_str) or []
+        if rows_today and all(r.get("price") is None for r in rows_today):
+            continue
 
         bench_pct = None
         if b_vals is not None and bench_first_val:
