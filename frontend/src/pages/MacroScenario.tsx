@@ -15,6 +15,7 @@ import { demoHoldingsRaw } from '@/lib/demoData'
 import { marketSession } from '@/lib/marketStorage'
 import { useMarket } from '@/lib/useMarket'
 import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
+import { stringDetail } from '@/components/serverError'
 
 // ── sessionStorage 키 ──────────────────────────────────────────────────────────
 const SK_PENDING   = 'macro_pending'
@@ -815,8 +816,15 @@ export default function MacroScenario() {
             </button>
           </div>
         </div>
+        {/* 시작 요청의 거절 사유는 서버가 사용자용 문장으로 싣는다(400 이벤트 없음 ·
+            429 심층 분석 하루 1회 · AI 기능 중지). "다시 시도해주세요" 만 보여 주면
+            다시 해도 안 되는 상황을 설명하지 못한다 — AI 리서치 화면과 같은 규칙이다.
+            잡 실행 중 실패(pollQ 의 error)는 서버가 내부 예외 문자열(str(exc))을 싣으므로
+            그대로 보여 주지 않고 기존 문구를 쓴다. */}
         {(startMut.isError || pollQ.data?.status === 'error') && (
-          <ErrorMessage message="분석 실패. 다시 시도해주세요." retry={startAnalysis} />
+          <ErrorMessage
+            message={(startMut.isError && stringDetail(startMut.error)) || '분석 실패. 다시 시도해주세요.'}
+            retry={startAnalysis} />
         )}
       </div>
 

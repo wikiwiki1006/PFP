@@ -43,6 +43,7 @@ import { useMarket } from '@/lib/useMarket'
 import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
 import TickerLabel from '@/components/TickerLabel'
 import SuggestionList from '@/components/SuggestionList'
+import { errorText } from '@/components/serverError'
 import { pickOnEnter, moveHighlight, selectionLabel, type Suggestion } from '@/lib/suggestions'
 import { marketSession } from '@/lib/marketStorage'
 import type { EquityCurvePoint, PortfolioMetrics } from '@/types'
@@ -2180,6 +2181,16 @@ function DailyBriefPanel() {
   const [progress,    setProgress]    = useState(0)
   const [elapsedMs,   setElapsedMs]   = useState(0)
   const contentRef                    = useRef<HTMLDivElement>(null)
+  // 마지막으로 끝난 시도가 결과 없이 끝난 이유. 진행 로그는 **생성 중에만** 그려져서,
+  // 실패하면 그 줄이 상태에만 남고 화면은 처음 안내("브리핑 생성 버튼을 눌러…")로
+  // 돌아갔다 — 실패가 아무 흔적 없이 사라졌다 (§1.3). 결과가 없을 때 이걸 보여 준다.
+  const [failNote,    setFailNote]    = useState<string | null>(() => {
+    try {
+      const saved: unknown = JSON.parse(marketSession.get(SK_LOGS) || '[]')
+      const last = Array.isArray(saved) ? saved[saved.length - 1] : null
+      return typeof last === 'string' && last.startsWith('오류:') ? last : null
+    } catch { return null }
+  })
 
   // 과거 브리프는 개인 이력이다. 로그인 전에는 조회하지 않고 목록도 비운다.
   const histQ   = useQuery({
@@ -2203,6 +2214,7 @@ function DailyBriefPanel() {
       setGenerating(true)
       setContent(null)
       setLogs([])
+      setFailNote(null)
       setWasPending(false)
       setProgress(0)
       setElapsedMs(0)
@@ -2217,6 +2229,7 @@ function DailyBriefPanel() {
       setWasPending(false)
       setContent(d.report)
       setLogs(newLogs)
+      setFailNote(null)
       setProgress(100)
       marketSession.set(SK_CONTENT, d.report)
       marketSession.set(SK_LOGS, JSON.stringify(newLogs))
@@ -2224,12 +2237,17 @@ function DailyBriefPanel() {
       marketSession.remove(SK_START)
       histQ.refetch()
     },
-    onError: (e: any) => {
+    onError: (e: unknown) => {
       setGenerating(false)
       setWasPending(false)
       setProgress(0)
+      // 서버가 준 사유(detail)를 먼저 쓴다. e.message 는 "Request failed with status
+      // code 500" 이라 무엇을 기다려야 하는지 알려 주지 않는다 — 브리핑은 기준일
+      // 종가가 아직 수집되지 않았으면 그 사실을 detail 로 말한다 (main e0545d3).
+      const line = `오류: ${errorText(e)}`
+      setFailNote(line)
       setLogs(prev => {
-        const next = [...prev, `오류: ${e.message}`]
+        const next = [...prev, line]
         marketSession.set(SK_LOGS, JSON.stringify(next))
         return next
       })
@@ -2327,6 +2345,8 @@ function DailyBriefPanel() {
     marketSession.remove(SK_PENDING)
     marketSession.remove(SK_START)
     if (note) {
+      // 시간 초과·사용자 중단도 결과 없이 끝난 이유다 — 같은 자리에 보여 준다.
+      setFailNote(note)
       setLogs(prev => {
         const next = [...prev, note]
         marketSession.set(SK_LOGS, JSON.stringify(next))
@@ -2463,7 +2483,16 @@ function DailyBriefPanel() {
         {!shownContent && !isActivelyGenerating && (
           <div className="flex flex-col items-center justify-center h-full gap-3 p-5 text-center">
             <FileText className="w-12 h-12 text-[#10b981]/20" />
-            <p className="text-sm text-[#94a3b8] leading-relaxed">브리핑 생성 버튼을 눌러<br/>AI 데일리 브리핑을 생성하세요</p>
+            {isAuthed && failNote ? (
+              <>
+                <p className="text-sm text-[#ef4444] leading-relaxed">브리핑을 만들지 못했습니다</p>
+                <p className="text-[12px] text-[#cbd5e1] leading-relaxed whitespace-pre-wrap break-words">
+                  {failNote.replace(/^오류:\s*/, '')}
+                </p>
+              </>
+            ) : (
+              <p className="text-sm text-[#94a3b8] leading-relaxed">브리핑 생성 버튼을 눌러<br/>AI 데일리 브리핑을 생성하세요</p>
+            )}
           </div>
         )}
         {shownContent && !isActivelyGenerating && (
