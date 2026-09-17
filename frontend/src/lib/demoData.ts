@@ -229,6 +229,11 @@ const DEMO_METRICS_KR: PortfolioMetrics = {
   total_return_pct:      121.68,
   today_change_pct:        0.07,
   portfolio_beta:          0.92,   // 코스피 대비
+  // 한국 변동성 칸은 VKOSPI 다. 이 줄이 없으면 위의 `...DEMO_METRICS` 가 미국
+  // 예시의 VIX 16.8 을 물려줘서, 한국 미리보기에 미국 값이 "변동성" 으로 나갔다.
+  // 예시값이다 — 두 지수 분포의 몸통이 비슷해(p50 약 16) 미국 예시와 같은 '정상'
+  // 구간(20 미만)에 둔다.
+  vix:                    19.4,
   alpha_vs_benchmark:      6.40,
   perf_1w:                 1.80,
   perf_1m:                 4.20,
@@ -311,3 +316,31 @@ const DEMO_NEWS_KR: NewsItem[] = [
 export const demoEquityCurve = (): EquityCurvePoint[] => getMarket() === 'KR' ? DEMO_EQUITY_CURVE_KR : DEMO_EQUITY_CURVE
 export const demoEarnings    = (): EarningsEvent[]    => getMarket() === 'KR' ? DEMO_EARNINGS_KR : DEMO_EARNINGS
 export const demoNews        = (): NewsItem[]         => getMarket() === 'KR' ? DEMO_NEWS_KR : DEMO_NEWS
+
+// AI 피드백 예시도 시장별이다. 미국판(AAPL·NVDA·MSFT · VIX 16.8)만 있어서 한국
+// 미리보기에 미국 종목과 미국 지수가 나갔다. 숫자는 위 한국 예시 표와 맞춘다 —
+// 반도체 비중 0.305 + 0.212, 베타 0.92, SK하이닉스 수익률 637.76% · 비중 0.212,
+// 현금 0.079, 변동성(VKOSPI) 19.4.
+const DEMO_ANALYST_FEEDBACK_KR = {
+  ...DEMO_ANALYST_FEEDBACK,
+  feedback: [
+    '## 포트폴리오 진단',
+    '',
+    '반도체 두 종목(삼성전자·SK하이닉스) 비중이 51.7%로 업종 집중도가 높습니다. 두 종목이',
+    '같은 메모리 업황을 따라 움직여, 업황이 꺾이면 함께 흔들리는 구조입니다.',
+    '',
+    '### 주요 관찰',
+    '',
+    '- **베타 0.92** — 코스피보다 조금 덜 움직입니다. 현재 VKOSPI 19.4 구간에서는 부담이 크지 않으나, 20을 넘어서면 낙폭이 확대될 수 있습니다.',
+    '- **SK하이닉스 미실현 수익률 637.8%** — 비중이 21.2%까지 커졌습니다. 일부 이익 실현으로 현금 비중을 높이는 선택지를 고려할 만합니다.',
+    '- **현금 7.9%** — 조정 시 대응 여력이 제한적입니다. 12~15% 수준을 권장합니다.',
+    '',
+    '### 제안',
+    '',
+    '필수소비재·금융처럼 반도체와 상관이 낮은 업종을 편입하면, 기대수익을 크게',
+    '희생하지 않으면서 최대낙폭을 줄일 수 있습니다.',
+  ].join('\n'),
+  metrics_snapshot: DEMO_METRICS_KR,
+}
+export const demoAnalystFeedback = () =>
+  getMarket() === 'KR' ? DEMO_ANALYST_FEEDBACK_KR : DEMO_ANALYST_FEEDBACK
