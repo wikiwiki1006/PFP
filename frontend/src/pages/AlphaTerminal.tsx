@@ -2474,6 +2474,7 @@ const RIGHT_TABS = ['전날 브리핑', 'AI 피드백', '뉴스']
 
 export default function AlphaTerminal() {
   const names = useTickerNames()
+  const market = useMarket()
   const qc = useQueryClient()
   const [botTab,       setBotTab]       = useState(0)
   const [rightTab,     setRightTab]     = useState(0)
@@ -2696,19 +2697,24 @@ export default function AlphaTerminal() {
                     value={fmtRealized(m.realized_pnl)}
                     color={chgColor(m.realized_pnl)}
                     title={realizedTitle(m)} />
-              {/* 무엇 대비 베타인지 라벨에 적는다. 서버가 시장별 벤치마크로
-                  계산하는데(^GSPC / ^KS11) 화면에 안 보이면 한국 사용자는
-                  S&P500 대비로 읽는다. */}
-              <Pill label={m.benchmark_label ? `베타 (${m.benchmark_label} 대비)` : '베타'}
+              {/* 라벨은 '베타' 만 쓴다 — 괄호 출처는 사용자 요청으로 뺐다. 서버가
+                  시장별 벤치마크로 계산한다는 사실(^GSPC / ^KS11)은 사라지면 안
+                  되므로 마우스를 올렸을 때 제목으로 밝힌다. */}
+              <Pill label="베타"
+                    title={m.benchmark_label ? `${m.benchmark_label} 대비 베타` : undefined}
                     value={fn(m.portfolio_beta)} />
-              {/* VIX 는 **미국 지수다.** VKOSPI 는 야후가 주지 않아(^VKOSPI ·
-                  ^VKOSPI200 · VKOSPI.KS · ^KSVKOSPI 전부 0건) 한국 화면에서도
-                  미국 것을 쓴다. 값이 틀린 게 아니라 출처를 안 밝히는 것이
-                  문제이므로 라벨로 밝힌다 — 시장별로 갈리지 않는다.
+              {/* 값(`m.vix`)은 **그 시장의** 내재 변동성 지수다 — 미국 VIX, 한국
+                  VKOSPI (서버 ba60ceb · markets.MarketSpec.volatility_index). 예전
+                  한국 화면은 야후에 VKOSPI 가 없어 미국 VIX 를 쓰고 라벨에 "(미국
+                  VIX)" 로 출처를 밝혔는데, 지금 그 라벨이면 VKOSPI 값이 미국 VIX
+                  라는 이름을 단다. 필드 이름은 서버 호환으로 `vix` 그대로다. 라벨의
+                  괄호는 사용자 요청으로 뺐고, 어느 지수인지는 제목(마우스를 올리면
+                  보인다)에 남긴다.
                   색은 구간 기준이라 chgColor(증감 기준)를 못 쓴다. 대신 null 을
                   먼저 갈라낸다 — fv 로 0 을 만들면 `0 > 25`·`0 > 18` 이 둘 다
                   거짓이라 **읽지 못한 상태가 초록(정상)** 으로 칠해진다. */}
-              <Pill label="변동성 (미국 VIX)" value={fn(m.vix)}
+              <Pill label="변동성" value={fn(m.vix)}
+                    title={market === 'KR' ? 'VKOSPI — 코스피200 변동성 지수' : 'VIX — S&P 500 변동성 지수'}
                     color={m.vix == null ? '#64748b'
                            : m.vix > 25 ? '#ef4444' : m.vix > 18 ? '#f59e0b' : '#10b981'} />
             </div>
