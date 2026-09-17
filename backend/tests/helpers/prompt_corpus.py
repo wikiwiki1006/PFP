@@ -99,7 +99,32 @@ def _daily_prompts() -> list[Prompt]:
                daily_report._build_prompt(KR_HOLDINGS, kr_prices, news, "KR")),
         Prompt("daily_report._build_prompt", "US",
                daily_report._build_prompt(US_HOLDINGS, us_prices, news, "US")),
-    ] + _daily_prompts_with_news(daily_report, kr_prices, us_prices)
+    ] + _daily_prompts_with_news(daily_report, kr_prices, us_prices) \
+      + _daily_prompts_with_gaps(daily_report, kr_prices, us_prices)
+
+
+def _daily_prompts_with_gaps(daily_report, kr_prices: dict, us_prices: dict) -> list[Prompt]:
+    """기준일 등락을 못 구한 종목(`__missing`)과 섹터가 없는 종목 — e0545d3, 리포트 품질 요청.
+
+    `_fetch_price_data` 가 기준일 종가가 없는 보유 종목을 `__missing` 에 사유와 함께
+    남기고, 프롬프트는 "{티커}: 데이터 없음 — {사유}" 와 합계 "합산 불가" 를 적는다.
+    섹터가 NULL 이면 "섹터 정보 없음". 이 줄들이 B2(자리표시자) 같은 규칙을 한 번도
+    안 받았다. 사유 문자열은 `_fetch_price_data` 가 만드는 모양 그대로다.
+    """
+    kr_gap = {**kr_prices,
+              "005930.KS": {**kr_prices["005930.KS"], "sector": None},
+              "__missing": {"000660.KS": "2026-09-17 종가 없음 (마지막 2026-09-16)"}}
+    us_gap = {**us_prices,
+              "AAPL": {**us_prices["AAPL"], "sector": None},
+              "__missing": {"MSFT": "2026-09-16 까지 쓸 수 있는 실제 종가 두 개가 없음"}}
+    kr_holdings = {**KR_HOLDINGS, "000660.KS": {"q": 5, "avg": 180000, "sector": None}}
+    us_holdings = {**US_HOLDINGS, "MSFT": {"q": 3, "avg": 410.0, "sector": "Tech"}}
+    return [
+        Prompt("daily_report._build_prompt(결손·섹터없음)", "KR",
+               daily_report._build_prompt(kr_holdings, kr_gap, {}, "KR")),
+        Prompt("daily_report._build_prompt(결손·섹터없음)", "US",
+               daily_report._build_prompt(us_holdings, us_gap, {}, "US")),
+    ]
 
 
 def _daily_prompts_with_news(daily_report, kr_prices: dict, us_prices: dict) -> list[Prompt]:

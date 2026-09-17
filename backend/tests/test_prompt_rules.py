@@ -315,6 +315,10 @@ _PATH_MARKS = {
     "ai_analysis._analyst_feedback_prompt(값)[US]": [r"^- VIX\b[^\n]*17\.7"],
     "ai_analysis._analyst_feedback_prompt(값-없음)[KR]": [r"^- VKOSPI\b[^\n]*산출 불가"],
     "ai_analysis._analyst_feedback_prompt(값-없음)[US]": [r"^- VIX\b[^\n]*산출 불가"],
+    "daily_report._build_prompt(결손·섹터없음)[KR]":
+        [r"000660\.KS: 데이터 없음 — \S", r"합산 불가", r"005930\.KS:[^\n]*섹터 정보 없음"],
+    "daily_report._build_prompt(결손·섹터없음)[US]":
+        [r"MSFT: 데이터 없음 — \S", r"합산 불가", r"AAPL:[^\n]*섹터 정보 없음"],
 }
 
 
