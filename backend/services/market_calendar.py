@@ -66,6 +66,9 @@ def uses_us_session_calendar(ticker: str) -> bool:
 # 훑으면 캐시가 완전히 무너졌다 — 32개 연도 2회 조회 339ms(적중 32) 대 41개 연도
 # 2회 조회 798ms(적중 0). LRU 라 매 조회가 직전 것을 밀어내 적중률이 0이 된다.
 # 값은 연도당 frozenset 10개짜리라 256개를 들고 있어도 메모리는 무시할 만하다.
+_HOLIDAY_ERROR_LOGGED: set[int] = set()
+
+
 @lru_cache(maxsize=256)
 def _holidays_for_year(year: int) -> frozenset[date]:
     """해당 연도의 NYSE 정기 휴장일 집합 (연도별 메모이제이션)."""
@@ -90,11 +93,27 @@ def _holidays_for_year(year: int) -> frozenset[date]:
             Holiday("Christmas", month=12, day=25, observance=nearest_workday),
         ]
 
+    # 실패를 삼키지 않는다. 예전에는 `except Exception: return frozenset()` 였다.
+    # 빈 집합은 "휴장일이 없다" 는 단정이라 **모든 평일이 거래일**이 되고:
+    #   · 저장 가드(§1.6)가 추수감사절 같은 휴장일의 ffill 가짜 종가를 영구 저장한다
+    #   · next_close_reset 이 휴장일 16:30 을 초기화 시각으로 준다
+    #   · 로그는 한 줄도 없다
+    # 게다가 lru_cache 가 그 빈 집합을 붙들어, 원인이 사라져도 프로세스가 끝날
+    # 때까지 계속 틀렸다. (테스트 역할이 AbstractHolidayCalendar.holidays 를
+    # 망가뜨려 재현했다 — pandas 를 올리면 실제로 생길 수 있는 일이다.)
+    #
+    # 예외는 lru_cache 에 남지 않으므로 원인이 고쳐지면 다음 호출부터 맞는다.
+    # 호출자 쪽은: 저장 가드가 전체를 try 로 감싸 경고 + 저장 안 함(닫힌 방향),
+    # 장 상태 판정은 오류가 그대로 드러난다.
     try:
         days = _NYSECalendar().holidays(f"{year}-01-01", f"{year}-12-31")
         return frozenset(d.date() for d in days)
     except Exception:
-        return frozenset()
+        if year not in _HOLIDAY_ERROR_LOGGED:        # 호출마다 쏟아지지 않게 연도당 한 번
+            _HOLIDAY_ERROR_LOGGED.add(year)
+            logger.error("NYSE 휴장일 계산 실패 (%d) — 거래일을 판정할 수 없다", year,
+                         exc_info=True)
+        raise
 
 
 def now_et() -> datetime:
