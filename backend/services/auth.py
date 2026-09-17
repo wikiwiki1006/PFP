@@ -20,6 +20,7 @@ Firebase ID 토큰 검증 + 사용자 식별.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 import os
 from pathlib import Path
@@ -31,6 +32,13 @@ logger = logging.getLogger(__name__)
 
 _initialized = False
 _init_error: Optional[str] = None
+# 초기화는 한 번만, 한 스레드만 한다. FastAPI 는 동기 의존성을 스레드풀에서
+# 돌리므로 콜드 스타트 직후 페이지가 인증 요청 여럿을 동시에 쏘면 스레드들이
+# `firebase_admin._apps` 검사를 동시에 통과해 initialize_app 을 여러 번 부른다.
+# 진 쪽은 "The default Firebase app already exists" 를 받고, 아래 except 가 그걸
+# 실패로 읽어 **그 요청을 503(인증 비활성)으로 돌려보냈다.** 실측: 동시 8개 중
+# 7개가 False. 로컬에서 첫 로그인이 503 → 재시도 200 으로 드러났다.
+_init_lock = threading.Lock()
 
 # 개발 편의 스위치 — 인증 없이 로컬에서 돌려볼 때만 사용한다.
 # 켜면 토큰 없이 X-User-Id 를 그대로 신뢰한다. 즉 헤더 한 줄로 아무 계정이나
@@ -84,6 +92,15 @@ def init_firebase() -> bool:
     global _initialized, _init_error
     if _initialized:
         return True
+    with _init_lock:
+        if _initialized:                               # 기다리는 동안 다른 스레드가 끝냈다
+            return True
+        return _init_firebase_locked()
+
+
+def _init_firebase_locked() -> bool:
+    """init_firebase 의 본체. `_init_lock` 을 쥔 채로만 부른다."""
+    global _initialized, _init_error
     try:
         import firebase_admin
         from firebase_admin import credentials
