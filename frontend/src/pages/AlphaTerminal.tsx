@@ -1815,15 +1815,31 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
                         style={{ color: t.type === 'ADD' || t.type === 'BUY' ? '#10b981' : '#ef4444' }}>
                         {t.type}
                       </td>
-                      <td className="py-1.5 px-2">
-                        <input type="number" value={editTradeVals.q}
-                          onChange={e => setEditTradeVals(v => ({ ...v, q: +e.target.value }))}
-                          className="w-14 bg-[#1e2d40] border border-[#334155] text-[12px] text-[#e2e8f0] rounded px-1 py-1" />
-                      </td>
-                      <td className="py-1.5 px-2">
-                        <input {...moneyInputProps(editTradeVals.price, price => setEditTradeVals(v => ({ ...v, price })), tradeMarket)}
-                          className="w-18 bg-[#1e2d40] border border-[#334155] text-[12px] text-[#e2e8f0] rounded px-1 py-1" />
-                      </td>
+                      {t.ticker === 'CASH' ? (
+                        <>
+                          {/* 현금은 **금액**을 고친다. 저장 형식(q=금액, price=1)은 그대로다 —
+                              현금 원장·자산곡선이 q 를 금액으로 읽는다. 수량 칸에 금액을
+                              받으면 사용자는 '수량' 을 고치는 줄 안다. */}
+                          <td className="py-1.5 px-2 font-mono text-[12px] text-[#94a3b8]">1</td>
+                          <td className="py-1.5 px-2">
+                            <input {...moneyInputProps(editTradeVals.q, q => setEditTradeVals(v => ({ ...v, q })), tradeMarket)}
+                              aria-label="입출금 금액"
+                              className="w-24 bg-[#1e2d40] border border-[#334155] text-[12px] text-[#e2e8f0] rounded px-1 py-1" />
+                          </td>
+                        </>
+                      ) : (
+                        <>
+                          <td className="py-1.5 px-2">
+                            <input type="number" value={editTradeVals.q}
+                              onChange={e => setEditTradeVals(v => ({ ...v, q: +e.target.value }))}
+                              className="w-14 bg-[#1e2d40] border border-[#334155] text-[12px] text-[#e2e8f0] rounded px-1 py-1" />
+                          </td>
+                          <td className="py-1.5 px-2">
+                            <input {...moneyInputProps(editTradeVals.price, price => setEditTradeVals(v => ({ ...v, price })), tradeMarket)}
+                              className="w-18 bg-[#1e2d40] border border-[#334155] text-[12px] text-[#e2e8f0] rounded px-1 py-1" />
+                          </td>
+                        </>
+                      )}
                       <td className="py-1.5 px-2">
                         <input value={editTradeVals.memo}
                           onChange={e => setEditTradeVals(v => ({ ...v, memo: e.target.value }))}
@@ -1854,8 +1870,14 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
                         style={{ color: t.type === 'ADD' || t.type === 'BUY' ? '#10b981' : '#ef4444' }}>
                         {t.type}
                       </td>
-                      <td className="py-2 px-2 font-mono text-[12px] text-[#cbd5e1]">{t.q}</td>
-                      <td className="py-2 px-2 font-mono text-[12px] text-[#cbd5e1]">{formatPrice(t.price)}</td>
+                      {/* 현금 입출금은 수량 1 · 금액=입출금액으로 보여 준다. 저장은 q=금액,
+                          price=1 이라 그대로 그리면 수량 칸에 12000000, 가격 칸에 ₩1 이
+                          찍혔다. **표시만** 바꾼다 — 원장 세 곳이 q 를 금액으로 읽는다
+                          (backend/tests/test_cash_events_agree.py). */}
+                      <td className="py-2 px-2 font-mono text-[12px] text-[#cbd5e1]">{t.ticker === 'CASH' ? 1 : t.q}</td>
+                      <td className="py-2 px-2 font-mono text-[12px] text-[#cbd5e1]">
+                        {t.ticker === 'CASH' ? formatMoney(t.q) : formatPrice(t.price)}
+                      </td>
                       <td className="py-2 px-2 text-[11px] text-[#94a3b8] max-w-[80px] truncate">{t.memo || ''}</td>
                       <td className="py-2 px-2 opacity-0 group-hover:opacity-100 transition-opacity">
                         <div className="flex gap-1">
