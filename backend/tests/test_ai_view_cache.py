@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import logging
 import threading
-import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -59,12 +58,9 @@ def _warnings(caplog) -> list[str]:
 
 
 @pytest.fixture
-def tag(live_db):
-    """이 테스트만의 티커 접두사. 끝나면 그 접두사의 행만 지운다."""
-    prefix = "ZZT" + uuid.uuid4().hex[:8].upper()
-    yield prefix
-    _sql("DELETE FROM common_cache WHERE left(cache_type, 9) = 'ai_view::' "
-         "AND split_part(cache_type, '::', 5) LIKE %s", (prefix + "%",))
+def tag(ai_view_tag):
+    """이 테스트만의 티커 접두사 (conftest `ai_view_tag` — 끝나면 그 접두사의 행만 지운다)."""
+    return ai_view_tag
 
 
 @pytest.fixture
