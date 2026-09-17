@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Callable
 
 import yfinance as yf
@@ -32,7 +32,7 @@ _BENCHMARKS = {
 def _vol_outside_benchmarks(market: str) -> str | None:
     """그 시장 변동성 지수가 `_BENCHMARKS` 로 받아지지 않으면 그 이름, 받아지면 None.
 
-    미국 VIX 는 `^VIX` 로 위 표에 있어 다른 지표와 같은 yf.download · 같은 세션에서
+    미국 VIX 는 `^VIX` 로 위 표에 있어 다른 지표와 같은 시세 프레임 · 같은 기준 세션에서
     나온다. 한국 VKOSPI 는 야후에 없어서(`markets.KR` 주석 참고) 표에 넣을 수 없고,
     `market_data.volatility_index` 로 따로 받는다 → `price_data["__VOL"]`.
 
@@ -49,9 +49,9 @@ def _vol_outside_benchmarks(market: str) -> str | None:
 def _volatility_entry(market: str) -> dict | None:
     """`price_data["__VOL"]` 한 칸. 값을 못 받았으면 None — 프롬프트가 '데이터 없음' 으로 적는다.
 
-    **기준일을 같이 담는다.** 이 값은 위 yf.download 프레임이 아니라 다른 출처의
-    마지막 행이라, 브리프가 다루는 세션(`_fetch_price_data` 의 `shift` 가 고른다)과
-    날짜가 같다는 보장이 없다. 날짜를 안 적으면 모델은 스냅샷과 같은 날로 읽는다.
+    **기준일을 같이 담는다.** 이 값은 시세 프레임이 아니라 다른 출처의 마지막 행이라,
+    브리프가 다루는 세션(`_brief_session`)과 날짜가 같다는 보장이 없다. 날짜를 안
+    적으면 모델은 스냅샷과 같은 날로 읽는다.
     """
     try:
         from backend.services.market_data import volatility_index
@@ -72,74 +72,115 @@ def _volatility_entry(market: str) -> dict | None:
     }
 
 
-def _fetch_price_data(holdings: dict, market: str = "US") -> dict:
+def _brief_session(market: str, now: datetime | None) -> date:
+    """이 브리프가 다루는 세션 — 그 시장에서 **종가가 확정된 마지막 거래일**.
+
+    판정은 market_calendar 에 묻는다. 캘린더가 실패하면(`_holidays_for_year` 는
+    예외를 올린다) 그대로 올린다 — 세션을 모르는 채로 만든 브리프는 숫자가 틀려도
+    티가 안 난다. 호출부(`routers/reports.py`)가 500 과 사유로 돌려준다.
+    """
+    from backend.services.market_calendar import (
+        ET, KST, last_completed_kr_session, last_completed_session,
+    )
+    if market == "KR":
+        return last_completed_kr_session(now.astimezone(KST) if now is not None else None)
+    return last_completed_session(now.astimezone(ET) if now is not None else None)
+
+
+def _fetch_price_data(holdings: dict, market: str = "US",
+                      now: datetime | None = None) -> dict:
+    """브리프가 다룰 세션의 보유 종목·벤치마크 등락.
+
+    **판정은 전부 이미 있는 것에 묻는다** — 여기서 새 규칙을 만들지 않는다.
+      · 어느 세션인가  `_brief_session` → market_calendar.last_completed_(kr_)session
+      · 시세           market_data.get_close_df(fill=False) — 실제 관측치만 남긴 희소 프레임
+                       (`/api/macro/daily-brief` 와 같은 입구)
+      · 등락           price_series.daily_change — 티커별 마지막 두 실제 관측치
+      · 뒤처짐         price_series._is_behind_own_market — 자기 시장 확정 세션보다 앞선 관측
+
+    예전에는 yf.download 프레임을 **합집합 날짜로 ffill** 해 '마지막 행' 을 세션으로
+    삼고, "장중이면 전날" 을 UTC 날짜로 골랐다. 합성 프레임·시각 고정으로 재현한 것:
+      · 추석 뒤 월요일 08:00 KST — 원/달러만 값이 있는 휴장일 09-25 가 세션이 되고
+        보유 종목·KOSPI 가 전부 +0.00% (ffill 이 전일 값을 복제)
+      · 추수감사절 다음 날 08:00 ET — 24시간 자산이나 유령행 하나로 11-26 이 세션,
+        AAPL·SPY·VIX·TNX 전부 +0.00%
+      · KR 09-18 08:00 KST 에 09-16, US 09-17 17:00 ET 에 09-16 (한 세션 늦음)
+      · 기준일 행이 없는 종목 하나는 전일 값이 복제돼 +0.00%
+
+    반환: 티커별 등락 · `__KOSPI` 같은 벤치마크 · `__date`(기준 세션) · `__missing`
+    ({티커: 사유}) · 한국이면 `__VOL`. 등락을 못 구한 보유 종목은 조용히 빼지 않고
+    `__missing` 에 남긴다 — 프롬프트가 '데이터 없음' 으로 적고 합계를 막는다.
+
+    `now` 는 시간대가 붙은 시각이다 (없으면 지금). 측정·테스트 이음매.
+    """
+    import pandas as pd
+    from backend.services.market_data import get_close_df
+    from backend.services.price_series import _is_behind_own_market, daily_change
+
     tickers = [t for t in holdings if t != "CASH"]
     if not tickers:
         return {}
 
+    ref = _brief_session(market, now)
     bench = _BENCHMARKS.get(market, _BENCHMARKS["US"])
-    fetch_list = list(set(tickers + [sym for _, sym in bench]))
-    df = yf.download(fetch_list, period="5d", auto_adjust=True, progress=False)
-    if df.empty:
+    raw = get_close_df(tickers + [sym for _, sym in bench], period="1mo", ttl=60,
+                       include_market=False, fill=False)
+    if raw is None or raw.empty:
         return {}
+    # 기준 세션 **뒤의** 행은 버린다. 야후는 장중에도 당일 봉의 Close 를 채우므로
+    # (§1.5) DB 가 아닌 경로로 온 프레임에는 미확정 봉이 있을 수 있다. 브리프는
+    # 확정 종가 기준이다.
+    idx = raw.index.tz_localize(None) if raw.index.tz is not None else raw.index
+    raw = raw[idx.normalize() <= pd.Timestamp(ref)]
 
-    import pandas as pd
-    close = df["Close"].ffill() if isinstance(df.columns, pd.MultiIndex) else df.ffill()
-
-    # 브리핑은 항상 이전 완료된 거래일 기준 (장중이어도 전날 종가 사용)
-    today_utc = datetime.now(timezone.utc).date()
-    shift = 1 if close.index[-1].date() >= today_utc else 0
+    def _change(t: str):
+        """(DailyChange, None) 또는 (None, 못 구한 사유)."""
+        dc = daily_change(raw, t, now=now)
+        if dc is None:
+            # daily_change 는 관측치 부족과 전일 종가 0 이하를 둘 다 None 으로 준다.
+            return None, f"{ref} 까지 쓸 수 있는 실제 종가 두 개가 없음"
+        # 마지막 관측이 기준 세션보다 앞이면 그건 **다른 날의 등락**이다. 기준일
+        # 등락으로 적으면 이번에 고친 결함과 같은 형태가 된다. 24시간 자산은 세션이
+        # 없어 판정하지 않는다(그 함수의 규칙). 캘린더 실패는 위 `ref` 에서 이미 올라왔다.
+        if _is_behind_own_market(t, dc.as_of, now):
+            return None, f"{ref} 종가 없음 (마지막 {dc.as_of.date()})"
+        return dc, None
 
     result: dict = {}
-
+    missing: dict[str, str] = {}
     for t in tickers:
-        if t not in close.columns:
+        dc, why = _change(t)
+        if dc is None:
+            missing[t] = why
+            logger.warning("브리프(%s): %s 등락 없음 — %s", market, t, why)
             continue
-        series = close[t].dropna()
-        if len(series) < 2 + shift:
-            continue
-        today_c = float(series.iloc[-(1 + shift)])
-        prev_c  = float(series.iloc[-(2 + shift)])
-        # 0 은 주가가 아니라 깨진 데이터다. 예전에는 변동률만 0.0% 로 눌렀는데,
-        # 그러면 day_pnl 이 (today - 0) * qty 가 되어 **평가액 전부를 그날의
-        # 이익으로** 보고한다. 값을 지어내는 대신 이 종목을 빼고, 아래 합계도
-        # 이 종목 없이 낸다.
-        if prev_c <= 0:
-            logger.warning("전일 종가가 0 이하라 %s 를 브리프에서 제외한다 (prev=%s)",
-                           t, prev_c)
-            continue
-        chg_pct = (today_c / prev_c - 1) * 100
         qty      = holdings[t].get("q", 0)
         avg_cost = holdings[t].get("avg", 0)
         result[t] = {
-            "close":     today_c,
-            "prev":      prev_c,
-            "chg_pct":   round(chg_pct, 2),
+            "close":     dc.price,
+            "prev":      dc.prev_close,
+            "chg_pct":   round(dc.chg_pct, 2),
             "qty":       qty,
             "avg_cost":  avg_cost,
-            "pos_val":   round(today_c * qty, 2),
-            "day_pnl":   round((today_c - prev_c) * qty, 2),
-            "total_pnl": round((today_c - avg_cost) * qty, 2),
-            "sector":    holdings[t].get("sector", "N/A"),
+            "pos_val":   round(dc.price * qty, 2),
+            "day_pnl":   round(dc.chg_val * qty, 2),
+            "total_pnl": round((dc.price - avg_cost) * qty, 2),
+            # 기본값을 두지 않는다. `holdings` 는 DB 열을 그대로 주므로 NULL 이면 키는
+            # 있고 값이 None 이다 — 예전 기본값 "N/A" 는 쓰이지도 않고 "섹터 None" 이 나갔다.
+            "sector":    holdings[t].get("sector") or None,
         }
 
-    for meta_key, col in bench:
-        if col in close.columns:
-            s = close[col].dropna()
-            if len(s) >= 2 + shift:
-                b_now  = float(s.iloc[-(1 + shift)])
-                b_prev = float(s.iloc[-(2 + shift)])
-                # 지수도 마찬가지다. 0 이면 나눌 수 없고, 넣지 않으면 프롬프트가
-                # "매크로 데이터 없음" 으로 빠져 모델이 없다는 걸 안다.
-                if b_prev <= 0:
-                    logger.warning("전일 값이 0 이하라 %s 를 브리프에서 제외한다 (prev=%s)",
-                                   meta_key, b_prev)
-                    continue
-                result[f"__{meta_key}"] = {
-                    "close":   round(b_now, 2),
-                    "prev":    round(b_prev, 2),
-                    "chg_pct": round((b_now / b_prev - 1) * 100, 2),
-                }
+    for meta_key, sym in bench:
+        dc, why = _change(sym)
+        if dc is None:
+            # 넣지 않으면 프롬프트가 "{이름}: 데이터 없음" 으로 적는다 (`_bench_text`).
+            logger.warning("브리프(%s): 벤치마크 %s(%s) 등락 없음 — %s", market, meta_key, sym, why)
+            continue
+        result[f"__{meta_key}"] = {
+            "close":   round(dc.price, 2),
+            "prev":    round(dc.prev_close, 2),
+            "chg_pct": round(dc.chg_pct, 2),
+        }
 
     # 표로 못 받는 변동성 지수(한국 VKOSPI). 미국은 ^VIX 가 표에 있어 부르지 않는다.
     if _vol_outside_benchmarks(market):
@@ -147,7 +188,8 @@ def _fetch_price_data(holdings: dict, market: str = "US") -> dict:
         if vol is not None:
             result["__VOL"] = vol
 
-    result["__date"] = close.index[-(1 + shift)].strftime("%Y년 %m월 %d일 (%a)")
+    result["__missing"] = missing
+    result["__date"] = ref.strftime("%Y년 %m월 %d일 (%a)")
     return result
 
 
@@ -301,6 +343,10 @@ def _build_prompt(holdings: dict, price_data: dict, news: dict,
         [k for k in price_data if not k.startswith("__")],
         key=lambda t: price_data[t]["chg_pct"],
     )
+    # 등락을 못 구한 보유 종목 (`_fetch_price_data` 의 `__missing`). 스냅샷에서 빼면
+    # 그 종목이 없었던 것처럼 되고 합계도 조용히 줄어든다 — 모델은 알 방법이 없다
+    # (§1.3·B3). `ai_analysis.generate_daily_brief` 가 이미 같은 규칙으로 적는다.
+    missing: dict = price_data.get("__missing") or {}
     date_str   = price_data.get("__date", datetime.now().strftime("%Y년 %m월 %d일"))
     total_val  = sum(price_data[t]["pos_val"] for t in stock_keys)
     total_pnl  = sum(price_data[t]["day_pnl"]  for t in stock_keys)
@@ -308,9 +354,20 @@ def _build_prompt(holdings: dict, price_data: dict, news: dict,
 
     snap_lines = [
         f"  {t}: 종가 {_money(price_data[t]['close'])}  전일대비 {price_data[t]['chg_pct']:+.2f}%  "
-        f"1일 P&L {_signed(price_data[t]['day_pnl'])}  섹터 {price_data[t]['sector']}"
+        f"1일 P&L {_signed(price_data[t]['day_pnl'])}  "
+        # 섹터가 없으면 없다고 적는다. 값 자리에 'N/A'·'None' 을 넣으면 모델이 그걸
+        # 섹터 이름처럼 옮긴다 (B2).
+        f"섹터 {price_data[t].get('sector') or '정보 없음'}"
         for t in stock_keys
-    ]
+    ] + [f"  {t}: 데이터 없음 — {why}" for t, why in missing.items()]
+
+    if missing:
+        names = ", ".join(missing)
+        total_lines = (f"전체 주식 평가액: {names} 의 평가액이 없어 합산 불가  현금: {_money(cash_val)}\n"
+                       f"전일 총 P&L: {names} 데이터 없음 — 합산 불가")
+    else:
+        total_lines = (f"전체 주식 평가액: {_money(total_val)}  현금: {_money(cash_val)}\n"
+                       f"전일 총 P&L: {_signed(total_pnl)}")
 
     if is_kr:
         bench_key, bench_name = "KOSPI", "KOSPI"
@@ -337,12 +394,18 @@ def _build_prompt(holdings: dict, price_data: dict, news: dict,
                 else f"{bench_key} 데이터 없음")
     # 그리고 없으면 비교를 시키지 않는다. 스냅샷은 "KOSPI 데이터 없음" 이라고 적고
     # 출력 형식은 "[아웃퍼폼/언더퍼폼]" 을 채우라고 하면, 채울 곳은 기억뿐이다.
+    # 보유 종목 일부의 등락이 없을 때도 같다 — 포트폴리오 쪽 합계가 '합산 불가' 다.
+    if bench_chg is None:
+        no_cmp = f"벤치마크({bench_name}) 등락 데이터가 없어"
+    elif missing:
+        no_cmp = f"보유 종목 일부({', '.join(missing)})의 등락이 없어"
+    else:
+        no_cmp = None
     bench_cmp = (
         f"전일 포트폴리오 전체 자산은 벤치마크({bench_name}) 대비 [아웃퍼폼/언더퍼폼] 했습니다. "
         "[구체적 수치 포함 1~2문장]"
-        if bench_chg is not None else
-        f"벤치마크({bench_name}) 등락 데이터가 없어 대비 성과는 판단하지 않았습니다. "
-        "[포트폴리오 자체 수치로 1~2문장]"
+        if no_cmp is None else
+        f"{no_cmp} 대비 성과는 판단하지 않았습니다. [포트폴리오 자체 수치로 1~2문장]"
     )
 
     news_text = ""
@@ -354,7 +417,10 @@ def _build_prompt(holdings: dict, price_data: dict, news: dict,
                 news_text += f"  - \"{n['title']}\" ({n['publisher']}, {n['time']})\n"
 
     big_movers = [t for t in stock_keys if abs(price_data[t]["chg_pct"]) >= 3.0]
-    big_movers_str = ", ".join(big_movers) if big_movers else "없음 (전 종목 3% 미만 변동)"
+    # "전 종목 3% 미만" 은 등락을 모르는 종목까지 단정한다. 모르는 종목이 있으면 범위를 적는다.
+    big_movers_str = (", ".join(big_movers) if big_movers
+                      else "없음 (전 종목 3% 미만 변동)" if not missing
+                      else "없음 (등락을 구한 종목 기준 — 데이터 없는 종목은 제외)")
 
     tz_label = "한국시간" if is_kr else "미국 동부시간"
     # 이 프롬프트를 받는 호출(generate_daily_report 의 마지막 messages.create)에는
@@ -384,8 +450,7 @@ def _build_prompt(holdings: dict, price_data: dict, news: dict,
 
 === 포트폴리오 스냅샷 ===
 {chr(10).join(snap_lines)}
-전체 주식 평가액: {_money(total_val)}  현금: {_money(cash_val)}
-전일 총 P&L: {_signed(total_pnl)}
+{total_lines}
 {spy_line}
 매크로 지표: {macro_line}
 절대 변동 3% 이상 종목: {big_movers_str}
@@ -456,6 +521,17 @@ def generate_daily_report(
     price_data = _fetch_price_data(holdings, market)
     if not price_data:
         raise RuntimeError("가격 데이터를 가져오지 못했습니다.")
+    # 보유 종목 등락을 **하나도** 못 구했으면 브리프를 만들지 않는다. 전 종목이
+    # '데이터 없음' 인 브리프는 LLM 비용만 쓰고, 리포트 목록에 쓸모없는 한 건으로
+    # 남는다. 사유를 그대로 돌려준다 — 장 마감 직후라 기준일 종가가 아직 DB 에
+    # 없는 경우가 대표적이다 (get_close_df 가 뒤처진 티커를 백그라운드로 갱신하므로
+    # 수집이 들어온 뒤에는 만들어진다).
+    if not any(not k.startswith("__") for k in price_data):
+        missing = price_data.get("__missing") or {}
+        raise RuntimeError(
+            f"{price_data.get('__date', '기준일')} 기준 보유 종목 등락을 하나도 구하지 못했습니다 — "
+            + "; ".join(f"{t}: {why}" for t, why in missing.items())
+        )
 
     _log("2/3  뉴스 헤드라인 수집 중...")
     news = _collect_news(price_data)
