@@ -4,9 +4,12 @@ services/portfolio_optimizer.py
 AI-powered Black-Litterman portfolio optimization.
 
 Pipeline (모든 IO 병렬 실행):
+  ⓪ 저장된 종목별 AI 뷰 조회 (backend.db.ai_view_cache — 시장·투자기간·종목,
+     다음 '장 마감 + 30분' 까지 모든 사용자가 공유)
   ① yfinance prices  ‖  Perplexity news  ‖  yfinance Ticker.info (fundamentals)
+     (뉴스는 저장된 뷰가 없는 종목만 — 전부 있으면 부르지 않는다)
   ② AI views (Perplexity sonar-pro) — 밸류에이션·성장·애널리스트·모멘텀 종합
-     → forward-looking 예상수익
+     → forward-looking 예상수익. 저장된 뷰가 없는 종목만 묻고, 받은 뷰만 저장한다
   ③ Ledoit-Wolf cov  →  Black-Litterman (Idzorek confidence)
   ④ EfficientFrontier × 4 modes  +  frontier curve
 """
@@ -539,7 +542,7 @@ def _generate_ai_views(
 
     반환: `{ticker: view}` — **AI 가 쓸 수 있는 뷰를 준 종목만** 들어 있다
     (`_parse_ai_view`). 빠진 종목을 기본값으로 채우지 않는다. 호출 자체가 실패하면
-    `{}`.
+    `{}`. 여기서 나온 뷰는 공용 캐시에 저장돼 다른 사용자에게도 나간다.
     """
     horizon = (
         f"{int(holding_period_years * 12)}개월"
@@ -651,7 +654,7 @@ def _generate_ai_views(
     if dropped:
         logger.warning(
             "AI 뷰 %d/%d종목을 쓸 수 없다 — 결과에서 뺀다 (그 종목은 과거수익 대체 "
-            "뷰로 최적화한다): %s",
+            "뷰로 최적화하고 공용 캐시에는 넣지 않는다): %s",
             len(dropped), len(tickers), "; ".join(dropped))
     return result
 
@@ -1015,8 +1018,14 @@ def run_ai_optimization(
 ) -> dict:
     """
     Full pipeline — 모든 IO 병렬:
-      prices(yfinance) ‖ news(perplexity) ‖ fundamentals(yfinance)
-      → Claude Haiku AI views → BL + EfficientFrontier → result
+      저장된 AI 뷰 조회(ai_view_cache)
+      → prices(yfinance) ‖ news(perplexity, 저장된 뷰가 없는 종목만) ‖ fundamentals(yfinance)
+      → AI views(perplexity, 저장된 뷰가 없는 종목만) → BL + EfficientFrontier → result
+
+    AI 뷰는 (시장, 투자기간, 종목) 단위로 공유된다 — 이번 주기(다음 '장 마감 +
+    30분' 까지)에 누군가 분석한 종목은 AI 에게 다시 묻지 않는다. Black-Litterman
+    사후수익은 공유하지 않는다: AI 호출이 아니라 **바구니 전체의** 공분산으로
+    계산하는 값이라, 같은 종목이라도 함께 담긴 종목에 따라 달라진다.
     """
     def _notify(n: int, text: str) -> None:
         try:
@@ -1031,14 +1040,40 @@ def run_ai_optimization(
     # ① 투자기간 기반 데이터 기간 자동 선택 (user 입력 period 무시)
     auto_period = _select_data_period(holding_period_years)
 
-    # ② 병렬 IO (가격·뉴스·펀더멘털·SPY 벤치마크 동시 수집)
-    _notify(1, f"가격·뉴스·펀더멘털 병렬 수집 중... (데이터기간: {auto_period})")
+    # ② 저장된 AI 뷰 — **뉴스 수집보다 먼저** 본다.
+    #
+    # 뉴스(Perplexity)는 AI 뷰 프롬프트에만 들어간다. 요청한 종목이 전부 이번
+    # 주기에 누군가 분석해 둔 종목이면 뉴스도 AI 도 부를 이유가 없는데, 뉴스는
+    # 가격과 병렬로 먼저 떠나므로 캐시를 그 **앞에서** 봐야 건너뛸 수 있다.
+    # 요청 종목 기준으로 본다 — 가격이 모자라 `valid` 에서 빠지는 종목의 뷰는
+    # 아래에서 안 쓰면 된다. 조회가 실패하면 `{}` + 경고라 예전 경로를 그대로 탄다.
+    from backend.db.ai_view_cache import get_ai_views, save_ai_views
+    stored = get_ai_views(market, holding_period_years, tickers)
+
+    def _stored_view(t: str) -> Optional[dict]:
+        return stored.get(t.strip().upper())    # 캐시의 키는 대문자 티커다
+
+    news_tickers = [t for t in tickers if _stored_view(t) is None]
+    n_stored = len(tickers) - len(news_tickers)
+
+    # ③ 병렬 IO (가격·뉴스·펀더멘털·벤치마크 동시 수집)
+    if not news_tickers:
+        _notify(1, f"가격·펀더멘털 병렬 수집 중... (데이터기간: {auto_period} · "
+                   f"저장된 AI 뷰 {n_stored}종목 — 뉴스 수집 생략)")
+    elif n_stored:
+        _notify(1, f"가격·뉴스·펀더멘털 병렬 수집 중... (데이터기간: {auto_period} · "
+                   f"저장된 AI 뷰 {n_stored}종목)")
+    else:
+        _notify(1, f"가격·뉴스·펀더멘털 병렬 수집 중... (데이터기간: {auto_period})")
 
     def _get_prices():
         return _fetch_prices(tickers, period=auto_period)
 
     def _get_news():
-        return _fetch_news(tickers, market)
+        # 저장된 뷰가 없는 종목만 — 뉴스는 그 종목들의 뷰 프롬프트에만 실린다.
+        # 요청 전체로 받으면 이미 분석된 종목이 12종목 한도와 프롬프트의 뉴스
+        # 3000자를 나눠 먹는다.
+        return _fetch_news(news_tickers, market)
 
     def _get_fundamentals():
         return _gather_fundamentals(tickers)
@@ -1070,11 +1105,12 @@ def run_ai_optimization(
 
     with ThreadPoolExecutor(max_workers=4) as ex:
         f_prices    = ex.submit(_get_prices)
-        f_news      = ex.submit(_get_news)
+        # 전 종목이 저장된 뷰면 뉴스를 부르지 않는다 — 쓸 곳이 없는 Perplexity 호출이다.
+        f_news      = ex.submit(_get_news) if news_tickers else None
         f_fund      = ex.submit(_get_fundamentals)
         f_benchmark = ex.submit(_get_benchmark)
         prices       = f_prices.result()
-        news_ctx     = f_news.result()
+        news_ctx     = f_news.result() if f_news is not None else ""
         fundamentals = f_fund.result()
         benchmark    = f_benchmark.result()
 
@@ -1090,10 +1126,27 @@ def run_ai_optimization(
     # ② 가격 통계
     price_stats = _compute_price_stats(prices)
 
-    # ③ AI views (펀더멘털 + 뉴스 기반)
-    _notify(2, "AI 밸류에이션·모멘텀 분석 중...")
-    fresh = _generate_ai_views(valid, price_stats, fundamentals, news_ctx,
-                               holding_period_years, market)
+    # ④ AI views — 저장된 뷰는 꺼내 쓰고, 없는 종목만 AI 에게 묻는다 (펀더멘털 + 뉴스 기반).
+    reused: dict = {}
+    for t in valid:
+        sv = _stored_view(t)
+        if sv is not None:
+            reused[t] = sv
+    to_analyze = [t for t in valid if t not in reused]
+
+    fresh: dict = {}
+    if to_analyze:
+        _notify(2, f"AI 분석 — {len(reused)}종목 재사용 · {len(to_analyze)}종목 새로 분석 중..."
+                   if reused else "AI 밸류에이션·모멘텀 분석 중...")
+        fresh = _generate_ai_views(to_analyze, price_stats, fundamentals, news_ctx,
+                                   holding_period_years, market)
+        # **AI 가 실제로 돌려준 뷰만** 공유한다 — 아래 대체 뷰는 이 줄 뒤에 만든다.
+        # 대체 뷰는 저장소 검사를 전부 통과하고, 같은 주기의 뷰는 덮이지 않으므로
+        # (한 주기 한 번 쓰기) 저장하면 AI 가 한 번 실패한 종목이 다음 초기화까지
+        # 모든 사용자에게 "AI 분석 불가" 로 나간다. 실패는 저장소가 경고로 남긴다.
+        save_ai_views(market, holding_period_years, fresh)
+    else:
+        _notify(2, f"AI 분석 — {len(reused)}종목 모두 재사용 (저장된 뷰)")
 
     # Fallback: AI 뷰가 없는 종목만 과거수익(신뢰도 30%) 기반 대체 뷰.
     #
@@ -1103,10 +1156,13 @@ def run_ai_optimization(
     # 실패든 일부 실패든 **같은 규칙**으로 이 뷰를 받고, key_driver 가 "AI 분석
     # 불가" 라고 말한다.
     ai_views: dict = {}
+    ai_view_source: dict[str, str] = {}
     fallback: list[str] = []
     for t in valid:
         if t in fresh:
-            ai_views[t] = fresh[t]
+            ai_views[t], ai_view_source[t] = fresh[t], "fresh"
+        elif t in reused:
+            ai_views[t], ai_view_source[t] = reused[t], "reused"
         else:
             ai_views[t] = {
                 "expected_return": float(np.clip((price_stats.get(t, {}).get("ret_1y") or 0.0) / 100.0, -0.4, 0.5)),
@@ -1114,13 +1170,14 @@ def run_ai_optimization(
                 "sentiment":   "Neutral",
                 "key_driver":  "AI 분석 불가 — 과거 수익률 기반 추정 (신뢰도 낮음)",
             }
+            ai_view_source[t] = "fallback"
             fallback.append(t)
     if fallback:
         logger.warning("AI 뷰를 받지 못한 %d/%d종목 %s — 과거 수익률 기반 대체 뷰"
-                       "(신뢰도 30%%)로 최적화한다.",
+                       "(신뢰도 30%%)로 최적화한다. 공용 캐시에는 넣지 않는다.",
                        len(fallback), len(valid), fallback)
 
-    # ④ 최적화
+    # ⑤ 최적화
     _notify(3, "Black-Litterman + 효율적 프론티어 계산 중...")
     opt = _run_pypfopt(
         prices, ai_views, target_return, risk_free_rate, weight_bounds,
@@ -1129,7 +1186,15 @@ def run_ai_optimization(
 
     return {
         "tickers":                valid,
+        # 재사용된 뷰에는 저장소가 붙인 `cached_at`(그 뷰를 저장한 UTC 시각)이
+        # 함께 있다. 최적화는 그 키를 읽지 않는다.
         "ai_views":               ai_views,
+        # 종목별 뷰의 출처 — 필드 하나로 싣는다:
+        #   "fresh"     이번 요청에서 AI 가 분석했다 (공용 캐시에 저장을 시도했다)
+        #   "reused"    이번 주기에 앞선 요청(다른 사용자일 수 있다)이 분석해 둔 뷰를 꺼냈다
+        #   "fallback"  AI 뷰를 받지 못해 과거 수익률로 만든 대체 뷰다
+        # 대체 뷰는 예전에는 key_driver 문구로만 구별됐다.
+        "ai_view_source":         ai_view_source,
         "price_stats":            price_stats,
         "fundamentals":           {t: fundamentals.get(t, {}) for t in valid},
         "optimizations":          opt["optimizations"],
