@@ -8,12 +8,14 @@ routers/reports.py
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import threading
 import uuid
 from datetime import datetime
 from typing import Optional
 
+from backend.routers._errors import hidden_http_error, log_hidden, user_sentence
 from backend.services.markets import market_param
 from backend.services.auth import (ai_feature_user, current_user,
                                    enforce_deep_limit, resolve_model_tier)
@@ -32,6 +34,22 @@ from backend.services.daily_report import generate_daily_report
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
+# 이 모듈에는 로거가 없었다 — 그래서 아래 실패들은 `detail=str(e)` 로 응답에만
+# 실리고 로그에는 한 줄도 안 남았다 (§1.3: 로거가 없으면 먼저 만든다).
+logger = logging.getLogger(__name__)
+
+# 생성이 실패했을 때 사용자에게 보내는 문장. 원인은 로그로만 남긴다 (_errors.py).
+_REPORT_FAILED = "리포트를 만드는 중 서버 오류가 났습니다. 잠시 후 다시 시도해 주세요."
+
+# 데일리 브리프를 **만들지 않기로 한** 사유 — backend/services/daily_report.py 의
+# generate_daily_report 가 사용자용 문장으로 올리는 RuntimeError 들이다. 문구가
+# 바뀌면 여기 목록에서 빠져 일반 안내로 떨어진다(내부 문자열이 새지는 않는다).
+_BRIEF_USER_REASONS = (
+    re.compile(r"가격 데이터를 가져오지 못했습니다\."),
+    # 앞은 기준일이다 — 서비스가 "2026년 09월 17일 (Thu)" 같은 표기로 적는다
+    # (없으면 "기준일"). 날짜 표기가 바뀌어도 맞도록 한 줄 40자 안의 아무 글자로 둔다.
+    re.compile(r"[^\n]{1,40} 기준 보유 종목 등락을 하나도 구하지 못했습니다"),
+)
 
 
 
@@ -116,7 +134,19 @@ async def daily_brief(_auth: dict = Depends(ai_feature_user), market: str = Depe
             generate_daily_report, holdings, logs.append, market
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # 브리프를 **만들지 않기로 한** 사유는 서비스가 사용자용 문장으로 올린다
+        # (가격을 못 받음 · 기준일 종가가 아직 없음). 그 문장은 그대로 보여 준다 —
+        # 기다리면 되는지 알려 주는 유일한 신호다. 그 밖(API 키 없음 · 모델 호출
+        # 실패 · DB 오류)은 내부 사정이라 로그로만 남기고 일반 안내를 보낸다.
+        reason = user_sentence(e, _BRIEF_USER_REASONS) if isinstance(e, RuntimeError) else None
+        if reason is not None:
+            logger.warning("데일리 브리프를 만들지 않았다 (%s): %s", market, reason)
+            raise HTTPException(status_code=500, detail=reason)
+        raise hidden_http_error(
+            logger, f"데일리 브리프 생성 ({market})", e, status_code=500,
+            message="브리핑을 만드는 중 서버 오류가 났습니다. 잠시 후 다시 시도해 주세요. "
+                    "계속되면 관리자에게 알려 주세요.",
+        )
 
     date_str = datetime.now().strftime("%Y%m%d_%H%M")
     filename = f"daily_brief_{date_str}.md"
@@ -166,7 +196,8 @@ async def equity_research(
     try:
         write_result = await asyncio.to_thread(write_equity_report, ticker, "basic", None, market)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise hidden_http_error(logger, f"종목 리포트 생성 ({ticker}, {market})", e,
+                                status_code=500, message=_REPORT_FAILED)
 
     company_name = write_result.get("company_name", req.company_name or ticker)
     raw          = write_result.get("raw", "")
@@ -225,7 +256,8 @@ async def industry_research(
     try:
         write_result = await asyncio.to_thread(write_industry_report, req.industry_id, "basic", None, market)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise hidden_http_error(logger, f"산업 리포트 생성 ({req.industry_id}, {market})", e,
+                                status_code=500, message=_REPORT_FAILED)
 
     raw      = write_result.get("raw", "")
     sections = write_result.get("sections", {})
@@ -328,7 +360,9 @@ def equity_research_start(
         except JobCancelled:
             return   # 취소는 실패가 아니다. 상태는 이미 cancelled 로 바뀌어 있다.
         except Exception as exc:
-            _store.update_if(job_id, "pending", {"status": "error", "message": str(exc)})
+            # 잡 상태는 GET /job/{id} 로 그대로 나간다 — 예외 문자열은 로그로만.
+            log_hidden(logger, f"종목 리포트 잡 ({ticker}, {market}, {model_tier})", exc)
+            _store.update_if(job_id, "pending", {"status": "error", "message": _REPORT_FAILED})
 
     threading.Thread(target=_run, daemon=True).start()
     return {"job_id": job_id}
@@ -409,7 +443,9 @@ def industry_research_start(
         except JobCancelled:
             return
         except Exception as exc:
-            _store.update_if(job_id, "pending", {"status": "error", "message": str(exc)})
+            # 잡 상태는 GET /job/{id} 로 그대로 나간다 — 예외 문자열은 로그로만.
+            log_hidden(logger, f"산업 리포트 잡 ({industry_id}, {market}, {model_tier})", exc)
+            _store.update_if(job_id, "pending", {"status": "error", "message": _REPORT_FAILED})
 
     threading.Thread(target=_run, daemon=True).start()
     return {"job_id": job_id}

@@ -14,6 +14,7 @@ import pandas as pd
 import yfinance as yf
 from fastapi import Depends, APIRouter, Header, HTTPException, Query
 
+from backend.routers._errors import hidden_http_error
 from backend.services.auth import optional_user
 from backend.services.markets import market_param
 
@@ -224,7 +225,10 @@ def get_ticker_detail(
         t = yf.Ticker(sym)
         hist = t.history(period=yf_period, auto_adjust=True)
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"yfinance 오류: {e}")
+        # 종목 상세 모달이 detail 을 그대로 보여 준다. 라이브러리 예외 문구(접속
+        # 주소·HTTP 오류 원문)는 로그로만 남긴다.
+        raise hidden_http_error(logger, f"종목 상세 시세 조회 ({sym}, {period})", e, status_code=503,
+                                message="시세를 받아오지 못했습니다. 잠시 후 다시 시도해 주세요.")
 
     # 장중 부분 데이터(오늘 행) NaN Close 제거 — yfinance는 장중에 Close=NaN 행을 반환할 수 있음
     hist = hist[hist["Close"].notna()]

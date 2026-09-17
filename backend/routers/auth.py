@@ -29,6 +29,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from backend.db import users_repo
+from backend.routers._errors import hidden_http_error
 from backend.services.auth import (
     current_user, verified_user, init_firebase, is_registered, forget_registration,
     _IS_MANAGED_RUNTIME, _LOCAL_MAY_DELETE_AUTH,
@@ -39,6 +40,12 @@ from backend.services.credentials import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+# 소셜 로그인 서버(카카오·네이버)와 통신 자체가 실패했을 때 사용자에게 보내는 문장.
+# 예전에는 requests 예외 문구(접속 주소·재시도 횟수·JSON 파싱 오류)를 detail 에
+# 붙여 보냈고, 로그인 창이 그대로 보여 줬다. 원인은 로그로만 남긴다.
+_NAVER_UNREACHABLE = "네이버 로그인 서버와 통신하지 못했습니다. 잠시 후 다시 시도해 주세요."
+_KAKAO_UNREACHABLE = "카카오 로그인 서버와 통신하지 못했습니다. 잠시 후 다시 시도해 주세요."
 
 # Firebase 웹 API 키 — 비밀이 아니다(프론트 번들에 그대로 들어간다).
 # 아이디 로그인에서 비밀번호를 대조할 때 Identity Toolkit 호출에 쓴다.
@@ -456,7 +463,8 @@ def naver_callback(body: NaverCodeIn):
         )
         data = r.json()
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"네이버 인증 서버 오류: {e}")
+        raise hidden_http_error(logger, "네이버 토큰 교환", e, status_code=502,
+                                message=_NAVER_UNREACHABLE)
 
     token = data.get("access_token")
     if r.status_code != 200 or not token:
@@ -476,7 +484,8 @@ def _naver_profile_to_token(access_token: str, register: bool):
         )
         data = r.json()
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"네이버 인증 서버 오류: {e}")
+        raise hidden_http_error(logger, "네이버 프로필 조회", e, status_code=502,
+                                message=_NAVER_UNREACHABLE)
 
     if r.status_code != 200 or data.get("resultcode") != "00":
         raise HTTPException(status_code=401, detail="네이버 토큰이 유효하지 않습니다.")
@@ -531,7 +540,8 @@ def _kakao_profile_to_token(access_token: str, register: bool = False) -> dict:
         )
         data = r.json()
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"카카오 인증 서버 오류: {e}")
+        raise hidden_http_error(logger, "카카오 프로필 조회", e, status_code=502,
+                                message=_KAKAO_UNREACHABLE)
 
     if r.status_code != 200 or not data.get("id"):
         raise HTTPException(status_code=401, detail="카카오 토큰이 유효하지 않습니다.")
@@ -621,7 +631,8 @@ def kakao_callback(body: KakaoCodeIn):
         r = requests.post("https://kauth.kakao.com/oauth/token", data=payload, timeout=10)
         data = r.json()
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"카카오 인증 서버 오류: {e}")
+        raise hidden_http_error(logger, "카카오 토큰 교환", e, status_code=502,
+                                message=_KAKAO_UNREACHABLE)
 
     if r.status_code != 200 or not data.get("access_token"):
         logger.warning(f"카카오 토큰 교환 실패: {data}")

@@ -6,12 +6,18 @@ routers/signals.py
 from __future__ import annotations
 
 import logging
+import re
 from typing import Optional
 
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from backend.routers._errors import hidden_http_error, user_sentence
+
 logger = logging.getLogger(__name__)
+
+# trading_signals.detect_regime_er 가 사용자용 문장으로 올리는 ValueError.
+_REGIME_USER_REASONS = (re.compile(r"ER 계산에 필요한 데이터 부족"),)
 
 from backend.services.auth import optional_user
 from backend.db.portfolio_repo import get_holdings as db_get_holdings
@@ -153,8 +159,10 @@ def scan_universe(
     except HTTPException:
         raise
     except Exception as e:
+        # 원인은 로그로만 — 예전에는 예외 이름과 문구를 detail 에 그대로 실었다.
         _logger.error(f"스캔 실패 상세: {type(e).__name__}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"스캔 실패: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500,
+                            detail="매매신호 스캔에 실패했습니다. 잠시 후 다시 시도해 주세요.")
 
 
 @router.get("/scan/cached")
@@ -381,7 +389,14 @@ def market_regime(
     try:
         result = detect_regime_er(price_all, window=window, threshold=threshold)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        # 데이터가 짧다는 사유는 detect_regime_er 가 사용자용 문장으로 올린다
+        # ("ER 계산에 필요한 데이터 부족 (N행, 최소 M행)"). 그 밖의 ValueError 는
+        # numpy·pandas 의 내부 문구라 로그로만 남긴다.
+        reason = user_sentence(e, _REGIME_USER_REASONS)
+        if reason is not None:
+            raise HTTPException(status_code=400, detail=reason)
+        raise hidden_http_error(logger, f"시장 국면 계산 ({ticker}, {market})", e, status_code=500,
+                                message="시장 국면을 계산하지 못했습니다. 잠시 후 다시 시도해 주세요.")
 
     rl = result.get("regime_labels")
     if rl is None or len(rl) == 0:

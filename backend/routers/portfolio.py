@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Optional
 
 import pandas as pd
+from backend.routers._errors import hidden_http_error, log_hidden
 from backend.services.auth import current_user
 from backend.services.markets import market_param
 from fastapi import Depends, APIRouter, HTTPException, Header
@@ -887,7 +888,10 @@ def get_ticker_price(ticker: str, _auth: dict = Depends(current_user), market: s
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=404, detail=f"티커 조회 실패: {e}")
+        # 라이브러리 예외 문구는 로그로만 (routers/_errors.py). 상태 코드는 기존 404 를
+        # 유지한다 — 화면(종목 추가 칸)은 실패를 코드와 무관하게 같은 안내로 처리한다.
+        raise hidden_http_error(logger, f"현재가 직접 조회 ({sym}, {market})", e, status_code=404,
+                                message=f"{sym} 시세를 받아오지 못했습니다. 잠시 후 다시 시도해 주세요.")
 
 
 @router.post("/auto-sector")
@@ -1267,4 +1271,8 @@ def refresh_portfolio(_auth: dict = Depends(current_user), market: str = Depends
         refresh_user_prices(tickers)
         return {"ok": True, "tickers": tickers, "message": f"{len(tickers)}개 종목 가격 갱신 완료"}
     except Exception as e:
-        return {"ok": False, "tickers": tickers, "message": str(e)}
+        # 예전에는 로그 없이 str(e) 만 응답에 실었다 — 서버에는 실패 흔적이 없고
+        # 사용자에게는 내부 문구가 갔다. 응답 모양(ok=False)은 그대로 둔다.
+        log_hidden(logger, f"보유 종목 가격 갱신 ({market}, {len(tickers)}종목)", e)
+        return {"ok": False, "tickers": tickers,
+                "message": "가격 갱신에 실패했습니다. 잠시 후 다시 시도해 주세요."}

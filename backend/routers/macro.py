@@ -14,6 +14,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
+from backend.routers._errors import log_hidden
 from backend.services.auth import (ai_feature_user, current_user,
                                    enforce_deep_limit, resolve_model_tier)
 from fastapi import Depends, APIRouter, Header, HTTPException
@@ -168,7 +169,13 @@ def analyze_macro(
         except JobCancelled:
             return   # 취소는 실패가 아니다. 상태는 이미 cancelled 다.
         except Exception as exc:
-            _store.update_if(job_id, "pending", {"status": "error", "message": str(exc)})
+            # 잡 상태는 GET /job/{id} 로 그대로 나간다 — 예외 문자열은 로그로만.
+            # 예전에는 로그 없이 str(exc) 만 잡에 남아, 서버에는 흔적이 없었다.
+            log_hidden(logger, f"매크로 시나리오 잡 ({market}, {req_mode}, {tier})", exc)
+            _store.update_if(job_id, "pending", {
+                "status": "error",
+                "message": "분석 중 서버 오류가 났습니다. 잠시 후 다시 시도해 주세요.",
+            })
 
     threading.Thread(target=_run, daemon=True).start()
     return {"job_id": job_id}

@@ -5,12 +5,15 @@ routers/optimizer.py
 """
 from __future__ import annotations
 
+import logging
+import re
 import threading
 import uuid
 from typing import Optional
 
 import numpy as np
 import pandas as pd
+from backend.routers._errors import log_hidden, user_sentence
 from backend.services.auth import current_user, optional_user
 from backend.services.job_store import JobStore, ANONYMOUS, Owner
 from fastapi import Depends, APIRouter, Header, HTTPException
@@ -28,6 +31,29 @@ from backend.services.optimizer import (
 )
 
 router = APIRouter(prefix="/api/optimizer", tags=["optimizer"])
+
+# 이 모듈에는 로거가 없었다 — 최적화 실패는 `detail` 로 응답에만 실리고 로그에는
+# 남지 않았다 (§1.3: 로거가 없으면 먼저 만든다).
+logger = logging.getLogger(__name__)
+
+_OPTIMIZE_FAILED = "최적화 중 서버 오류가 났습니다. 잠시 후 다시 시도해 주세요."
+
+# run_ai_optimization 이 **사용자용 문장**으로 올리는 ValueError
+# (backend/services/portfolio_optimizer.py). `except ValueError` 는 numpy·pandas·
+# pypfopt 의 ValueError 도 같이 잡으므로 타입만으로는 사용자 문장인지 알 수 없다.
+_OPTIMIZE_USER_REASONS = (
+    re.compile(r"가격 데이터 조회 실패 — 종목 티커를 확인해주세요\."),
+    re.compile(r"충분한 데이터를 가진 종목이 2개 미만입니다"),
+)
+
+
+def _optimize_failure(e: Exception, what: str) -> tuple[int, str]:
+    """실패를 (상태 코드, 사용자에게 보낼 문장) 으로. 사용자 문장이 아니면 로그로만 남긴다."""
+    reason = user_sentence(e, _OPTIMIZE_USER_REASONS) if isinstance(e, ValueError) else None
+    if reason is not None:
+        return 400, reason
+    log_hidden(logger, what, e)
+    return 500, _OPTIMIZE_FAILED
 
 # ── AI-Optimize 잡 스토어 (in-process, 재시작 시 초기화) ─────────────────────
 # 잡 상태는 DB 에 둔다 — Cloud Run 은 인스턴스를 여러 개 띄우고 세션 고정이 없어서,
@@ -174,10 +200,9 @@ def ai_optimize(req: AIOptimizeRequest, _auth: Optional[dict] = Depends(optional
             holding_period_years=req.holding_period_years, weight_bounds=wb,
             market=market,
         )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"최적화 오류: {e}")
+        status, message = _optimize_failure(e, f"AI 최적화 (동기, {market})")
+        raise HTTPException(status_code=status, detail=message)
 
 
 # ── 잡 기반 비동기 최적화 ─────────────────────────────────────────────────────
@@ -213,13 +238,11 @@ def start_ai_optimize_job(
             )
             _store.update_if(job_id, "running",
                              {"status": "done", "stage": 3, "stage_text": "완료", "result": result})
-        except ValueError as e:
-            _store.update_if(job_id, "running",
-                             {"status": "error", "stage": 0, "stage_text": "오류", "detail": str(e)})
         except Exception as e:
+            # 잡 상태의 detail 은 화면(최적화 페이지)이 그대로 보여 준다.
+            _, message = _optimize_failure(e, f"AI 최적화 잡 ({market})")
             _store.update_if(job_id, "running",
-                             {"status": "error", "stage": 0, "stage_text": "오류",
-                              "detail": f"최적화 오류: {e}"})
+                             {"status": "error", "stage": 0, "stage_text": "오류", "detail": message})
 
     threading.Thread(target=_run, daemon=True).start()
     return {"job_id": job_id}
