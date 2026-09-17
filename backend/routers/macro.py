@@ -360,6 +360,10 @@ def analyst_feedback_auto(
                        else metrics.get("today_change_pct")),
         sector_summary=portfolio_sector_summary,
         is_portfolio_sectors=True,
+        # 변동성 지수의 이름(VIX/VKOSPI)을 시장에서 읽는다. 기본값이 없는 인자라
+        # 빠뜨리면 이 라우트가 500 이다 — 한국 vix 값이 VKOSPI 인데 프롬프트가
+        # "VIX" 라고 부르던 것을 고치면서 생긴 계약이다.
+        market=market,
     )
     result = {"feedback": text, "metrics_snapshot": metrics}
     if not market_open:
