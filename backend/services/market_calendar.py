@@ -547,6 +547,50 @@ def is_jp_extended_hours(now: Optional[datetime] = None) -> bool:
     return _TSE_EXT_OPEN <= n.time() < _TSE_EXT_CLOSE
 
 
+def next_close_reset(market: str, now: Optional[datetime] = None,
+                     delay_minutes: int = 30) -> datetime:
+    """다음 **'장 마감 + delay_minutes'** 시각 (시간대가 붙은 datetime).
+
+    하루 단위로 갱신하는 공용 캐시의 만료 시각으로 쓴다 — 그 시장의 장이
+    끝나고 종가가 들어올 여유를 둔 뒤에 다음 날 분을 새로 만든다. 첫 사용처는
+    포트폴리오 최적화의 종목별 AI 뷰 재사용이다.
+
+      미국  거래일 16:00 ET + delay. NYSE 캘린더는 규칙이라 미래 날짜도 맞다.
+      한국  평일 15:30 KST + delay. 관측 캘린더(_krx_trading_days)는 **미래를
+            모르므로** 평일만 본다. 공휴일에는 거래가 없는 날 한 번 더
+            초기화될 뿐이라 해가 없다 — 반대로 관측 캘린더를 쓰면 오늘이
+            휴장인지 첫 체결 전에는 알 수 없어 오늘 초기화를 건너뛸 수 있다.
+
+    `now` 가 시간대를 가지면 그 시장 시간대로 옮기고, 없으면 그 시장의 현지
+    시각으로 읽는다 (price_series._market_now 와 같은 규칙).
+    반환값은 항상 `now` 보다 **엄격히 뒤**다 — 정확히 초기화 시각에 부르면
+    다음 날 것을 준다.
+    """
+    m = str(market).upper()
+    if m == "KR":
+        tz, close = KST, _KRX_CLOSE
+        is_session_day = lambda d: d.weekday() < 5          # noqa: E731
+        default_now = now_kst
+    elif m == "US":
+        tz, close = ET, _MARKET_CLOSE
+        is_session_day = is_us_trading_day
+        default_now = now_et
+    else:
+        raise ValueError(f"알 수 없는 시장: {market!r}")
+
+    n = now if now is not None else default_now()
+    n = n.astimezone(tz) if n.tzinfo is not None else n.replace(tzinfo=tz)
+
+    d = n.date()
+    for _ in range(20):          # 연휴가 아무리 길어도 20일 안에 거래일이 있다
+        if is_session_day(d):
+            candidate = datetime.combine(d, close, tzinfo=tz) + timedelta(minutes=delay_minutes)
+            if candidate > n:
+                return candidate
+        d += timedelta(days=1)
+    raise RuntimeError(f"{m}: 20일 안에 다음 초기화 시각을 찾지 못했다 (now={n})")
+
+
 def price_can_move(ticker: str) -> bool:
     """이 티커의 가격이 **지금 변할 수 있는가.**
 
