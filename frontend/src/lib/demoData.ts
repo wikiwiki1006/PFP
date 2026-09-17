@@ -61,19 +61,19 @@ export const DEMO_METRICS: PortfolioMetrics = {
 
 export const DEMO_HOLDINGS_DETAIL: HoldingDetail[] = [
   { ticker: 'AAPL', qty: 120, avg_cost: 182.40, current_price: 214.60, market_value: 25_752,
-    pnl: 3_864,  pnl_pct: 17.65, sector: 'Technology',        weight: 20.0, chg_pct:  0.84 },
+    pnl: 3_864,  pnl_pct: 17.65, sector: 'Technology',        weight: 0.2, chg_pct:  0.84 },
   { ticker: 'NVDA', qty:  85, avg_cost: 118.20, current_price: 168.90, market_value: 14_357,
-    pnl: 4_310,  pnl_pct: 42.89, sector: 'Technology',        weight: 11.2, chg_pct:  2.31 },
+    pnl: 4_310,  pnl_pct: 42.89, sector: 'Technology',        weight: 0.112, chg_pct:  2.31 },
   { ticker: 'MSFT', qty:  55, avg_cost: 392.10, current_price: 441.75, market_value: 24_296,
-    pnl: 2_731,  pnl_pct: 12.66, sector: 'Technology',        weight: 18.9, chg_pct: -0.42 },
+    pnl: 2_731,  pnl_pct: 12.66, sector: 'Technology',        weight: 0.189, chg_pct: -0.42 },
   { ticker: 'TSLA', qty:  70, avg_cost: 241.80, current_price: 262.35, market_value: 18_365,
-    pnl: 1_439,  pnl_pct:  8.50, sector: 'Consumer Cyclical', weight: 14.3, chg_pct:  1.77 },
+    pnl: 1_439,  pnl_pct:  8.50, sector: 'Consumer Cyclical', weight: 0.143, chg_pct:  1.77 },
   { ticker: 'SPY',  qty:  40, avg_cost: 512.30, current_price: 587.20, market_value: 23_488,
-    pnl: 2_996,  pnl_pct: 14.62, sector: 'ETF',               weight: 18.3, chg_pct:  0.36 },
+    pnl: 2_996,  pnl_pct: 14.62, sector: 'ETF',               weight: 0.183, chg_pct:  0.36 },
   { ticker: 'JEPQ', qty: 210, avg_cost:  53.10, current_price:  56.85, market_value: 11_939,
-    pnl:   788,  pnl_pct:  7.06, sector: 'ETF',               weight:  9.3, chg_pct:  0.21 },
+    pnl:   788,  pnl_pct:  7.06, sector: 'ETF',               weight:  0.093, chg_pct:  0.21 },
   { ticker: 'CASH', qty: 10_253, avg_cost: 1, current_price: 1, market_value: 10_253,
-    pnl: 0, pnl_pct: 0, sector: 'Cash', weight: 8.0, chg_pct: 0 },
+    pnl: 0, pnl_pct: 0, sector: 'Cash', weight: 0.08, chg_pct: 0 },
 ]
 
 export const DEMO_HOLDINGS_RAW: HoldingsMap = {
@@ -87,10 +87,10 @@ export const DEMO_HOLDINGS_RAW: HoldingsMap = {
 }
 
 export const DEMO_SECTOR_WEIGHTS: SectorWeights = {
-  Technology:         50.1,
-  ETF:                27.6,
-  'Consumer Cyclical': 14.3,
-  Cash:                8.0,
+  Technology:         0.501,
+  ETF:                0.276,
+  'Consumer Cyclical': 0.143,
+  Cash:                0.08,
 }
 
 /** 2년치 주간 곡선 — 완만한 우상향에 조정 구간을 섞어 실제처럼 보이게 한다.
@@ -241,15 +241,15 @@ const DEMO_METRICS_KR: PortfolioMetrics = {
 
 const DEMO_HOLDINGS_DETAIL_KR: HoldingDetail[] = [
   { ticker: '005930.KS', name: '삼성전자',   qty: 200, avg_cost: 71_900,  current_price: 260_250,
-    market_value: 52_050_000, pnl: 37_670_000, pnl_pct: 261.96, sector: 'Technology',        weight: 30.5, chg_pct: -0.19 },
+    market_value: 52_050_000, pnl: 37_670_000, pnl_pct: 261.96, sector: 'Technology',        weight: 0.305, chg_pct: -0.19 },
   { ticker: '000660.KS', name: 'SK하이닉스', qty:  20, avg_cost: 245_000, current_price: 1_807_500,
-    market_value: 36_150_000, pnl: 31_250_000, pnl_pct: 637.76, sector: 'Technology',        weight: 21.2, chg_pct:  1.24 },
+    market_value: 36_150_000, pnl: 31_250_000, pnl_pct: 637.76, sector: 'Technology',        weight: 0.212, chg_pct:  1.24 },
   { ticker: '005380.KS', name: '현대차',     qty: 120, avg_cost: 198_500, current_price: 241_000,
-    market_value: 28_920_000, pnl:  5_100_000, pnl_pct:  21.41, sector: 'Consumer Cyclical', weight: 16.9, chg_pct:  0.62 },
+    market_value: 28_920_000, pnl:  5_100_000, pnl_pct:  21.41, sector: 'Consumer Cyclical', weight: 0.169, chg_pct:  0.62 },
   { ticker: '035420.KS', name: 'NAVER',      qty: 150, avg_cost: 186_000, current_price: 268_500,
-    market_value: 40_275_000, pnl: 12_375_000, pnl_pct:  44.35, sector: 'Communication',     weight: 23.6, chg_pct: -1.03 },
+    market_value: 40_275_000, pnl: 12_375_000, pnl_pct:  44.35, sector: 'Communication',     weight: 0.236, chg_pct: -1.03 },
   { ticker: 'CASH', qty: 13_500_000, avg_cost: 1, current_price: 1, market_value: 13_500_000,
-    pnl: 0, pnl_pct: 0, sector: 'Cash', weight: 7.9, chg_pct: 0 },
+    pnl: 0, pnl_pct: 0, sector: 'Cash', weight: 0.079, chg_pct: 0 },
 ]
 
 const DEMO_HOLDINGS_RAW_KR: HoldingsMap = {
@@ -261,10 +261,10 @@ const DEMO_HOLDINGS_RAW_KR: HoldingsMap = {
 }
 
 const DEMO_SECTOR_WEIGHTS_KR: SectorWeights = {
-  Technology:          51.7,   // 삼성전자 30.5 + SK하이닉스 21.2
-  Communication:       23.6,
-  'Consumer Cyclical': 16.9,
-  Cash:                 7.9,
+  Technology:          0.517,   // 비율 — 삼성전자 0.305 + SK하이닉스 0.212
+  Communication:       0.236,
+  'Consumer Cyclical': 0.169,
+  Cash:                 0.079,
 }
 
 /* ── 시장별 선택자 ────────────────────────────────────────────────────────────
