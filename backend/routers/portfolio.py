@@ -70,9 +70,12 @@ def _portfolio_close_df(
     계산 자체를 못 해 영구히 null 이었다 — 응답은 benchmark_label 로
     "코스피" 라고 말하면서 값은 비어 있는 상태였다.
 
-    ^VIX 는 시장과 무관하게 남긴다. VKOSPI 를 야후가 주지 않아(^VKOSPI ·
-    ^VKOSPI200 · VKOSPI.KS · ^KSVKOSPI 전부 0건) 한국 화면에서도 미국 VIX 를
-    쓰고, 그 사실은 라벨("변동성 (미국 VIX)")로 밝힌다.
+    ^VIX 는 시장과 무관하게 넣지만 **읽는 것은 미국뿐이다.** 미국 `vix` 는 이
+    열(실시간 주입 포함)에서 나오고, 한국 `vix` 는 계산기가 VKOSPI 를
+    `market_data.volatility_index("KR")` 에서 따로 받는다 (ba60ceb) — 야후에
+    VKOSPI 가 없어 이 프레임에는 그 열이 없다. 그래서 한국 프레임의 ^VIX 열은
+    지표에 쓰이지 않는다. 그래도 빼지 않는다: 티커 집합이 프레임 메모리 캐시
+    키(`close_<정렬된 티커>_<기간>`)라 빼면 기존 캐시와 키가 갈린다.
     """
     from backend.services.markets import benchmark_for
     tickers = sorted(set(
