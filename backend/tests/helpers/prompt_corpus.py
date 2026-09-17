@@ -46,6 +46,9 @@ class Prompt:
     builder: str          # "모듈.함수"
     market: str           # "KR" | "US"
     text: str
+    # 모델 호출을 가로채 프롬프트를 얻는 빌더만 채운다. False 면 함수가 모델을
+    # 부르기 **전에** 돌아왔다는 뜻이고, `text` 는 프롬프트가 아니라 그 반환값이다.
+    reached_model: bool | None = None
 
     @property
     def id(self) -> str:
@@ -172,6 +175,16 @@ def _daily_brief_prompt() -> list[Prompt]:
     마지막 줄이 `return call_claude(prompt, ...)` 라, 그 함수를 가로채면
     프롬프트 문자열을 그대로 받을 수 있다. 별도 진입점을 만들지 않고 실제
     경로가 만드는 문자열을 그대로 잰다.
+
+    **키를 고정한다.** 이 함수는 `ANTHROPIC_API_KEY` 가 비면 프롬프트를 만들기
+    전에 `"ANTHROPIC_API_KEY 미설정"` 을 돌려준다. 그 키는 모듈 import 때
+    `backend/.env` 에서 읽히므로, 키 없는 환경(새 클론·CI·키를 뺀 창)에서는
+    코퍼스의 브리프 두 항목이 그 한 줄이 되어 **규칙 검사 11건이 아무것도 안
+    보고 통과**했다 (재현함). 모델 호출은 가로채므로 키는 쓰이지 않는다.
+
+    그래도 함수가 모델을 부르기 전에 돌아오는 길은 또 생길 수 있다. 그래서
+    가로챈 함수가 실제로 불렸는지를 `reached_model` 로 남기고,
+    `test_prompt_rules` 가 그걸 확인한다.
     """
     from backend.services import ai_analysis
 
@@ -186,10 +199,18 @@ def _daily_brief_prompt() -> list[Prompt]:
         ("KR", KR_HOLDINGS, kr_prices, "[한국 거시지표]\n  한국은행 기준금리: 2.50%"),
         ("US", US_HOLDINGS, us_prices, "[US macro indicators]\n  Fed funds: 4.25%"),
     ):
-        with mock.patch.object(ai_analysis, "call_claude", lambda prompt, *a, **kw: prompt), \
+        sent: list[str] = []
+
+        def fake_model(prompt, *a, _sent=sent, **kw):
+            _sent.append(prompt)
+            return prompt
+
+        with mock.patch.object(ai_analysis, "ANTHROPIC_API_KEY", "corpus-key-never-sent"), \
+             mock.patch.object(ai_analysis, "call_claude", fake_model), \
              mock.patch.object(ai_analysis, "build_macro_block", lambda m, _b=macro: _b):
             text = ai_analysis.generate_daily_brief(holdings, prices, news, market)
-        out.append(Prompt("ai_analysis.generate_daily_brief", market, text))
+        out.append(Prompt("ai_analysis.generate_daily_brief", market, text,
+                          reached_model=bool(sent) and text in sent))
     return out
 
 
