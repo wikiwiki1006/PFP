@@ -419,3 +419,20 @@ def db_uid(live_db):
     with db.get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM users WHERE id=%s", (uid,))
+
+
+@pytest.fixture
+def ai_view_tag(live_db):
+    """AI 뷰 공용 캐시(`common_cache` 의 `ai_view::` 행)를 쓰는 테스트의 티커 접두사.
+
+    끝나면 **이 접두사의 행만** 지운다 — 시장·기간과 무관하게. 같은 창 DB 에 앱이
+    쓴 뷰나 다른 테스트의 행은 건드리지 않는다. 캐시 자체를 재는 검사와 그 캐시를
+    쓰는 최적화 흐름 검사가 같이 쓴다.
+    """
+    prefix = "ZZT" + uuid.uuid4().hex[:8].upper()
+    yield prefix
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM common_cache WHERE left(cache_type, 9) = 'ai_view::' "
+                "AND split_part(cache_type, '::', 5) LIKE %s", (prefix + "%",))

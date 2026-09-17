@@ -11,7 +11,8 @@ backend/tests/helpers/prompt_corpus.py
 
     ai_analysis.py          _format_portfolio · build_macro_block
                             _build_agents (에이전트 9개) · generate_daily_brief
-    daily_report.py         _build_prompt
+                            _analyst_feedback_prompt
+    daily_report.py         _build_prompt (+ 변동성·뉴스 섹션 변형)
     report_writer.py        _equity_prompt(+part1/part2) · _industry_prompt
     portfolio_optimizer.py  _build_ticker_section
 
@@ -98,7 +99,93 @@ def _daily_prompts() -> list[Prompt]:
                daily_report._build_prompt(KR_HOLDINGS, kr_prices, news, "KR")),
         Prompt("daily_report._build_prompt", "US",
                daily_report._build_prompt(US_HOLDINGS, us_prices, news, "US")),
+    ] + _daily_prompts_with_news(daily_report, kr_prices, us_prices) \
+      + _daily_prompts_with_gaps(daily_report, kr_prices, us_prices)
+
+
+def _daily_prompts_with_gaps(daily_report, kr_prices: dict, us_prices: dict) -> list[Prompt]:
+    """기준일 등락을 못 구한 종목(`__missing`)과 섹터가 없는 종목 — e0545d3, 리포트 품질 요청.
+
+    `_fetch_price_data` 가 기준일 종가가 없는 보유 종목을 `__missing` 에 사유와 함께
+    남기고, 프롬프트는 "{티커}: 데이터 없음 — {사유}" 와 합계 "합산 불가" 를 적는다.
+    섹터가 NULL 이면 "섹터 정보 없음". 이 줄들이 B2(자리표시자) 같은 규칙을 한 번도
+    안 받았다. 사유 문자열은 `_fetch_price_data` 가 만드는 모양 그대로다.
+    """
+    kr_gap = {**kr_prices,
+              "005930.KS": {**kr_prices["005930.KS"], "sector": None},
+              "__missing": {"000660.KS": "2026-09-17 종가 없음 (마지막 2026-09-16)"}}
+    us_gap = {**us_prices,
+              "AAPL": {**us_prices["AAPL"], "sector": None},
+              "__missing": {"MSFT": "2026-09-16 까지 쓸 수 있는 실제 종가 두 개가 없음"}}
+    kr_holdings = {**KR_HOLDINGS, "000660.KS": {"q": 5, "avg": 180000, "sector": None}}
+    us_holdings = {**US_HOLDINGS, "MSFT": {"q": 3, "avg": 410.0, "sector": "Tech"}}
+    return [
+        Prompt("daily_report._build_prompt(결손·섹터없음)", "KR",
+               daily_report._build_prompt(kr_holdings, kr_gap, {}, "KR")),
+        Prompt("daily_report._build_prompt(결손·섹터없음)", "US",
+               daily_report._build_prompt(us_holdings, us_gap, {}, "US")),
     ]
+
+
+def _daily_prompts_with_news(daily_report, kr_prices: dict, us_prices: dict) -> list[Prompt]:
+    """위 기본 항목이 못 지나는 경로 — 리포트 품질 역할의 요청.
+
+    기본 항목은 뉴스가 비고(`"수집된 뉴스 없음"`) 한국 변동성이 없다
+    (`"VKOSPI: 데이터 없음"`). 그래서 **값이 있는 VKOSPI 줄**과 뉴스 섹션의 세
+    머리(`[국내 매체 수집]` · 그 수집이 비었다는 줄 · `[급등락 종목 원인 수집]`)는
+    한 번도 규칙 검사를 받지 않았다. 뉴스 본문은 규칙에 걸리지 않는 평범한
+    문장으로 둔다 — 재려는 것은 빌더가 만드는 틀이지 넣은 기사가 아니다.
+
+    `__VOL` 은 `daily_report._volatility_entry` 가 만드는 모양 그대로다.
+    """
+    vol = {"close": 43.02, "prev": 44.40, "chg_pct": -3.11, "as_of": "2026-09-17"}
+    kr_movers = {**kr_prices, "005930.KS": {**kr_prices["005930.KS"], "chg_pct": 4.1},
+                 "__VOL": vol}
+    us_movers = {**us_prices, "AAPL": {**us_prices["AAPL"], "chg_pct": -3.4}}
+    kr_news = {"005930.KS": [{"title": "삼성전자, HBM 공급 확대", "publisher": "한국경제",
+                              "time": "2026-09-17 08:10"}]}
+    us_news = {"AAPL": [{"title": "Apple trims iPhone orders", "publisher": "Reuters",
+                         "time": "2026-09-16 18:40"}]}
+    kr_press = ("- 삼성전자: 3분기 영업이익 10조원 안팎 전망 (매일경제, 09-17)\n"
+                "- 코스피: 외국인 순매도 5,000억원 (연합인포맥스, 09-17)")
+    return [
+        Prompt("daily_report._build_prompt(변동성·뉴스)", "KR",
+               daily_report._build_prompt(KR_HOLDINGS, kr_movers, kr_news, "KR",
+                                          kr_press=kr_press,
+                                          web_ctx="005930.KS 급등: HBM 인증 통과 보도 (이데일리)")),
+        # 다른 뉴스가 **있어야** "받은 것 없음" 줄이 나온다 — 아무 뉴스도 없으면
+        # `_news_section` 이 통째로 "수집된 뉴스 없음" 을 적는다. 처음에 헤드라인 없이
+        # 넣었다가 경로 흔적 검사가 이 변형이 그 줄을 안 지난다고 잡았다.
+        Prompt("daily_report._build_prompt(국내매체-빈수집)", "KR",
+               daily_report._build_prompt(KR_HOLDINGS, kr_prices, kr_news, "KR", kr_press="")),
+        Prompt("daily_report._build_prompt(변동성·뉴스)", "US",
+               daily_report._build_prompt(US_HOLDINGS, us_movers, us_news, "US",
+                                          web_ctx="AAPL drop: supplier cuts orders (Bloomberg)")),
+    ]
+
+
+def _analyst_feedback_prompts() -> list[Prompt]:
+    """`_analyst_feedback_prompt` — 포트폴리오 AI 피드백 (f2b7802). 시장 × 값 있음/없음.
+
+    변동성 지수의 **이름**이 시장마다 다르다 (US VIX · KR VKOSPI). 이 빌더가 시장을
+    모르던 동안 한국 피드백에도 "VIX 지수" 가 붙었다. 라우트가 쓰는 섹터 분석 모양
+    (`is_portfolio_sectors=True`)을 두 경우 다 넣고, 주도 섹터 모양은 값 있는 경우만.
+    """
+    from backend.services import ai_analysis
+
+    out: list[Prompt] = []
+    for market, vol, sectors in (
+        ("KR", 43.02, "Information Technology(60%, 오늘+1.2%) / Financials(40%)"),
+        ("US", 17.7, "Technology(60%, 오늘+1.2%) / Financials(40%)"),
+    ):
+        out.append(Prompt("ai_analysis._analyst_feedback_prompt(값)", market,
+                          ai_analysis._analyst_feedback_prompt(vol, 1.12, 0.85, sectors, True, market)))
+        out.append(Prompt("ai_analysis._analyst_feedback_prompt(값-없음)", market,
+                          ai_analysis._analyst_feedback_prompt(None, None, None, "섹터 데이터 없음",
+                                                               True, market)))
+        out.append(Prompt("ai_analysis._analyst_feedback_prompt(주도섹터)", market,
+                          ai_analysis._analyst_feedback_prompt(vol, 1.12, -0.4, sectors, False, market)))
+    return out
 
 
 def _report_prompts() -> list[Prompt]:
@@ -242,6 +329,7 @@ def _build_corpus_offline(ai_analysis) -> list[Prompt]:
     out += _agent_prompts()
     out += _daily_brief_prompt()
     out += _daily_prompts()
+    out += _analyst_feedback_prompts()
     out += _report_prompts()
     out += _optimizer_prompts()
     return out
