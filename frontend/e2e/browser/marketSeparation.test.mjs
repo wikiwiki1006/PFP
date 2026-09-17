@@ -14,10 +14,10 @@
  *     렌더돼서 4종이 8건으로 잡히기까지 한다. denylist 를 아무리 잘 골라도
  *     범위에 마퀴가 들어 있으면 소용이 없다.
  *
- *   VIX — 타일 라벨이 **"변동성 (미국 VIX)"** 다. 미국 것임을 화면에서
- *     밝히고 있고, 대체재인 VKOSPI 를 야후가 주지 않아 의도적으로 남긴
- *     것이다 (AlphaTerminal.tsx 의 그 주석). 이름만 보고 거르면 이 타일이
- *     영원히 위반으로 잡힌다.
+ * (예전에는 `VIX` 도 뺐다 — 타일 라벨이 "변동성 (미국 VIX)" 였다. 지금 라벨은
+ * '변동성' 이고 한국 값은 VKOSPI 다(ba60ceb). 2026-09-17 슬롯 3 에서 재 보니 두
+ * 화면 본문 어디에도 `VIX` 가 없어서, 뺄 이유가 사라진 예외를 거두고 목록에 넣었다.
+ * 한국 본문에 `VIX` 가 다시 보이면 그건 미국 지표가 한국 화면에 실린 것이다.)
  *
  * ## 대조군이 없으면 "아무것도 안 그리는" 구현이 통과한다
  *
@@ -30,7 +30,7 @@ import test, { after, before, describe } from 'node:test'
 import { bodyTextExcludingMarquee, requireApp, visit } from '../lib/app.mjs'
 
 /** 미국 시장을 가리키는 이름. 한국 화면 본문에 있으면 안 된다. */
-const US_MARKET_NAMES = ['S&P 500', 'S&P500', 'NASDAQ', 'Dow Jones', '^GSPC', '^IXIC']
+const US_MARKET_NAMES = ['S&P 500', 'S&P500', 'NASDAQ', 'Dow Jones', '^GSPC', '^IXIC', 'VIX']
 
 /** 미국 종목·ETF 티커. 한국 보유 표에 섞이면 §1.1 그대로다. */
 const US_TICKERS = ['SPY', 'QQQ', 'AAPL', 'NVDA', 'MSFT', 'TSLA', 'JEPQ']
@@ -38,27 +38,40 @@ const US_TICKERS = ['SPY', 'QQQ', 'AAPL', 'NVDA', 'MSFT', 'TSLA', 'JEPQ']
 /**
  * 지금 한국 화면에 남아 있는 티커와 그 뿌리.
  *
- * 전부 한 곳에서 온다 — `lib/demoData.ts` 의 `DEMO_EARNINGS` 는 시장별
- * 접근자가 없다. `demoMetrics()`·`demoHoldingsDetail()`·`demoHoldingsRaw()`
- * ·`demoSectorWeights()` 는 `getMarket()` 으로 갈리는데 `DEMO_EARNINGS` ·
- * `DEMO_EQUITY_CURVE` · `DEMO_NEWS` 셋은 상수 그대로 넘어간다. 그래서
- * 한국 화면의 실적/배당 표에 미국 종목이 그대로 뜬다.
+ * 전부 한 곳에서 온다. `lib/demoData.ts` 에는 이제 시장별 접근자
+ * `demoEarnings()`·`demoNews()`·`demoEquityCurve()` 가 **있다**(6cc0751) —
+ * 그런데 `pages/AlphaTerminal.tsx` 가 여전히 상수 `DEMO_EARNINGS`·`DEMO_NEWS`
+ * ·`DEMO_EQUITY_CURVE` 를 넘긴다 (2026-09-17 확인). 그래서 한국 화면의
+ * 실적/배당 표에 미국 종목이 그대로 뜬다.
  *
  * 고치면 여섯 줄이 한꺼번에 사라지고, 아래 두 번째 검사가 지우라고 한다.
  */
+const LEAK_ROOT = 'AlphaTerminal 이 DEMO_EARNINGS 상수를 넘긴다 — demoEarnings() 를 안 쓴다'
 const KNOWN_TICKER_LEAK = {
-  SPY: 'demoData DEMO_EARNINGS — 시장별 접근자 없음',
-  AAPL: 'demoData DEMO_EARNINGS — 시장별 접근자 없음',
-  NVDA: 'demoData DEMO_EARNINGS — 시장별 접근자 없음',
-  MSFT: 'demoData DEMO_EARNINGS — 시장별 접근자 없음',
-  TSLA: 'demoData DEMO_EARNINGS — 시장별 접근자 없음',
-  JEPQ: 'demoData DEMO_EARNINGS — 시장별 접근자 없음',
+  SPY: LEAK_ROOT,
+  AAPL: LEAK_ROOT,
+  NVDA: LEAK_ROOT,
+  MSFT: LEAK_ROOT,
+  TSLA: LEAK_ROOT,
+  JEPQ: LEAK_ROOT,
 }
 
 const seen = {}
 
 function present(text, needles) {
   return needles.filter(n => text.includes(n))
+}
+
+/** 페이지가 보낸 `/api/` 요청들이 실은 `market` 값. 인터셉터가 `getMarket()` 을 붙인다. */
+function apiMarkets(run) {
+  const out = new Set()
+  for (const r of run.responses) {
+    const url = new URL(r.url)
+    if (!url.pathname.startsWith('/api/')) continue
+    const market = url.searchParams.get('market')
+    if (market != null) out.add(market)
+  }
+  return out
 }
 
 before(async () => {
@@ -82,20 +95,37 @@ after(async () => {
 
 
 describe('전제 — 시장이 실제로 바뀌었다', () => {
-  test('한국 화면의 보유 표에 한국 종목이 있다', () => {
-    // 이게 없으면 아래 전부가 **미국 화면을 한국 화면이라 믿고** 재는 것이
-    // 된다. 전환이 조용히 안 되면 위반 0건이 나오고 그건 깨끗한 것과
-    // 구별되지 않는다.
-    const rows = seen.KR.tickers.join('\n')
-    assert.match(
-      rows, /\.KS|\.KQ/,
-      `no Korean ticker in the holdings table -- the market switch did not ` +
-      `take effect, so everything below measured the US screen.`,
+  // 이게 없으면 아래 전부가 **미국 화면을 한국 화면이라 믿고** 재는 것이 된다.
+  // 전환이 조용히 안 되면 위반 0건이 나오고 그건 깨끗한 것과 구별되지 않는다.
+  //
+  // 예전에는 "보유 표에 `.KS` 가 있다" 로 봤다. 요청 1번 이후 한국 표는 종목을
+  // **이름으로만** 보여 줘서 그 신호가 사라졌고, 전환이 됐는데도 전제가 빨갰다.
+  // 종목 이름(삼성전자…)은 예시 데이터에 묶여 있어 쓰지 않는다. 대신 두 신호를
+  // 본다 — 둘 다 같은 `getMarket()` 에서 나오지만 서로 다른 층이다:
+  //   요청  페이지의 `/api/` 요청이 그 시장을 싣는다 (axios 인터셉터)
+  //   화면  보유 표의 금액이 그 시장 통화로 그려진다 (formatPrice)
+  // '$' 는 쓰지 않는다 — 아래 G3 가 재는 바로 그 신호라, 전제로 쓰면 G3 가
+  // 빨개질 수 없다.
+  test('한국 화면은 한국 시장으로 요청하고 원화로 그린다', () => {
+    const markets = apiMarkets(seen.KR.run)
+    assert.deepEqual(
+      [...markets], ['KR'],
+      `the Korean page sent API requests for ${[...markets].join(',') || 'no market'} -- ` +
+      `the market switch did not take effect, so everything below measured another screen.`,
+    )
+    assert.ok(
+      seen.KR.tickers.some(row => row.includes('₩')),
+      `no won amount in the Korean holdings table -- either the switch did not reach ` +
+      `the formatters or the table did not render:\n${seen.KR.tickers.join('\n')}`,
     )
   })
 
-  test('미국 화면에는 한국 종목이 없다', () => {
-    assert.doesNotMatch(seen.US.tickers.join('\n'), /\.KS|\.KQ/)
+  test('미국 화면은 미국 시장으로 요청하고 원화가 없다', () => {
+    assert.deepEqual([...apiMarkets(seen.US.run)], ['US'])
+    const rows = seen.US.tickers.join('\n')
+    assert.ok(rows.length > 0, 'the US holdings table did not render')
+    assert.ok(!rows.includes('₩'), `won amounts on the US screen:\n${rows}`)
+    assert.doesNotMatch(rows, /\.KS|\.KQ/)
   })
 })
 
