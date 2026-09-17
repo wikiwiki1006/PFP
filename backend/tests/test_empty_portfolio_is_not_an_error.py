@@ -47,6 +47,14 @@ def empty_account(monkeypatch):
     """보유도 거래도 없는 사용자. 저장소만 비우고 라우터는 실물이 돈다."""
     monkeypatch.setattr(prt, "get_holdings", lambda uid, market="US": {})
     monkeypatch.setattr(prt, "get_trade_log", lambda uid, market="US": [])
+    # 빈 계정도 calculate_metrics 를 거치고, 한국 계산기는 변동성 지수(VKOSPI)를
+    # market_data.volatility_index 로 따로 읽는다 (ba60ceb) — 네트워크에 닿는다.
+    # 그 함수가 못 읽었을 때 돌려주는 모양(value None)을 대신 준다.
+    from backend.services import market_data
+    monkeypatch.setattr(market_data, "volatility_index", lambda market: {
+        "value": None, "prev_close": None, "change_pct": None, "as_of": None,
+        "label": None, "source": None,
+    })
 
 
 def _metrics(market="US"):
