@@ -199,6 +199,31 @@ def _news_section(news_text: str, kr_press: str | None, web_ctx: str) -> str:
     return "\n\n".join(blocks)
 
 
+def _bench_text(label: str, info: dict | None, unit: str = "") -> str:
+    """매크로 지표 한 칸. **없으면 없다고, 있으면 있는 대로 적는다.**
+
+    예전에는 `info.get('close', '?')` · `info.get('chg_pct', 0)` 이었다. 두 지표 중
+    하나만 빠지면 `원/달러: ? (+0.00%)` 가 나갔다 — `?` 는 모델이 값처럼 인용하고
+    (B2), `+0.00%` 는 '보합' 이라는 관측이다 (§1.3a).
+    """
+    if not info or info.get("close") is None:
+        return f"{label}: 데이터 없음"
+    chg = info.get("chg_pct")
+    move = f"{chg:+.2f}%" if chg is not None else "전일 대비 불명"
+    return f"{label}: {info['close']}{unit} ({move})"
+
+
+def _macro_line(parts: list[tuple[str, dict | None, str]]) -> str:
+    """매크로 지표 줄. 받은 지표가 **하나도** 없을 때만 '매크로 데이터 없음'.
+
+    예전 미국 줄은 VIX 가 있는지만 보고 줄 전체를 정해서, VIX 가 빠지면 받아 온
+    10년물 금리까지 '매크로 데이터 없음' 으로 사라졌다.
+    """
+    if not any(info and info.get("close") is not None for _, info, _ in parts):
+        return "매크로 데이터 없음"
+    return "  ".join(_bench_text(label, info, unit) for label, info, unit in parts)
+
+
 def _build_prompt(holdings: dict, price_data: dict, news: dict,
                   market: str = "US", *, kr_press: str | None = None,
                   web_ctx: str = "") -> str:
@@ -237,26 +262,30 @@ def _build_prompt(holdings: dict, price_data: dict, news: dict,
     ]
 
     if is_kr:
-        ks = price_data.get("__KOSPI", {})
-        kq = price_data.get("__KOSDAQ", {})
-        fx = price_data.get("__USDKRW", {})
-        bench_name = "KOSPI"
-        spy_line = (f"KOSPI 전일 변동: {ks.get('chg_pct', 0):+.2f}%"
-                    if ks else "KOSPI 데이터 없음")
-        macro_line = (
-            f"KOSDAQ: {kq.get('close','?')} ({kq.get('chg_pct',0):+.2f}%)  "
-            f"원/달러: {fx.get('close','?')} ({fx.get('chg_pct',0):+.2f}%)"
-        ) if kq or fx else "매크로 데이터 없음"
+        bench_key, bench_name = "KOSPI", "KOSPI"
+        macro_line = _macro_line([
+            ("KOSDAQ",  price_data.get("__KOSDAQ"), ""),
+            ("원/달러", price_data.get("__USDKRW"), ""),
+        ])
     else:
-        spy_info   = price_data.get("__SPY", {})
-        vix_info   = price_data.get("__VIX", {})
-        tnx_info   = price_data.get("__TNX", {})
-        bench_name = "S&P 500"
-        spy_line   = f"SPY 전일 변동: {spy_info.get('chg_pct', 0):+.2f}%" if spy_info else "SPY 데이터 없음"
-        macro_line = (
-            f"VIX: {vix_info.get('close','?')} ({vix_info.get('chg_pct',0):+.2f}%)  "
-            f"10Y TNX: {tnx_info.get('close','?')}% ({tnx_info.get('chg_pct',0):+.2f}%)"
-        ) if vix_info else "매크로 데이터 없음"
+        bench_key, bench_name = "SPY", "S&P 500"
+        macro_line = _macro_line([
+            ("VIX",     price_data.get("__VIX"), ""),
+            ("10Y TNX", price_data.get("__TNX"), "%"),
+        ])
+    # 벤치마크 등락도 같은 규칙이다. `.get('chg_pct', 0)` 이면 값이 없을 때 '보합' 이 된다.
+    bench_chg = (price_data.get(f"__{bench_key}") or {}).get("chg_pct")
+    spy_line = (f"{bench_key} 전일 변동: {bench_chg:+.2f}%" if bench_chg is not None
+                else f"{bench_key} 데이터 없음")
+    # 그리고 없으면 비교를 시키지 않는다. 스냅샷은 "KOSPI 데이터 없음" 이라고 적고
+    # 출력 형식은 "[아웃퍼폼/언더퍼폼]" 을 채우라고 하면, 채울 곳은 기억뿐이다.
+    bench_cmp = (
+        f"전일 포트폴리오 전체 자산은 벤치마크({bench_name}) 대비 [아웃퍼폼/언더퍼폼] 했습니다. "
+        "[구체적 수치 포함 1~2문장]"
+        if bench_chg is not None else
+        f"벤치마크({bench_name}) 등락 데이터가 없어 대비 성과는 판단하지 않았습니다. "
+        "[포트폴리오 자체 수치로 1~2문장]"
+    )
 
     news_text = ""
     for t in stock_keys:
@@ -317,7 +346,7 @@ def _build_prompt(holdings: dict, price_data: dict, news: dict,
 ## 1. 포트폴리오 전일 요약 (Portfolio Snapshot)
 * **최고 상승 종목:** [Ticker] ([+X.XX%])
 * **최대 하락 종목:** [Ticker] ([-X.XX%])
-* **특이 사항:** 전일 포트폴리오 전체 자산은 벤치마크({bench_name}) 대비 [아웃퍼폼/언더퍼폼] 했습니다. [구체적 수치 포함 1~2문장]
+* **특이 사항:** {bench_cmp}
 
 ---
 
