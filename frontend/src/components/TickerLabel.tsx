@@ -1,14 +1,17 @@
 /**
  * components/TickerLabel.tsx
  * ──────────────────────────
- * 종목을 한 줄로 표시한다. 무엇을 크게 보여 줄지는 시장에 따라 다르다.
+ * 종목을 한 줄로 표시한다. 무엇을 보여 줄지는 시장에 따라 다르다.
  *
- * 미국은 티커가 곧 이름 역할을 한다 — AAPL, NVDA 를 보면 바로 안다.
- * 한국은 그렇지 않다. '044490.KQ' 는 아무것도 알려 주지 않고, 코드를 외우는
- * 사람도 없다. 그래서 한국에서는 **종목명을 크게, 코드를 작게** 뒤집는다.
+ * 미국은 티커가 곧 이름 역할을 한다 — AAPL, NVDA 를 보면 바로 안다. 그래서
+ * 티커를 크게, 회사명을 작게 붙인다.
  *
- * 이름이 없을 때는(수집 실패 등) 티커를 크게 보여 준다 — 큰 자리를 비워 두면
- * 줄이 무너지고, 무엇보다 무슨 종목인지 전혀 알 수 없게 된다.
+ * 한국은 **이름만** 보여 준다. '044490.KQ' 는 아무것도 알려 주지 않고, 코드를
+ * 외우는 사람도 없다. 예전에는 이름을 크게·코드를 작게 같이 적었는데, 화면
+ * 곳곳에 코드가 따라다녀 읽기만 방해했다 (사용자 요청: "티커 대신 이름만").
+ *
+ * 이름이 없을 때는(수집 실패 등) 티커를 보여 준다 — 자리를 비워 두면 줄이
+ * 무너지고, 무엇보다 무슨 종목인지 전혀 알 수 없게 된다.
  */
 import { cn } from '@/lib/utils'
 import { useMarket } from '@/lib/useMarket'
@@ -33,11 +36,14 @@ export default function TickerLabel({
   stacked = false,
 }: TickerLabelProps) {
   const market = useMarket()
-  const hasName = !!(name && name.trim() && name.trim() !== ticker)
-  const nameFirst = market === 'KR' && hasName
+  const trimmed = name?.trim() ?? ''
+  const hasName = !!trimmed && trimmed !== ticker
+  const isKR = market === 'KR'
 
-  const primary = nameFirst ? name!.trim() : ticker
-  const secondary = nameFirst ? ticker : (hasName ? name!.trim() : null)
+  // 한국: 이름 하나만 (없으면 티커). 미국: 티커 + 회사명.
+  const primary = isKR && hasName ? trimmed : ticker
+  const secondary = !isKR && hasName ? trimmed : null
+  const primaryIsName = isKR && hasName
 
   return (
     <span
@@ -51,7 +57,7 @@ export default function TickerLabel({
         className={cn(
           'truncate text-[#e2e8f0]',
           // 코드가 주 텍스트일 때만 고정폭 — 이름에 고정폭을 쓰면 한글이 벌어져 읽기 나쁘다.
-          nameFirst ? 'font-semibold' : 'font-mono',
+          primaryIsName ? 'font-semibold' : 'font-mono',
           primaryClass,
         )}
         title={primary}

@@ -8,6 +8,7 @@ import { COLOR_UP, COLOR_DOWN } from './colors'
 import type { SignalScanPick, HoldingsMap } from '@/types'
 import TickerLabel from '@/components/TickerLabel'
 import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
+import { tickerByExactName } from '@/lib/suggestions'
 
 /** 서버가 준 실패 사유. 없으면 null (호출부가 기본 문구를 쓴다).
  *
@@ -144,6 +145,7 @@ function HoldingRow({
 }
 
 export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelProps) {
+  const names = useTickerNames()
   const [selected,     setSelected]     = useState<string | null>(null)
   const [search,       setSearch]       = useState('')
   const [sidebarOpen,  setSidebarOpen]  = useState(true)
@@ -167,7 +169,10 @@ export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelPr
   })
 
   function submitSearch() {
-    const t = search.trim().toUpperCase()
+    // 한국은 이름으로 찾는다 — 코드를 화면 어디에도 안 보여 주므로 사용자가 코드를
+    // 알 방법이 없다. 이름이 사전과 정확히 같으면 그 티커, 아니면 입력을 코드로 읽는다.
+    const typed = search.trim()
+    const t = tickerByExactName(typed, names) ?? typed.toUpperCase()
     if (t) setSelected(t)
     setSearch('')
   }
@@ -195,8 +200,8 @@ export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelPr
             <input
               value={search}
               onChange={e => setSearch(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && submitSearch()}
-              placeholder="티커 검색…"
+              onKeyDown={e => e.key === 'Enter' && !e.nativeEvent.isComposing && submitSearch()}
+              placeholder={getMarket() === 'KR' ? '종목명 검색…' : '티커 검색…'}
               className="w-full bg-[#060b14] border border-[#1e2d40] rounded pl-8 pr-3 py-2 text-sm text-[#e2e8f0] placeholder:text-[#374151] focus:outline-none focus:border-[#10b981]"
             />
           </div>
@@ -286,7 +291,10 @@ export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelPr
           </div>
         ) : (
           <>
-            <div className="text-lg font-mono font-bold text-[#e2e8f0] mb-3">{selected}</div>
+            {/* 한국은 종목명 (사전에 없으면 티커). 이름에는 고정폭을 쓰지 않는다. */}
+            <div className={`text-lg font-bold text-[#e2e8f0] mb-3${names[selected] ? '' : ' font-mono'}`}>
+              {displayTicker(selected, names)}
+            </div>
             <TickerScoreCard key={`score-${selected}`} ticker={selected} />
             <BollingerChart key={selected} ticker={selected} height={460} />
           </>

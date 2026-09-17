@@ -25,6 +25,7 @@ const SECTOR_KO: Record<string, string> = {
 const toKoSector = (s?: string | null) =>
   !s ? '' : (getMarket() === 'KR' ? (SECTOR_KO[s] ?? s) : s)
 import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
+import { tickerByExactName } from '@/lib/suggestions'
 
 // 주가 비교 차트와 스프레드 차트가 syncId 로 커서를 공유한다(아래 참조) — 어느
 // 쪽을 가리켜도 같은 날짜의 두 값을 한 번에 보여줘야 "동일 시점 비교"가 된다.
@@ -52,6 +53,8 @@ interface PairsTradingPanelProps {
 export default function PairsTradingPanel({ holdings = {} }: PairsTradingPanelProps) {
   const names = useTickerNames()
   const [tickerInput, setTickerInput]       = useState('')
+  // 프리셋으로 채운 칸의 글자와 그 티커. 사용자가 글자를 고치면 더는 쓰지 않는다.
+  const [picked, setPicked]                 = useState<{ text: string; ticker: string } | null>(null)
   const [thresholdInput, setThresholdInput] = useState('5')
   const [ticker, setTicker]                 = useState<string | null>(null)
   const [threshold, setThreshold]           = useState(5)
@@ -76,15 +79,24 @@ export default function PairsTradingPanel({ holdings = {} }: PairsTradingPanelPr
   )
 
   function submit() {
-    const t  = tickerInput.trim().toUpperCase()
+    // 입력칸의 글자를 티커로 바꾼다. 프리셋으로 채운 이름이 그대로면 그 티커,
+    // 아니면 사전에서 이름이 정확히 같은 종목, 그것도 없으면 입력을 코드로 읽는다.
+    // 한국은 코드를 화면에 안 보여 주므로 사용자는 이름으로 칠 수밖에 없다.
+    const typed = tickerInput.trim()
+    const t  = picked && typed === picked.text
+      ? picked.ticker
+      : (tickerByExactName(typed, names) ?? typed.toUpperCase())
     const th = parseFloat(thresholdInput)
     if (t) { setTicker(t); setSelectedPair(null) }
     if (!isNaN(th) && th > 0) setThreshold(th)
   }
 
-  /** 프리셋 클릭 — 입력창도 함께 채워 현재 선택을 명확히 보여준다 */
+  /** 프리셋 클릭 — 입력창도 함께 채워 현재 선택을 명확히 보여준다.
+   *  칸에는 이름(한국)을 넣는다 — 티커를 넣으면 '005930.KS' 가 그대로 보인다. */
   function pickHolding(t: string) {
-    setTickerInput(t)
+    const text = displayTicker(t, names)
+    setTickerInput(text)
+    setPicked({ text, ticker: t })
     setTicker(t)
     setSelectedPair(null)
     const th = parseFloat(thresholdInput)
@@ -121,8 +133,8 @@ export default function PairsTradingPanel({ holdings = {} }: PairsTradingPanelPr
           <input
             value={tickerInput}
             onChange={(e) => setTickerInput(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && submit()}
-            placeholder={getMarket() === 'KR' ? "예: 005930.KS" : "예: KO"}
+            onKeyDown={(e) => e.key === 'Enter' && !e.nativeEvent.isComposing && submit()}
+            placeholder={getMarket() === 'KR' ? "예: 삼성전자" : "예: KO"}
             className="w-full bg-[#060b14] border border-[#1e2d40] rounded px-3 py-2 text-sm text-[#e2e8f0] placeholder:text-[#374151] focus:outline-none focus:border-[#10b981]"
           />
         </div>

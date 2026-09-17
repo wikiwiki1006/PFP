@@ -18,7 +18,7 @@ import { getTickerDetail, searchTickers } from '@/api'
 import type { TickerDetail, OHLCVPoint, TickerDetailQuant } from '@/types'
 import { useTheme } from '@/lib/ThemeContext'
 import { useIsMobile } from '@/lib/useIsMobile'
-import { formatAxisPrice, formatPrice, getMarket } from '@/lib/market'
+import { formatAxisPrice, formatPrice } from '@/lib/market'
 import { useMarket } from '@/lib/useMarket'
 import { useTickerNames } from '@/lib/useTickerNames'
 import { pickOnEnter, moveHighlight, selectionLabel, type Suggestion } from '@/lib/suggestions'
@@ -834,16 +834,14 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
           {/* 타이틀 */}
           {data && (
             <div style={{ flex: 1, display: 'flex', alignItems: 'baseline', gap: 10 }}>
-              {/* 한국은 종목명이 주, 코드가 보조. 미국은 티커가 곧 이름이라 반대. */}
-              {getMarket() === 'KR' && data.info.name && data.info.name !== data.ticker ? (
-                <>
-                  <span style={{ color: C.text, fontSize: 15, fontWeight: 700 }}>
-                    {data.info.name}
-                  </span>
-                  <span style={{ color: C.muted, fontSize: 12, fontFamily: 'monospace' }}>
-                    {data.ticker}
-                  </span>
-                </>
+              {/* 한국은 **종목명만** — 코드는 붙이지 않는다. 이름은 사전(한글)을 먼저
+                  본다: data.info.name 은 야후가 준 영문명("Samsung Electronics Co.,
+                  Ltd.")이라 화면의 다른 곳과 이름이 달라진다. 둘 다 없으면 티커.
+                  미국은 티커가 곧 이름이라 티커가 주, 회사명이 보조. */}
+              {market === 'KR' ? (
+                <span style={{ color: C.text, fontSize: 15, fontWeight: 700 }}>
+                  {names[data.ticker] || data.info.name || data.ticker}
+                </span>
               ) : (
                 <>
                   <span style={{ color: C.text, fontSize: 15, fontWeight: 700, fontFamily: 'monospace' }}>
@@ -1222,8 +1220,9 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                   <span>ℹ</span> 펀드 정보
                 </div>
                 {[
-                  ['티커',        data.ticker],
-                  ['종목명',      data.info.name],
+                  // 한국은 코드 줄을 빼고 이름만 둔다 (제목과 같은 사전 이름).
+                  ...(market === 'KR' ? [] : [['티커', data.ticker]]),
+                  ['종목명',      market === 'KR' ? (names[data.ticker] || data.info.name) : data.info.name],
                   ['섹터',        data.info.sector],
                   ['산업',        data.info.industry],
                   ['시가총액',    data.info.market_cap],

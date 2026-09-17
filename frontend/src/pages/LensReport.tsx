@@ -19,7 +19,6 @@ import { useAuth } from '@/lib/AuthContext'
 import { useFeatures } from '@/lib/useFeatures'
 import { useMarket } from '@/lib/useMarket'
 import { marketSession } from '@/lib/marketStorage'
-import { getMarket } from '@/lib/market'
 import { useTickerNames } from '@/lib/useTickerNames'
 import SuggestionList from '@/components/SuggestionList'
 import { pickOnEnter, moveHighlight, selectionLabel } from '@/lib/suggestions'
@@ -940,11 +939,14 @@ function EquityTab() {
         <div className="space-y-3">
           <div className="bg-[#060b14] border border-[#1e2d40] rounded-lg p-3">
             <span className="text-[10px] text-[#4a5568] font-bold tracking-wider">종목: </span>
-            {getMarket() === 'KR' && result.company_name && result.company_name !== result.ticker ? (
-              <>
-                <span className="text-sm font-bold text-[#10b981]">{result.company_name}</span>
-                <span className="text-sm font-mono text-[#94a3b8] ml-2">{result.ticker}</span>
-              </>
+            {/* 한국은 종목명만 — 코드는 붙이지 않는다. 이름이 없으면 사전, 거기도
+                없으면 티커. */}
+            {market === 'KR' ? (
+              <span className="text-sm font-bold text-[#10b981]">
+                {result.company_name && result.company_name !== result.ticker
+                  ? result.company_name
+                  : (names[result.ticker] || result.ticker)}
+              </span>
             ) : (
               <>
                 <span className="text-sm font-mono font-bold text-[#10b981]">{result.ticker}</span>

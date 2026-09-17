@@ -15,6 +15,7 @@ import { useMarket } from '@/lib/useMarket'
 import { marketSession } from '@/lib/marketStorage'
 import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
 import TickerLabel from '@/components/TickerLabel'
+import { tickerByExactName } from '@/lib/suggestions'
 
 // ─── Module-level cache (SPA 내 페이지 이동 시에도 유지) ─────────────────────
 
@@ -579,8 +580,10 @@ function CorrelationHeatmap({ corr }: { corr: AIOptimizationResult['correlation'
           <tbody>
             {matrix.map((row, i) => (
               <tr key={tickers[i]}>
-                <td className="pr-2 py-0.5 text-[11px] font-mono font-semibold text-[#94a3b8] text-right whitespace-nowrap">
-                  {tickers[i]}
+                {/* 열 머리글과 같은 이름을 쓴다 — 행만 코드면 한국 종목은 어느 줄이
+                    어느 열인지 맞춰 볼 수 없다. */}
+                <td className="pr-2 py-0.5 text-[11px] font-semibold text-[#94a3b8] text-right whitespace-nowrap">
+                  {displayTicker(tickers[i], names)}
                 </td>
                 {row.map((v, j) => {
                   const diag = i === j
@@ -850,9 +853,18 @@ export default function Optimizer() {
   const tickerCheckSeq = useRef(0)
 
   const addTicker = async (raw: string) => {
-    const t = raw.trim().toUpperCase().replace(/[^A-Z0-9.-]/g, '')
+    const typed = raw.trim()
     setTickerInput('')
-    if (!t || tickers.includes(t)) return
+    if (!typed) return
+    // 한국은 이름으로 넣는다 (입력칸 안내가 '삼성전자 SK하이닉스…'). 예전에는 영문·숫자
+    // 밖의 글자를 전부 지워 '삼성전자' 가 빈 문자열이 되고 **아무 말 없이** 버려졌다.
+    // 이름이 사전과 정확히 같으면 그 티커로 바꾸고, 아니면 코드로 읽는다.
+    const t = tickerByExactName(typed, names) ?? typed.toUpperCase().replace(/[^A-Z0-9.-]/g, '')
+    if (!t) {
+      setTickerError(`${typed}: 종목을 찾을 수 없습니다. 종목명을 정확히 입력해 주세요.`)
+      return
+    }
+    if (tickers.includes(t)) return
 
     const seq = ++tickerCheckSeq.current
     setTickerError(null)
@@ -861,9 +873,12 @@ export default function Optimizer() {
       const res = await checkTickerExists(t)
       if (seq !== tickerCheckSeq.current) return   // 그 사이 더 최신 요청이 나감 — 무시
       if (res.exists) {
-        setTickers(prev => (prev.includes(t) ? prev : [...prev, t]))
+        // 서버가 정식 심볼로 돌려준다 ('005930' → '005930.KS'). 입력 그대로 넣으면
+        // 이름 사전에 없는 키가 되어 칩에 코드가 남는다.
+        const sym = res.ticker || t
+        setTickers(prev => (prev.includes(sym) ? prev : [...prev, sym]))
       } else {
-        setTickerError(`${t}: 시장에 존재하지 않는 티커입니다.`)
+        setTickerError(`${displayTicker(t, names)}: 시장에 존재하지 않는 종목입니다.`)
       }
     } catch {
       // 검증 자체가 실패(네트워크 등)하면 막지 않는다 — 최적화 실행 단계에서 다시 걸러진다.
@@ -876,6 +891,9 @@ export default function Optimizer() {
   }
   const removeTicker = (t: string) => setTickers(prev => prev.filter(x => x !== t))
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    // 한글 조합 중의 키는 IME 몫이다 — 받으면 아직 확정되지 않은 글자로 종목이 추가될
+    // 수 있다. (headless 브라우저는 IME 를 거치지 않아 이 분기는 실측하지 못했다.)
+    if (e.nativeEvent.isComposing) return
     if (e.key === 'Enter' || e.key === ' ' || e.key === ',') { e.preventDefault(); void addTicker(tickerInput) }
     if (e.key === 'Backspace' && !tickerInput && tickers.length) setTickers(prev => prev.slice(0, -1))
   }

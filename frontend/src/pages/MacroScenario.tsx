@@ -13,6 +13,8 @@ import { useLoginPrompt } from '@/components/auth/LockedPreview'
 import { useDemoQuery } from '@/lib/useDemoQuery'
 import { demoHoldingsRaw } from '@/lib/demoData'
 import { marketSession } from '@/lib/marketStorage'
+import { useMarket } from '@/lib/useMarket'
+import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
 
 // ── sessionStorage 키 ──────────────────────────────────────────────────────────
 const SK_PENDING   = 'macro_pending'
@@ -198,6 +200,8 @@ const URGENCY_COLOR: Record<string, string> = {
 }
 
 function ActionTable({ actions }: { actions: Array<Record<string, unknown>> }) {
+  const names = useTickerNames()
+  const market = useMarket()
   if (!actions.length) return null
   return (
     <div className="bg-[#060b14] border border-[#1e2d40] rounded-lg overflow-hidden">
@@ -208,7 +212,7 @@ function ActionTable({ actions }: { actions: Array<Record<string, unknown>> }) {
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-[#1e2d40]">
-              {['티커', '액션', '시급도', '추천 이유'].map(h => (
+              {[market === 'KR' ? '종목' : '티커', '액션', '시급도', '추천 이유'].map(h => (
                 <th key={h} className="py-2.5 px-4 text-left text-[11px] font-bold text-[#64748b] tracking-wider">{h}</th>
               ))}
             </tr>
@@ -222,7 +226,11 @@ function ActionTable({ actions }: { actions: Array<Record<string, unknown>> }) {
               const urgColor = URGENCY_COLOR[urgency] ?? '#94a3b8'
               return (
                 <tr key={i} className="border-b border-[#0f172a] hover:bg-[#0a1628]">
-                  <td className="py-3 px-4 font-mono font-bold text-[#f1f5f9]">{String(a.ticker ?? '—')}</td>
+                  {/* 한국은 종목명으로 (사전에 없는 값 — AI 가 지어낸 심볼 등 — 은
+                      받은 그대로). 이름에는 고정폭을 쓰지 않는다. */}
+                  <td className={cn('py-3 px-4 font-bold text-[#f1f5f9]', market !== 'KR' && 'font-mono')}>
+                    {a.ticker == null ? '—' : displayTicker(String(a.ticker), names)}
+                  </td>
                   <td className="py-3 px-4">
                     <span className={cn(
                       'text-xs px-2.5 py-1 rounded-full font-bold',

@@ -712,7 +712,11 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
         )}
       </div>
     )
-  }, [bm])
+    // names 가 빠지면 안 된다. 이 콜백은 이름 사전이 오기 **전에** 한 번 만들어지고
+    // bm 을 안 바꾸는 한 다시 만들어지지 않아서, 툴팁이 계속 빈 사전으로
+    // `000660.KS` 를 그렸다 (실측 — 보유 표는 이름인데 툴팁만 코드였다).
+    // benchLabel·secondary.label 도 같은 이유로 넣는다.
+  }, [bm, names, benchLabel, secondary.label])
 
   // ── 매매 / 입출금 포인트 dot 렌더러 ────────────────────────────────────────
   // recharts 가 이 렌더러의 반환을 **배열로** 그린다. key 가 없으면 React 가
@@ -958,9 +962,15 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
 
   // 종목을 무엇으로 부를지는 시장마다 다르다.
   // 미국은 티커(AAPL)가 이미 이름 노릇을 하므로 그대로 쓴다. 한국은 코드
-  // (034020.KS)만 봐서는 어느 회사인지 알 수 없어 이름을 앞세우고 코드는 밑에 둔다.
-  const showName = (h: { ticker: string; name?: string | null }) =>
-    tradeMarket === 'KR' && !!h.name && h.name !== h.ticker
+  // (034020.KS)만 봐서는 어느 회사인지 알 수 없어 **이름만** 쓴다 — 코드를 밑에
+  // 작게 붙이던 것도 뺐다 (사용자 요청). 행에 이름이 없으면 사전에서, 거기도
+  // 없으면 티커로 떨어진다.
+  const holdingLabel = (h: { ticker: string; name?: string | null }) =>
+    tradeMarket === 'KR'
+      ? (h.name && h.name !== h.ticker ? h.name : displayTicker(h.ticker, names))
+      : h.ticker
+  const labelOf = (ticker: string) =>
+    holdingLabel((holdQ.data || []).find((h: any) => h.ticker === ticker) ?? { ticker })
 
   const curLabel = tradeMarket === 'KR' ? 'KRW' : 'USD'
   const qc = useQueryClient()
@@ -1532,19 +1542,15 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
                     ) : (
                       <>
                         <td className="py-2 px-2.5">
-                          {/* 한국 종목은 코드(034020.KS)만으로 회사를 알 수 없다.
-                              이름을 앞세우고 코드는 아래에 작게 둔다. 미국은
-                              티커가 곧 이름 역할을 하므로 이름을 따로 붙이지 않는다. */}
+                          {/* 한국 종목은 코드(034020.KS)만으로 회사를 알 수 없다 —
+                              이름만 쓴다. 미국은 티커가 곧 이름 역할을 한다. */}
                           <span
                             onClick={() => onTickerClick?.(h.ticker)}
                             className={cn('block', onTickerClick ? 'cursor-pointer hover:text-[#10b981] transition-colors' : '')}
                           >
                             <span className="font-bold text-[14px] text-[#e2e8f0]">
-                              {showName(h) ? h.name : h.ticker}
+                              {holdingLabel(h)}
                             </span>
-                            {showName(h) && (
-                              <span className="block font-mono text-[10px] text-[#64748b] leading-tight">{h.ticker}</span>
-                            )}
                           </span>
                         </td>
                         <td className="py-2 px-2.5 font-mono text-[12px] text-[#cbd5e1]">{formatPrice(h.avg_cost)}</td>
@@ -1589,7 +1595,7 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
                             <button type="button"
                               onClick={() => {
                                 setConfirmDlg({
-                                  title: `${showName(h) ? h.name : h.ticker} 보유를 삭제할까요?`,
+                                  title: `${holdingLabel(h)} 보유를 삭제할까요?`,
                                   message: '해당 종목의 거래 이력도 함께 삭제되며, 사용된 현금은 되돌아옵니다.',
                                   onOk: () => deleteMut.mutate(h.ticker),
                                 })
@@ -1607,7 +1613,7 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
                     <tr className="hidden md:table-row border-b border-[#f59e0b]/20 bg-[#0a0e18]">
                       <td colSpan={9} className="px-3 py-2">
                         <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-[#f59e0b] font-bold text-[12px] flex-shrink-0">매도 {showName(h) ? h.name : h.ticker}</span>
+                          <span className="text-[#f59e0b] font-bold text-[12px] flex-shrink-0">매도 {holdingLabel(h)}</span>
                           {/* 현재가 — 참고용 표시 전용. 매도가 입력에 자동으로 들어가지 않는다. */}
                           <span className="text-[11px] text-[#64748b] font-mono flex-shrink-0"
                             title="현재 시장가 — 참고용입니다. 자동으로 입력되지 않습니다.">
@@ -1679,7 +1685,7 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
       {/* 모바일 전용 매도 팝업 — 보유 종목 행의 "매도" 버튼으로 연다 */}
       {sellTicker && (
         <div
-          role="dialog" aria-modal="true" aria-label={`${sellTicker} 매도`}
+          role="dialog" aria-modal="true" aria-label={`${labelOf(sellTicker)} 매도`}
           className="md:hidden fixed inset-0 z-[110] flex items-end justify-center bg-black/70 backdrop-blur-sm"
           onClick={() => setSellTicker(null)}
         >
@@ -1688,7 +1694,8 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
             onClick={e => e.stopPropagation()}
           >
             <div className="flex items-center justify-between">
-              <h3 className="text-sm font-bold text-[#f59e0b] font-mono">매도 {sellTicker}</h3>
+              {/* 이름(한글)에는 고정폭을 쓰지 않는다 — 글자 사이가 벌어진다. */}
+              <h3 className={cn('text-sm font-bold text-[#f59e0b]', tradeMarket !== 'KR' && 'font-mono')}>매도 {labelOf(sellTicker)}</h3>
               <button onClick={() => setSellTicker(null)} className="text-[#94a3b8] hover:text-[#e2e8f0]">
                 <X className="w-5 h-5" />
               </button>
@@ -1885,6 +1892,7 @@ function SectorsPanel({
   sectorData: Record<string, number>
   rawHoldings: Record<string, any>
 }) {
+  const names = useTickerNames()
   const [active, setActive] = useState(0)
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 })
   const [hoveredSector, setHoveredSector] = useState<string | null>(null)
@@ -1969,8 +1977,11 @@ function SectorsPanel({
               <div className="text-[10px] text-[#94a3b8] font-bold tracking-wider mb-1.5 uppercase">
                 {toKoSector(hoveredSector!)}
               </div>
+              {/* 한국은 이름으로 (사전에 없으면 티커). 이름에는 고정폭을 쓰지 않는다. */}
               {tooltipTickers.map(t => (
-                <div key={t} className="text-[12px] font-mono text-[#cbd5e1]">{t}</div>
+                <div key={t} className={cn('text-[12px] text-[#cbd5e1]', !names[t] && 'font-mono')}>
+                  {displayTicker(t, names)}
+                </div>
               ))}
             </div>
           )}

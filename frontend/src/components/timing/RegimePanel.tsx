@@ -11,6 +11,7 @@ import { formatPrice, getMarket } from '@/lib/market'
 import { useMarket } from '@/lib/useMarket'
 import type { HoldingsMap } from '@/types'
 import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
+import { tickerByExactName } from '@/lib/suggestions'
 
 const YEAR_OPTIONS = [1, 2, 3, 5] as const
 
@@ -96,7 +97,11 @@ export default function RegimePanel({ holdings = {} }: RegimePanelProps) {
   }, [q.data])
 
   function submit() {
-    const t = input.trim().toUpperCase()
+    // 안내 문구가 '종목 입력 (예: 삼성전자)' 인데 예전에는 입력을 그대로 티커로 보내
+    // 이름을 치면 "데이터를 불러올 수 없습니다" 로 끝났다. 이름이 사전과 정확히
+    // 같으면 그 티커로 바꾸고, 아니면 입력을 코드로 읽는다.
+    const typed = input.trim()
+    const t = tickerByExactName(typed, names) ?? typed.toUpperCase()
     if (t) setTicker(t)
     setInput('')
   }
@@ -115,7 +120,7 @@ export default function RegimePanel({ holdings = {} }: RegimePanelProps) {
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && submit()}
+            onKeyDown={(e) => e.key === 'Enter' && !e.nativeEvent.isComposing && submit()}
             placeholder={MARKET_DEFAULTS[market].hint}
             className="w-full bg-[#060b14] border border-[#1e2d40] rounded pl-8 pr-3 py-2 text-sm text-[#e2e8f0] placeholder:text-[#374151] focus:outline-none focus:border-[#10b981]"
           />
