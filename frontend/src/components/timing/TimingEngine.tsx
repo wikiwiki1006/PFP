@@ -2,7 +2,6 @@ import { useState } from 'react'
 import RegimePanel from './RegimePanel'
 import TradeSignalsPanel from './TradeSignalsPanel'
 import PairsTradingPanel from './PairsTradingPanel'
-import MarketSituationPanel from './MarketSituationPanel'
 import type { HoldingsMap } from '@/types'
 
 interface TimingEngineProps {
@@ -13,11 +12,6 @@ const TABS = [
   { label: 'Market Regime', sub: '종목별 시장 상황' },
   { label: 'Signal Scan', sub: '매매신호'},
   { label: 'Pairs Trading', sub: '페어 트레이딩' },
-  // 'Market Situation' 이라고 쓰지 않는다. 엔드포인트 이름은 그쪽이지만,
-  // 0번 탭의 부제가 이미 '종목별 시장 상황' 이라 탭 줄에 '시장 상황' 이
-  // 둘 생긴다 — 같은 화면에서 이름이 겹치면 사용자는 어느 쪽이 무엇인지
-  // 눌러 봐야 안다. 여기서는 내용으로 이름 짓는다.
-  { label: 'Macro Spreads', sub: '금리차·신용 스프레드' },
 ]
 
 export default function TimingEngine({ holdings }: TimingEngineProps) {
@@ -45,8 +39,6 @@ export default function TimingEngine({ holdings }: TimingEngineProps) {
         {tab === 0 && <RegimePanel holdings={holdings} />}
         {tab === 1 && <TradeSignalsPanel holdings={holdings} />}
         {tab === 2 && <PairsTradingPanel holdings={holdings} />}
-        {/* 보유와 무관한 시장 지표라 holdings 를 받지 않는다. */}
-        {tab === 3 && <MarketSituationPanel />}
       </div>
     </div>
   )

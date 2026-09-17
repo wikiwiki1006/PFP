@@ -9,7 +9,7 @@ import type {
   MarketRegime,
   MacroModes, MacroAnalysisResult, AnalystFeedback,
   DailyBriefResult, ReportFile, Industry, EquityReportResult, IndustryReportResult,
-  MarketSituation, SignalScanResult, SignalScoreResult, TechnicalChartResult, PairsAutoResult,
+  SignalScanResult, SignalScoreResult, TechnicalChartResult, PairsAutoResult,
   TickerDetail, AIOptimizationResult,
 } from '@/types'
 
@@ -181,9 +181,6 @@ export const getMarketRegime = async (ticker = '^GSPC', years = 1): Promise<Mark
   (await api.get('/api/signals/regime', { params: { ticker, years } })).data
 
 // ── Timing Engine ──────────────────────────────────────────────────────────────
-export const getMarketSituation = async (): Promise<MarketSituation> =>
-  (await api.get('/api/signals/market-situation')).data
-
 export const getSignalScan = async (topN = 10): Promise<SignalScanResult> =>
   (await api.get('/api/signals/signal-scan', { params: { top_n: topN } })).data
 

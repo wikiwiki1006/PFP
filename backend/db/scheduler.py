@@ -37,7 +37,6 @@ _SECTOR_INTERVAL        = 300       # 5분
 _MACRO_INTERVAL         = 3600      # 1시간
 _HISTORY_INTERVAL       = 43200     # 12시간
 _SIGNAL_SCAN_INTERVAL   = 21600     # 6시간 (Timing Engine: S&P500 매매신호 스캔 재계산)
-_MACRO_SPREAD_INTERVAL  = 86400     # 24시간 (Timing Engine: 금리차/HY스프레드 백분위)
 _RTC_INTERVAL           = 300       # 5분  (24시간 자산: 원유·금·금리·환율·암호화폐)
 _SLICE_INTERVAL         = 60        # 1분  (티어1 전량 갱신 — 장중만)
 _UNIVERSE_INTERVAL      = 86400     # 24시간 (상장 티커 목록 동기화)
@@ -341,7 +340,6 @@ def _loop():
     last_macro        = 0.0
     last_history      = 0.0
     last_signal_scan  = 0.0
-    last_macro_spread = 0.0
     last_rtc          = 0.0     # 24시간 자산 (5분)
     last_universe     = 0.0     # 유니버스 목록 동기화 (24시간)
     last_slice        = 0.0     # 유니버스 순환 갱신 (60초, 장중만)
@@ -404,11 +402,6 @@ def _loop():
         if now - last_signal_scan >= _SIGNAL_SCAN_INTERVAL:
             _run_safe("signal_scan", _update_signal_scan)
             last_signal_scan = now
-
-        # ⑥ Timing Engine: 금리차/HY스프레드 백분위, 24시간마다
-        if now - last_macro_spread >= _MACRO_SPREAD_INTERVAL:
-            _run_safe("macro_spread", _update_macro_spread_history)
-            last_macro_spread = now
 
         # ⑦ S&P500 전 종목 가격+거래량 수집: KST 06:00 이후 하루 1회 (별도 스레드).
         #    거래량이 아직 비어 있으면(최초 배포 직후) 시각과 무관하게 1회 백필.
@@ -704,16 +697,6 @@ def _update_signal_scan(market: str = "US"):
         f"신호 스캔[{market}] 갱신 완료: {result.get('scanned', 0)}개 스캔 · "
         f"매수 {len(result.get('long_picks', []))} / 매도 {len(result.get('short_picks', []))}{relax_note}"
     )
-
-
-def _update_macro_spread_history():
-    """Timing Engine: 금리차/HY스프레드 과거 백분위 기반 Low/Normal/High 분류 → common_cache 저장."""
-    from backend.services.trading_signals import compute_macro_spread_levels
-    from backend.db.market_cache import save_common
-
-    result = compute_macro_spread_levels()
-    save_common("market_situation", result, ttl_seconds=_MACRO_SPREAD_INTERVAL * 2)
-    logger.info("macro_spread 갱신 완료")
 
 
 # ── 사용자 개인 데이터 즉시 갱신 (API 요청 시 호출) ───────────────────────────

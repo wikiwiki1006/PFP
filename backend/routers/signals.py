@@ -27,7 +27,6 @@ from backend.services.trading_signals import (
     detect_regime_er,
     get_sp500_universe,
     sma_macd_rsi_scan,
-    compute_macro_spread_levels,
     technical_chart_detail,
     pairs_auto_detail,
 )
@@ -427,66 +426,6 @@ def market_regime(
     }
     _cache_put(_ck, _payload)
     return _payload
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Timing Engine 신규 엔드포인트
-# ══════════════════════════════════════════════════════════════════════════════
-
-@router.get("/market-situation")
-def market_situation(market: str = Depends(market_param)):
-    """금리차(10Y-2Y) / 하이일드 스프레드의 과거 백분위 기반 Low/Normal/High 분류.
-
-    **미국 지표다.** 한국은 대응물을 만들 수 없어 `available: false` 를 준다.
-
-    왜 못 만드는가:
-      · 하이일드 스프레드 — 한국에 FRED 의 BAMLH0A0HYM2 같은 일별 공개
-        시계열이 없다.
-      · 금리차 — 국고채 10년·3년이 ECOS 에 있지만 **일별 조회가 90일까지만**
-        온다 (korea_macro._ecos_series 가 cycle="D" 에서 months_back 을 무시
-        하고 90일로 고정한다). 백분위 분류는 미국 쪽이 10년 이력으로 내는데,
-        3개월 표본으로 같은 Low/Normal/High 를 내면 그건 분류가 아니라 최근
-        변동의 재표현이고 **화면에서는 구분되지 않는다.**
-
-    없는 것을 다른 시장 값으로 채우지 않는다. 대신 왜 없는지 내려보내
-    화면이 "원래 없는 기능" 과 "오늘 고장" 을 구분할 수 있게 한다.
-    """
-    if market == "KR":
-        return {
-            "available": False,
-            "reason": "한국 국고채 일별 시리즈는 90일까지만 제공돼 "
-                      "장기 백분위를 낼 수 없습니다. 하이일드 스프레드는 "
-                      "대응 지표가 없습니다.",
-        }
-
-    # 캐시 키에 시장을 넣는다. 하나로 두면 먼저 조회한 시장의 값이 다른
-    # 시장에 그대로 나간다 (§1.1).
-    cache_key = f"market_situation:{market}"
-    cached = get_common(cache_key)
-    if cached:
-        return cached
-
-    result = {**compute_macro_spread_levels(), "available": True}
-
-    # 폴백 응답을 하루 동안 박지 않는다.
-    #
-    # compute_macro_spread_levels 는 FRED 조회에 실패하면 값을 전부 None 으로
-    # 두고 `source: "fallback"` 을 붙인다. 그 응답이 86400초 캐시에 들어가면
-    # **하루 종일 재시도 없이** 빈 값이 나간다. Cloud Run 은 프로세스 내
-    # 스케줄러가 돌지 않아 이 라우터가 유일한 조회 경로이므로, 폴백이 한 번
-    # 뜬 날은 그날이 끝날 때까지 복구되지 않는다.
-    #
-    # 저장을 아예 안 하는 쪽은 택하지 않았다. 그러면 FRED 가 느리거나 죽어
-    # 있는 **바로 그 상황에서** 매 요청이 그 지연을 탄다 — 실패를 처리하려던
-    # 코드가 실패를 증폭시킨다. 있는 값은 쓰되 다음 요청이 이어받게 한다.
-    ttl = 86400 if result.get("source") == "FRED" else 600
-    if result.get("source") != "FRED":
-        logger.warning(
-            f"매크로 스프레드가 폴백으로 내려간다 — {ttl}초만 캐시한다 "
-            f"(market={market}, source={result.get('source')!r})"
-        )
-    save_common(cache_key, result, ttl_seconds=ttl)
-    return result
 
 
 def _universe_for(market: str) -> list[str]:
