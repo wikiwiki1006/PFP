@@ -116,6 +116,14 @@ function realizedTitle(m: PortfolioMetrics): string {
 const chgColor = (v: number | null | undefined) =>
   isNA(v) || v === 0 ? '#64748b' : (v as number) > 0 ? '#10b981' : '#ef4444'
 
+// 변동성 지수(VIX·VKOSPI) 색 — 30 이상 위험 · 20 이상 주의 · 나머지 정상, 모르면 회색.
+// 화면에 **적힌 숫자**(fn 의 소수 둘째 자리)로 가른다. 근거는 지표 줄의 주석.
+const volColor = (v: number | null | undefined) => {
+  if (isNA(v)) return '#64748b'
+  const shown = Number((v as number).toFixed(2))
+  return shown >= 30 ? '#ef4444' : shown >= 20 ? '#f59e0b' : '#10b981'
+}
+
 const SECTORS = [
   'Technology','Healthcare','Financials','Consumer Discretionary',
   'Consumer Staples','Energy','Industrials','Materials',
@@ -2711,12 +2719,22 @@ export default function AlphaTerminal() {
                   괄호는 사용자 요청으로 뺐고, 어느 지수인지는 제목(마우스를 올리면
                   보인다)에 남긴다.
                   색은 구간 기준이라 chgColor(증감 기준)를 못 쓴다. 대신 null 을
-                  먼저 갈라낸다 — fv 로 0 을 만들면 `0 > 25`·`0 > 18` 이 둘 다
-                  거짓이라 **읽지 못한 상태가 초록(정상)** 으로 칠해진다. */}
+                  먼저 갈라낸다 — fv 로 0 을 만들면 `0 >= 30`·`0 >= 20` 이 둘 다
+                  거짓이라 **읽지 못한 상태가 초록(정상)** 으로 칠해진다.
+                  구간은 30 이상 빨강(위험) · 20 이상 노랑(주의)이고 두 시장에 같다.
+                  AI 피드백 프롬프트의 등급(ai_analysis._VOL_BANDS)과 같은 경계다 —
+                  예전 18/25 로는 같은 화면 오른쪽 AI 피드백이 '정상' 이라 쓰는 19 가
+                  노랑, '주의' 라 쓰는 27 이 빨강이었다. 그 파일에 두 지수의 분포가
+                  적혀 있다(2013-08 이후 20 은 VIX 73.5 · VKOSPI 72.6 백분위, 30 은
+                  95.2 · 91.0). 등급은 **적힌 숫자**(소수 둘째 자리)로 가른다 —
+                  서버가 이미 둘째 자리로 반올림해 보내 지금은 원값과 같지만, 자리가
+                  바뀌어도 칸의 숫자와 색이 어긋나지 않게. AI 프롬프트는 첫째 자리로
+                  적고 가르므로, 첫째 자리로 적으면 20.0·30.0 이 되는 값에서는 둘의
+                  등급이 한 칸 다르다 (실측: 19.99 칸 초록·AI 주의, 29.99 칸 노랑·AI
+                  위험. 19.95 는 파이썬이 19.9 로 적어 둘 다 정상). */}
               <Pill label="변동성" value={fn(m.vix)}
                     title={market === 'KR' ? 'VKOSPI — 코스피200 변동성 지수' : 'VIX — S&P 500 변동성 지수'}
-                    color={m.vix == null ? '#64748b'
-                           : m.vix > 25 ? '#ef4444' : m.vix > 18 ? '#f59e0b' : '#10b981'} />
+                    color={volColor(m.vix)} />
             </div>
             </LockedPreview>
           )}
