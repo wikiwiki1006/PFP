@@ -173,15 +173,7 @@ def test_the_empty_benchmark_matches_what_the_calculator_would_say(empty_account
 # beta_holdings · beta_value_share)이 여기 있었고 routers/portfolio.py 가
 # 채웠다 — 아래 test_the_missing_list_does_not_outlive_the_gap 이 지우라고
 # 요구해서 지웠다. 원장이 제 역할을 한 자리다.
-_KNOWN_MISSING: dict[str, str] = {
-    # 494a9e8 이 추가한 가격 커버리지 근거. 앞선 일곱(market_open · realized_* ·
-    # beta_*)과 **같은 자리**다 — routers/portfolio.py 의 손 조립이 계산기의
-    # 필드 목록을 따라오지 못한다. 그 조립을 calculate_metrics 호출로 바꾸면
-    # 이 부류가 영구히 사라진다 (그 함수는 이미 빈 계정을 직접 처리한다 —
-    # 실제 응답 28키 = 빈 계정 28키, pfp-76 실측). agent/develop 배정됨.
-    "priced_counted": "빈 계정에서는 0 — 센 종목이 없다는 사실",
-    "priced_holdings": "같은 자리 — 빈 계정에서는 0",
-}
+_KNOWN_MISSING: dict[str, str] = {}
 
 
 def test_no_new_field_goes_missing_from_the_empty_response(empty_account):

@@ -31,8 +31,6 @@ from backend.services.portfolio_calculator import (
     build_return_pct_curve,
     return_pct_to_records,
     realized_pnl_from_log,
-    portfolio_beta_detail,
-    _market_open_flag,
 )
 
 # ─── 시세·현금·섹터 로직은 services 로 분리 ──────────────────────────────────
@@ -918,73 +916,32 @@ def get_metrics(_auth: dict = Depends(current_user), market: str = Depends(marke
     holdings  = get_holdings(uid, market=market)
     trade_log = get_trade_log(uid, market=market)
     if not holdings and not trade_log:
-        # 라벨은 계산기와 **같은 자리**에서 낸다 (portfolio_calculator:811).
-        # 여기서 따로 지어내면 두 경로가 서로 다른 이름을 말하게 된다.
-        from backend.services.markets import benchmark_for, get_market
-        _bench = benchmark_for(market)
-        _rp = realized_pnl_from_log([])
-        # 베타 근거도 같은 방식이다 — 빈 보유·빈 프레임으로 정상 경로 함수를
-        # 그대로 부른다. 실측으로 counted 0 · holdings 0 · value_share None 이
-        # 나오는데, 그 값을 여기 적어 두면 계산이 바뀔 때 이 세 줄만 옛 답을
-        # 계속 말한다.
-        _bd = portfolio_beta_detail({}, pd.DataFrame(), _bench)
         # 보유가 없는 것은 **새 사용자의 정상 상태**다 (§1.3 마지막 항목).
         # 예전에는 400 을 던졌는데, 그러면 서버가 정상 상태를 클라이언트
         # 오류라고 부르고 그 사용자는 화면을 열 때마다 콘솔에 400 을 둘씩
         # 쌓는다. 같은 파일의 /holdings-detail·/sector-weights·/refresh 는
-        # 이미 200 + 빈 값을 준다 — 그쪽이 맞고 여기가 틀렸다.
+        # 이미 200 + 빈 값을 준다.
         #
-        # 금액은 **0 이 참이다.** 아무것도 없는 사용자의 자산은 실제로 0 이지,
-        # "모름" 이 아니다. 반대로 수익률·베타는 분모가 없어 계산 불가이므로
-        # null 이다. 0 으로 채우면 '본전'·'시장과 같은 변동성' 이라는 단정이
-        # 된다 (§1.3 (a)).
+        # **값을 여기서 조립하지 않는다.** 한동안 그렇게 했고, 계산기가 필드를
+        # 늘릴 때마다 이 분기만 안 따라왔다 — market_open · realized_* 다섯 ·
+        # beta_* 셋 · priced_* 둘. 빈 계정은 아무도 개발하지 않아서 그 어긋남이
+        # 화면에 안 나타나고, 프론트는 **빈 계정에서만** `undefined` 를 만난다.
         #
-        # `is_empty` 를 따로 싣는 이유: 소비자가 0 을 보고 "빈 포트폴리오" 와
-        # "전량 매도해 평가액이 0" 을 구별할 수 없다. 후자는 trade_log 가
-        # 있으므로 이 분기로 오지 않지만, 그 구별을 값 추론에 맡기면 나중에
-        # 조건이 바뀌었을 때 조용히 틀린다.
-        return {
-            "is_empty":           True,
-            "total_equity":       0.0,
-            "stock_value":        0.0,
-            "cash_value":         0.0,
-            "total_cost":         0.0,
-            "total_return_pct":   None,
-            "today_change_pct":   None,
-            "perf_1w":            None,
-            "perf_1m":            None,
-            "portfolio_beta":     None,
-            "alpha_vs_benchmark": None,
-            # VIX 는 포트폴리오와 무관한 시장 지표지만, 아무것도 없는 사용자를
-            # 위해 외부 조회를 돌리지 않는다. 값이 없다는 사실만 남긴다.
-            "vix":                None,
-            "as_of":              None,
-            "change_counted":     0,
-            "change_holdings":    0,
-            "change_stale":       [],
-            # 정상 경로와 **같은 함수**로 낸다. 값을 손으로 적으면 그 함수가
-            # 바뀔 때 여기만 옛 계약을 계속 말한다 — 빈 포트폴리오는 테스트가
-            # 없어서(400→200 을 바꿔도 게이트가 통과했다) 아무도 못 본다.
-            # 거래 이력이 실제로 없으므로 `[]` 다. `None` 은 "호출자가 안
-            # 알려줬다" 라는 다른 뜻이고 reason 도 달라진다.
-            **{
-                "realized_pnl":        _rp.pnl,
-                "realized_cost":       _rp.cost,
-                "realized_pnl_pct":    _rp.pct,
-                "realized_pnl_reason": _rp.reason,
-                "realized_sales":      _rp.sales,
-                "beta_counted":        _bd.counted,
-                "beta_holdings":       _bd.holdings_n,
-                "beta_value_share":    _bd.value_share,
-                # 장 개폐는 보유와 무관하게 시장이 정한다. 빈 계정이라고
-                # 시장이 닫혀 있는 것은 아니다.
-                "market_open":         _market_open_flag(market),
-            },
-            # 벤치마크는 보유와 무관하게 시장이 정한다. 빈 포트폴리오라고
-            # 라벨까지 지울 이유가 없다 — 차트 범례가 '벤치마크' 로 떨어진다.
-            "benchmark":          _bench,
-            "benchmark_label":    get_market(market).indices.get(_bench, _bench),
-        }
+        # 계산기가 빈 입력을 직접 처리하므로 그냥 부른다. 빈 프레임을 넘기는
+        # 것이 요점이다 — 아무것도 없는 사용자를 위해 가격을 받아올 이유가
+        # 없고, 그 조회가 이 경로에서 제일 비싼 부분이다.
+        #
+        # `trade_log` 는 `[]` 다. `None` 은 "호출자가 안 알려줬다" 라는 다른
+        # 뜻이고 실현손익 사유가 `no_trade_log` 로 갈린다.
+        metrics = calculate_metrics(
+            {}, pd.DataFrame(), pd.Series(dtype=float),
+            live={}, market=market, trade_log=[],
+        )
+        # 라우터가 더하는 것은 이것 하나다. 소비자가 0 을 보고 "빈 포트폴리오"
+        # 와 "전량 매도해 평가액이 0" 을 구별할 수 없다 — 후자는 trade_log 가
+        # 있어 이 분기로 오지 않지만, 그 구별을 값 추론에 맡기면 조건이 바뀔 때
+        # 조용히 틀린다.
+        return {**metrics, "is_empty": True}
     # 과거 매도 종목 포함 → 전량 매도 이후에도 수익률 계산 가능
     traded_tickers = list({
         str(tr.get("ticker", "")).upper()
