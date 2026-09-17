@@ -19,6 +19,18 @@ import type { TickerDetail, OHLCVPoint, TickerDetailQuant } from '@/types'
 import { useTheme } from '@/lib/ThemeContext'
 import { useIsMobile } from '@/lib/useIsMobile'
 import { formatAxisPrice, formatPrice, getMarket } from '@/lib/market'
+import { useMarket } from '@/lib/useMarket'
+import { useTickerNames } from '@/lib/useTickerNames'
+import { pickOnEnter, moveHighlight, selectionLabel, type Suggestion } from '@/lib/suggestions'
+import SuggestionList from './SuggestionList'
+import { zoomAround, plotRatio } from './chartZoom'
+
+// 캔들 차트 JSX 에 준 margin/축 크기와 반드시 같아야 한다(아래 렌더 부분 참조).
+// 확대 기준점(커서 x → 플롯 비율)과 볼린저밴드 안/밖 판정이 이 값으로 플롯
+// 경계를 잡는다. 거래량·스토캐스틱 차트도 같은 Y축 폭·오른쪽 여백을 쓴다.
+const CANDLE_MARGIN = { top: 8, right: 12, bottom: 0 }
+const CANDLE_Y_AXIS_WIDTH  = 60
+const CANDLE_X_AXIS_HEIGHT = 20
 
 // ── 색상 팔레트 ──────────────────────────────────────────────────────────────
 /**
@@ -463,16 +475,24 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
   // data 에만 의존하도록 viewStart/viewEnd 는 state 대신 viewRef 에서 읽는다 —
   // 그래야 이 함수의 참조가 팬 중에도(매 프레임) 안 바뀌고, 아래 포인터
   // 이벤트를 붙이는 effect 도 그때마다 리스너를 떼었다 다시 달지 않는다.
-  const zoomBy = useCallback((factor: number) => {
+  //
+  // 확대 기준점: 휠은 커서, 핀치는 두 손가락의 중점, +/− 버튼은 가운데(0.5).
+  // 예전에는 전부 가운데였다 — 차트 왼쪽 끝 캔들 위에서 휠을 굴리면 그 캔들이
+  // 화면 밖으로 밀려났다. 계산은 chartZoom.ts 의 순수 함수가 한다.
+  const zoomBy = useCallback((factor: number, anchorRatio = 0.5) => {
     if (!data) return
     const total = data.ohlcv.length
-    const { start, end } = viewRef.current
-    const center = (start + end) / 2
-    const half   = ((end - start) / 2) * factor
-    const ns = Math.max(0,     Math.floor(center - half))
-    const ne = Math.min(total, Math.ceil(center  + half))
-    if (ne - ns >= 10) scheduleView(ns, ne)
+    const cur = viewRef.current
+    const next = zoomAround(cur, total, factor, anchorRatio, { minSpan: 10 })
+    if (next.start !== cur.start || next.end !== cur.end) scheduleView(next.start, next.end)
   }, [data, scheduleView])
+
+  /** 화면 x → 캔들 플롯에서의 비율 (0 = 첫 캔들 쪽 끝, 1 = 마지막 캔들 쪽 끝). */
+  const ratioAtX = useCallback((clientX: number): number => {
+    const box = (candleWrapRef.current ?? chartRef.current)?.getBoundingClientRect()
+    if (!box) return 0.5
+    return plotRatio(clientX, box.left, box.width, CANDLE_Y_AXIS_WIDTH, CANDLE_MARGIN.right)
+  }, [])
 
   const resetZoom = useCallback(() => {
     if (!data) return
@@ -486,16 +506,21 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
 
     const onWheel = (e: WheelEvent) => {
       e.preventDefault()
-      zoomBy(e.deltaY > 0 ? 1.15 : 0.85)
+      // 커서 아래 캔들이 확대 후에도 커서 아래 남는다.
+      zoomBy(e.deltaY > 0 ? 1.15 : 0.85, ratioAtX(e.clientX))
     }
 
     // 화면에 닿아 있는 포인터들. 두 개가 되면 핀치로 본다.
     const pts = new Map<number, { x: number; y: number }>()
-    let pinchStart: { dist: number; start: number; end: number } | null = null
+    let pinchStart: { dist: number; start: number; end: number; ratio: number } | null = null
 
     const spread = () => {
       const v = [...pts.values()]
       return Math.hypot(v[0].x - v[1].x, v[0].y - v[1].y)
+    }
+    const midX = () => {
+      const v = [...pts.values()]
+      return (v[0].x + v[1].x) / 2
     }
 
     const onDown = (e: PointerEvent) => {
@@ -504,7 +529,9 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
 
       if (pts.size === 2) {
         // 두 번째 손가락 → 핀치로 전환. 진행 중이던 팬/스크럽은 취소.
-        pinchStart = { dist: spread(), start: viewRef.current.start, end: viewRef.current.end }
+        // 기준점은 **처음 짚은 두 손가락의 중점**이다.
+        pinchStart = { dist: spread(), start: viewRef.current.start, end: viewRef.current.end,
+                       ratio: ratioAtX(midX()) }
         isPanning.current = false
         panRef.current = null
       } else if (pts.size === 1) {
@@ -528,15 +555,19 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
       if (pts.size === 2 && pinchStart) {
         const d = spread()
         if (d > 0 && pinchStart.dist > 0) {
-          const range  = pinchStart.end - pinchStart.start
-          const center = (pinchStart.start + pinchStart.end) / 2
-          const half   = (range / 2) * (pinchStart.dist / d)
-          const ns = Math.max(0,     Math.floor(center - half))
-          const ne = Math.min(total, Math.ceil(center  + half))
+          // 핀치 시작 때의 구간에서 매번 다시 계산한다(누적 오차가 없다).
+          // 처음 중점 아래 있던 캔들이 **지금** 중점을 따라간다 — 손가락을 함께
+          // 옮기면 확대하면서 끌어 옮기는 것이 된다.
+          const next = zoomAround(
+            { start: pinchStart.start, end: pinchStart.end }, total,
+            pinchStart.dist / d, pinchStart.ratio,
+            { minSpan: 10, toRatio: ratioAtX(midX()) },
+          )
+          const cur = viewRef.current
           // 확대도 팬과 똑같이 rAF 로 묶는다 — 예전 핀치가 버벅였던 건 손가락
           // 움직임마다(최대 120Hz) 바로 setState 해 매번 캔들·거래량·스토캐스틱
           // 3개 차트를 다시 그렸기 때문이다. 프레임당 한 번만 반영한다.
-          if (ne - ns >= 10) scheduleView(ns, ne)
+          if (next.start !== cur.start || next.end !== cur.end) scheduleView(next.start, next.end)
         }
         e.preventDefault()
         return
@@ -579,7 +610,7 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
     // viewStart/viewEnd 를 의도적으로 뺐다 — 팬 중 매 프레임 좌표는 viewRef 로
     // 읽으므로, 이 리스너들을 매번 떼었다 다시 달 필요가 없다(그 자체도 비용이다).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, zoomBy, scheduleView])
+  }, [data, zoomBy, scheduleView, ratioAtX])
 
   // ── 자동완성 ─────────────────────────────────────────────────────────────
   const onQueryChange = (v: string) => {
@@ -623,11 +654,6 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
     const pad = (hi - lo) * 0.05
     return [Math.max(0, lo - pad), hi + pad]
   }, [visData, showMA])
-
-  // 캔들 차트 JSX 에 준 margin/축 크기와 반드시 같아야 한다(아래 렌더 부분 참조).
-  const CANDLE_MARGIN = { top: 8, right: 12, bottom: 0 }
-  const CANDLE_Y_AXIS_WIDTH  = 60
-  const CANDLE_X_AXIS_HEIGHT = 20
 
   /** 터치 시작 지점이 캔들 차트의 볼린저밴드 채널(상단~하단) 안인지 판정.
       팬/핀치 리스너가 매 프레임 다시 붙지 않도록, 이 함수 자체가 아니라
