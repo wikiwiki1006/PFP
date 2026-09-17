@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -535,6 +536,10 @@ def _generate_ai_views(
     Perplexity 를 쓰는 이유: 실시간 웹 검색이 붙어 있어 학습 시점 이후의 실적·가이던스·
     투자의견 변경을 직접 조회할 수 있다. 정량 데이터(가격·펀더멘털)는 우리가 넣어주고,
     최신 정성 정보는 모델이 스스로 찾게 하는 구조.
+
+    반환: `{ticker: view}` — **AI 가 쓸 수 있는 뷰를 준 종목만** 들어 있다
+    (`_parse_ai_view`). 빠진 종목을 기본값으로 채우지 않는다. 호출 자체가 실패하면
+    `{}`.
     """
     horizon = (
         f"{int(holding_period_years * 12)}개월"
@@ -623,27 +628,91 @@ def _generate_ai_views(
         if m:
             raw = m.group(0)
         parsed = json.loads(raw)
-
-        result: dict = {}
-        for t in tickers:
-            v = parsed.get(t) or {}
-            er   = float(np.clip(v.get("expected_return", 0.0),  -0.5, 0.6))  # 기본 0 (편향 중립)
-            conf = float(np.clip(v.get("confidence", 0.5), 0.20, 0.90))
-            sent = v.get("sentiment", "Neutral")
-            if sent not in ("Bullish", "Neutral", "Bearish"):
-                sent = "Neutral"
-            result[t] = {
-                "expected_return": er,
-                "confidence":      conf,
-                "sentiment":       sent,
-                "key_driver":      str(v.get("key_driver", ""))[:200],
-            }
-        return result
-
-    except Exception as e:
+    except Exception:
         logger.warning("AI 뷰 JSON 파싱 실패 — AI 뷰 없이 진행 (raw 앞부분: %s)",
                        raw[:200], exc_info=True)
         return {}
+    if not isinstance(parsed, dict):
+        logger.warning("AI 뷰 응답이 JSON 객체가 아니다 (%s) — AI 뷰 없이 진행",
+                       type(parsed).__name__)
+        return {}
+
+    # 종목마다 따로 판정한다. 예전에는 한 종목의 값 하나(`"expected_return": "N/A"`)
+    # 가 `np.clip` 에서 예외를 내 **나머지 종목의 멀쩡한 뷰까지** 전부 버리고
+    # 전 종목 대체 뷰로 갔다 (실측: 3종목 중 BBB 의 값 하나 → 3종목 모두 "AI 분석 불가").
+    result: dict = {}
+    dropped: list[str] = []
+    for t in tickers:
+        view, why = _parse_ai_view(parsed.get(t))
+        if view is None:
+            dropped.append(f"{t}: {why}")
+            continue
+        result[t] = view
+    if dropped:
+        logger.warning(
+            "AI 뷰 %d/%d종목을 쓸 수 없다 — 결과에서 뺀다 (그 종목은 과거수익 대체 "
+            "뷰로 최적화한다): %s",
+            len(dropped), len(tickers), "; ".join(dropped))
+    return result
+
+
+# AI 뷰 값의 허용 구간 — 프롬프트 출력 스키마(-0.50~+0.60 · 0.20~0.90)와 같다.
+_VIEW_RETURN_RANGE = (-0.5, 0.6)
+_VIEW_CONF_RANGE = (0.20, 0.90)
+_VIEW_SENTIMENTS = {"bullish": "Bullish", "neutral": "Neutral", "bearish": "Bearish"}
+
+
+def _parse_ai_view(v) -> tuple[Optional[dict], Optional[str]]:
+    """AI 응답에서 종목 하나의 객체 → `(뷰, None)` 또는 `(None, 이유)`.
+
+    **네 필드가 전부 제대로 와야 뷰다.** 예전에는 빠진 것을 기본값으로 채웠다 —
+    종목이 통째로 없으면 `0.0 · 0.5 · "Neutral" · ""`, 필드 하나가 없으면 그
+    필드만. AI 가 답하지 않은 자리를 "보합 전망, 신뢰도 50%" 로 위장한 것이다
+    (§1.3 (a)). 실측(전, 합성 3종목):
+
+        BBB 를 뺀 응답          → BBB 뷰 0.0 / 0.5 / Neutral / ""
+        BBB expected_return 없음 → BBB 뷰 0.0 / 0.4 / Bearish / "B 근거"
+
+    둘째는 key_driver 가 멀쩡해 공용 캐시(`backend.db.ai_view_cache`)의 검사도
+    통과한다. 뷰를 그 캐시로 공유하면 다음 초기화까지 **모든 사용자에게** 나가므로,
+    위장이 한 사람의 화면에서 끝나지 않게 된다. 뷰가 아니면 호출자가 그 종목에만
+    과거수익 대체 뷰를 쓴다 — 그 뷰는 key_driver 로 "AI 분석 불가" 라고 말한다.
+
+    - expected_return · confidence: 숫자(불리언 제외)이고 유한해야 한다. 범위
+      밖이면 스키마 구간으로 자른다 (예전과 같다).
+    - sentiment: 대소문자만 다른 것은 받는다 ("bullish" → "Bullish"). 그 밖의
+      값은 예전처럼 "Neutral" 로 바꾸지 않고 뷰가 아닌 것으로 본다.
+    - key_driver: 비지 않은 문자열. 200자로 자른다 (예전과 같다).
+    """
+    # 이 함수는 예외를 내지 않아야 한다 — 호출자의 종목 루프는 try 밖이라, 한
+    # 종목의 이상한 값이 최적화 전체를 죽이면 예전(전 종목 대체 뷰)보다 나빠진다.
+    if not isinstance(v, dict):
+        return None, "응답에 없음" if v is None else f"객체가 아님 ({type(v).__name__})"
+    nums: dict[str, float] = {}
+    for k in ("expected_return", "confidence"):
+        x = v.get(k)
+        if isinstance(x, bool) or not isinstance(x, (int, float)):
+            return None, f"{k} 없음 또는 숫자 아님 ({x!r:.40})"
+        try:
+            f = float(x)                 # JSON 의 거대한 정수는 여기서 OverflowError
+        except OverflowError:
+            return None, f"{k} 를 float 로 바꿀 수 없다"
+        if not math.isfinite(f):
+            return None, f"{k} 가 유한하지 않다 ({f!r})"
+        nums[k] = f
+    sentiment = (_VIEW_SENTIMENTS.get(v["sentiment"].strip().lower())
+                 if isinstance(v.get("sentiment"), str) else None)
+    if sentiment is None:
+        return None, f"sentiment 허용값 아님 ({v.get('sentiment')!r:.40})"
+    driver = v.get("key_driver")
+    if not isinstance(driver, str) or not driver.strip():
+        return None, "key_driver 없음"
+    return {
+        "expected_return": float(np.clip(nums["expected_return"], *_VIEW_RETURN_RANGE)),
+        "confidence":      float(np.clip(nums["confidence"], *_VIEW_CONF_RANGE)),
+        "sentiment":       sentiment,
+        "key_driver":      driver[:200],
+    }, None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1023,20 +1092,33 @@ def run_ai_optimization(
 
     # ③ AI views (펀더멘털 + 뉴스 기반)
     _notify(2, "AI 밸류에이션·모멘텀 분석 중...")
-    ai_views = _generate_ai_views(valid, price_stats, fundamentals, news_ctx,
-                                  holding_period_years, market)
+    fresh = _generate_ai_views(valid, price_stats, fundamentals, news_ctx,
+                               holding_period_years, market)
 
-    # Fallback: AI 실패 시 과거수익(신뢰도 30%) — or 0.0으로 중립 기본값
-    if not ai_views:
-        ai_views = {
-            t: {
+    # Fallback: AI 뷰가 없는 종목만 과거수익(신뢰도 30%) 기반 대체 뷰.
+    #
+    # 예전에는 AI 가 **전부** 실패했을 때만 여기로 왔고, 일부 종목만 빠지면
+    # `_generate_ai_views` 가 그 종목을 0% · 신뢰도 50% · Neutral 로 채웠다
+    # (§1.3 (a) — `_parse_ai_view` 참고). 이제 빠진 종목은 결과에 없으므로 전부
+    # 실패든 일부 실패든 **같은 규칙**으로 이 뷰를 받고, key_driver 가 "AI 분석
+    # 불가" 라고 말한다.
+    ai_views: dict = {}
+    fallback: list[str] = []
+    for t in valid:
+        if t in fresh:
+            ai_views[t] = fresh[t]
+        else:
+            ai_views[t] = {
                 "expected_return": float(np.clip((price_stats.get(t, {}).get("ret_1y") or 0.0) / 100.0, -0.4, 0.5)),
                 "confidence":  0.30,
                 "sentiment":   "Neutral",
                 "key_driver":  "AI 분석 불가 — 과거 수익률 기반 추정 (신뢰도 낮음)",
             }
-            for t in valid
-        }
+            fallback.append(t)
+    if fallback:
+        logger.warning("AI 뷰를 받지 못한 %d/%d종목 %s — 과거 수익률 기반 대체 뷰"
+                       "(신뢰도 30%%)로 최적화한다.",
+                       len(fallback), len(valid), fallback)
 
     # ④ 최적화
     _notify(3, "Black-Litterman + 효율적 프론티어 계산 중...")
