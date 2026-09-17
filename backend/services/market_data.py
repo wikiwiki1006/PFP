@@ -670,3 +670,144 @@ def get_market_snapshot(close_df: pd.DataFrame) -> dict:
         "prices":    prices,
         "timestamp": datetime.now().isoformat(),
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 변동성 지수 (시장별) — 미국 VIX · 한국 VKOSPI
+# ─────────────────────────────────────────────────────────────────────────────
+
+_VOL_TTL_OK   = 600      # 성공값 10분 (DB 공용 캐시 · 인스턴스 사이 공유)
+_VOL_TTL_FAIL = 60       # 실패는 1분만 기억 — 출처가 죽은 동안 요청마다 두드리지 않게
+_VOL_STALE_OK = 3600     # 다른 요청이 가져오는 중일 때만 1시간 이내 마지막 성공값을 준다
+_vol_memo: dict[str, tuple[float, dict]] = {}
+_vol_last_good: dict[str, tuple[float, dict]] = {}
+_vol_locks: dict[str, "threading.Lock"] = {}
+_vol_locks_guard = threading.Lock()
+
+
+def _vol_lock(key: str) -> "threading.Lock":
+    with _vol_locks_guard:
+        return _vol_locks.setdefault(key, threading.Lock())
+
+
+def _investing_daily(instrument_id: str, days: int = 14) -> list[dict]:
+    """인베스팅 일별 시세 (최신이 먼저). 실패하면 예외를 그대로 올린다."""
+    import requests
+    from datetime import date, timedelta
+    end = date.today() + timedelta(days=1)
+    start = end - timedelta(days=days)
+    r = requests.get(
+        f"https://api.investing.com/api/financialdata/historical/{instrument_id}",
+        params={"start-date": start.isoformat(), "end-date": end.isoformat(),
+                "time-frame": "Daily", "add-missing-rows": "false"},
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 Chrome/120 Safari/537.36",
+            "domain-id": "kr", "Accept": "application/json",
+            "Referer": "https://kr.investing.com/",
+        },
+        # (연결, 읽기). 15초였을 때 인베스팅이 멈추면 한국 /metrics 요청마다
+        # 그만큼 기다렸다 — 이 값은 지표 한 칸이라 기다릴 가치가 없다.
+        timeout=(3, 5),
+    )
+    r.raise_for_status()
+    rows = (r.json() or {}).get("data") or []
+    return sorted(rows, key=lambda x: x.get("rowDateRaw") or 0, reverse=True)
+
+
+def volatility_index(market: str) -> dict:
+    """그 시장의 변동성 지수 최신값.
+
+    반환: {"value", "prev_close", "change_pct", "as_of", "label", "source"}.
+    값을 못 읽으면 value 가 None 이다 — **다른 시장의 지수로 메우지 않는다.**
+    한국에 미국 VIX 를 채우면 '변동성 15' 라는 틀린 측정이 화면에 나간다(§1.3).
+    """
+    from backend.services.markets import get_market
+    spec = get_market(market)
+    vi = spec.volatility_index or {}
+    label, source, symbol = vi.get("label"), vi.get("source"), vi.get("symbol")
+    empty = {"value": None, "prev_close": None, "change_pct": None, "as_of": None,
+             "label": label, "source": source}
+    if not source:
+        return empty
+
+    key = f"volatility_index:{spec.code}"
+    now = time.time()
+    hit = _vol_memo.get(key)
+    if hit and hit[0] > now:
+        return hit[1]
+
+    from backend.db.market_cache import get_common, save_common
+    cached = get_common(key)
+    if isinstance(cached, dict) and cached.get("value") is not None:
+        _vol_memo[key] = (now + _VOL_TTL_OK, cached)
+        _vol_last_good[key] = (now, cached)
+        return cached
+
+    # 한 번에 하나만 가져온다. 잠금이 없을 때 출처가 느려지면 동시에 들어온
+    # 요청이 **각자** 출처를 두드리고 각자 기다렸다 (실측: 동시 10요청 → 호출
+    # 10회, 전부 대기). 이미 누가 가져오는 중이면 기다리지 않고, 1시간 이내의
+    # 마지막 성공값이 있으면 그걸, 없으면 빈 값을 준다 — 이 칸 하나 때문에
+    # 포트폴리오 지표 전체가 늦어지면 안 된다.
+    lock = _vol_lock(key)
+    if not lock.acquire(blocking=False):
+        last = _vol_last_good.get(key)
+        if last and now - last[0] <= _VOL_STALE_OK:
+            return last[1]
+        return empty
+    try:
+        hit = _vol_memo.get(key)                 # 기다리는 사이 다른 요청이 채웠을 수 있다
+        if hit and hit[0] > time.time():
+            return hit[1]
+        return _volatility_index_fetch(spec.code, key, source, symbol, empty)
+    finally:
+        lock.release()
+
+
+def _volatility_index_fetch(code: str, key: str, source: str, symbol: str, empty: dict) -> dict:
+    """volatility_index 의 실제 조회. `_vol_lock(key)` 를 쥔 채로만 부른다."""
+    from backend.db.market_cache import save_common
+    now = time.time()
+    out = dict(empty)
+    try:
+        if source == "investing":
+            rows = _investing_daily(symbol)
+            closes = [(float(str(x["last_close"]).replace(",", "")), x.get("rowDateTimestamp"))
+                      for x in rows if x.get("last_close") not in (None, "")]
+            if closes:
+                out["value"], out["as_of"] = closes[0][0], closes[0][1]
+                if len(closes) > 1:
+                    out["prev_close"] = closes[1][0]
+        elif source == "yahoo":
+            import yfinance as yf
+            h = yf.Ticker(symbol).history(period="5d")["Close"].dropna()
+            if len(h):
+                out["value"], out["as_of"] = float(h.iloc[-1]), h.index[-1].isoformat()
+                if len(h) > 1:
+                    out["prev_close"] = float(h.iloc[-2])
+        else:
+            raise ValueError(f"알 수 없는 변동성 지수 출처: {source!r}")
+    except Exception as e:
+        _logger.warning("변동성 지수 조회 실패 (%s %s:%s) — 값 없이 둔다: %s",
+                       code, source, symbol, e)
+
+    if out["value"] is not None and out["prev_close"]:
+        out["change_pct"] = round((out["value"] / out["prev_close"] - 1) * 100, 2)
+
+    if out["value"] is None:
+        # 1시간 이내의 마지막 성공값이 있으면 그걸 준다. 안 그러면 같은 순간에
+        # 잠금을 못 얻은 요청은 그 값을, 가져오던 요청과 이후 1분은 '—' 를 받아
+        # 화면이 요청마다 번갈아 바뀐다. 오래된 값을 쓴다는 사실은 남긴다.
+        last = _vol_last_good.get(key)
+        if last and now - last[0] <= _VOL_STALE_OK:
+            _logger.warning("변동성 지수 %s 조회 실패 — %d초 전 마지막 성공값을 쓴다 (%s:%s)",
+                            code, int(now - last[0]), source, symbol)
+            _vol_memo[key] = (now + _VOL_TTL_FAIL, last[1])
+            return last[1]
+        _logger.warning("변동성 지수 %s 값 없음 (%s:%s)", code, source, symbol)
+        _vol_memo[key] = (now + _VOL_TTL_FAIL, out)
+        return out
+    save_common(key, out, ttl_seconds=_VOL_TTL_OK)
+    _vol_memo[key] = (now + _VOL_TTL_OK, out)
+    _vol_last_good[key] = (now, out)
+    return out

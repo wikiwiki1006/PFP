@@ -1010,12 +1010,38 @@ def calculate_metrics(
     bench = benchmark_for(market)
     beta_d = portfolio_beta_detail(holdings, close_df, bench)
     beta = beta_d.beta
-    # `.get()` 의 기본값 18.0(VIX 장기 평균)은 **열이 없을 때만** 쓰인다.
+    # 변동성 지수는 **그 시장의 것**이다 (`markets.MarketSpec.volatility_index`).
+    #
+    # 미국 — 프레임의 `^VIX` 를 그대로 읽는다. `/metrics` 는 그 열에 실시간
+    # 값을 주입해 넘기므로(`_inject_live`) 이 경로를 바꿀 이유가 없다.
+    # `.get()` 의 기본값 18.0(VIX 장기 평균)은 **열이 없을 때만** 쓰였다.
     # 열은 있는데 값이 전부 NaN 이면 NaN 이 그대로 나오고, ffill 도 전량 NaN 열은
     # 채우지 못한다 — yfinance 가 ^VIX 를 빈 열로 주는 일이 있다. 그러면 폴백을
     # 두었는데도 화면에는 '—' 가 뜬다 (앱 전역 SafeJSONResponse 가 NaN 을 null 로
     # 바꿔 주므로 요청이 깨지지는 않는다. 그 안전망이 이 누락을 가려 왔다.)
-    vix  = _num_or_none(curr.get("^VIX"))
+    #
+    # 한국 — VKOSPI 는 야후에 없어 프레임에 열이 없다. 라우터가 시장과 무관하게
+    # 프레임에 `^VIX` 를 넣으므로, 예전에는 한국 포트폴리오의 `vix` 가 **미국
+    # VIX** 였다. 2026-09-17 에 둘이 VIX 15.66 · VKOSPI 43.02 로 갈려, 한국
+    # 위험을 3분의 1로 보여 줬다. 이 값은 `routers/macro.py` 를 거쳐 한국 AI
+    # 피드백 프롬프트에 "VKOSPI" 라는 이름으로 실린다 — 미국 값이 한국 이름을
+    # 달고 나가면 안 된다.
+    #
+    # 한국 값을 못 읽으면 **None** 이다. 프레임의 `^VIX` 로 메우지 않는다 —
+    # 다른 시장의 측정을 이 시장 이름으로 내보내는 것은 없는 것보다 나쁘다 (§1.3).
+    if market == "KR":
+        try:
+            from backend.services import market_data as _md
+            vix = _num_or_none(_md.volatility_index("KR").get("value"))
+        except Exception:
+            # `volatility_index` 는 조회 실패를 스스로 삼키고 경고를 남긴다.
+            # 여기까지 온 예외는 그 함수 자체가 깨진 것이다. 시장 지표 한 칸
+            # 때문에 지표 응답 전체를 500 으로 만들지 않되, 빈 칸의 원인은 남긴다.
+            logger.warning("한국 변동성 지수(VKOSPI)를 읽다 예외 — vix 를 비운다 "
+                           "(미국 VIX 로 메우지 않는다)", exc_info=True)
+            vix = None
+    else:
+        vix = _num_or_none(curr.get("^VIX"))
 
     # 알파도 시장 기준 지수 대비다. 예전에는 `"^GSPC"` 가 하드코딩돼 한국
     # 포트폴리오의 알파가 S&P500 대비로 나갔고, 응답 키 이름까지

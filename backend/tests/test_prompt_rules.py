@@ -285,3 +285,27 @@ def test_corpus_covers_every_known_builder():
 
     empty = [p.id for p in _CORPUS if not p.text.strip()]
     assert not empty, f"these builders produced an empty prompt: {empty} -- nothing was checked"
+
+
+def test_intercepted_builders_reached_the_model():
+    """모델 호출을 가로채 얻는 항목은 **정말로 그 호출까지 갔어야** 한다.
+
+    `generate_daily_brief` 는 키가 없으면 `"ANTHROPIC_API_KEY 미설정"` 을
+    돌려주고 끝난다. 그 한 줄에는 달러 기호도 거시지표도 없어서 위 규칙이
+    전부 통과한다 — 검사한 게 아니라 **검사할 것이 없었다.** 빈 문자열 검사는
+    이걸 못 잡는다(비어 있지 않다).
+
+    코퍼스는 키를 고정해 그 길을 막았다. 이 검사는 다른 이른 반환이 생겨도
+    같은 방식으로 조용히 통과하지 않게 한다.
+    """
+    intercepted = [p for p in _CORPUS if p.reached_model is not None]
+    assert intercepted, (
+        "no corpus entry is built by intercepting the model call -- the daily brief "
+        "left the corpus, or this flag stopped being set, and the check below is empty."
+    )
+    short_circuited = {p.id: p.text[:80] for p in intercepted if not p.reached_model}
+    assert not short_circuited, (
+        f"these builders returned before calling the model, so their corpus text is "
+        f"not a prompt: {short_circuited} -- every rule above passed on that text "
+        "without checking anything. (모델까지 가지 않았다 — 규칙이 빈 것을 검사했다)"
+    )

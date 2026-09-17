@@ -8,7 +8,7 @@
   ② 저장 쿼리  — holdings 조회·저장에 market 조건이 실제로 들어가는가
   ③ 거래일 계산 — 시장별 거래일 수가 달라 상수 기준을 쓰면 한쪽이 망가진다
 """
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -109,14 +109,38 @@ def test_save_holding_writes_market(monkeypatch):
 
 # ── ③ 시장별 거래일 수 ──────────────────────────────────────────────────────
 
-def test_expected_sessions_differ_between_markets():
+# KRX 가 문을 닫은 **평일** (2025-12-29 ~ 2026-08-31). 관측값이다 — 2026-09-17
+# yfinance 로 ^KS11 · 005930.KS · 000660.KS 를 받아 세 소스가 모두 비운 평일을
+# 골랐다 (세 소스가 완전히 일치했다). 07-17 제헌절은 기억으로 적었다면 빠졌다.
+_KRX_CLOSED_WEEKDAYS = frozenset(date.fromisoformat(d) for d in (
+    "2025-12-31", "2026-01-01", "2026-02-16", "2026-02-17", "2026-02-18",
+    "2026-03-02", "2026-05-01", "2026-05-05", "2026-05-25", "2026-06-03",
+    "2026-07-17", "2026-08-17",
+))
+
+
+def _observed_krx_calendar() -> frozenset:
+    start, end = date(2025, 12, 29), date(2026, 8, 31)
+    days = (start + timedelta(days=i) for i in range((end - start).days + 1))
+    return frozenset(d for d in days if d.weekday() < 5 and d not in _KRX_CLOSED_WEEKDAYS)
+
+
+def test_expected_sessions_differ_between_markets(monkeypatch):
     """한국은 설·추석 등으로 거래일이 미국보다 적다.
 
     이 차이 때문에 '150행 이상' 같은 상수 기준을 쓰면 한국 종목이 영원히
     미달로 남아, 수집기가 같은 종목을 매번 다시 받고 신호 스캔은 한 번도
     갱신되지 않는다. 실제로 그 버그가 있었다.
+
+    **한국 캘린더는 주입한다.** 원래는 `is_kr_trading_day` 가 야후에서 관측
+    캘린더를 받아 왔다 — 게이트를 돌릴 때마다 바깥으로 3번 나갔고, 오프라인
+    에서는 평일 폴백(173일)으로 떨어져 `kr < us` 가 깨졌다. 결과가 네트워크
+    상태에 달려 있었다. curl_cffi 가 소켓 가드를 우회해서 아무도 몰랐다.
     """
     from backend.db.market_cache import _expected_sessions
+    from backend.services import market_calendar
+
+    monkeypatch.setattr(market_calendar, "_krx_trading_days", _observed_krx_calendar)
 
     since, until = date(2026, 1, 1), date(2026, 8, 31)
     us = _expected_sessions(since, until, "US")

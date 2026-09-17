@@ -154,6 +154,53 @@ def build_macro_block(market: str) -> str:
                        else "collection raised")
 
 
+def _vol_label(market: str) -> str:
+    """그 시장의 변동성 지수 이름 — US 'VIX' · KR 'VKOSPI'.
+
+    이름을 프롬프트에 박지 않고 시장 정의(`MarketSpec.volatility_index`)에서
+    읽는다. 예전에는 프롬프트마다 'VIX' 가 적혀 있어서, 한국 포트폴리오에
+    VKOSPI 값(2026-09-17 43.02)이 들어오면 모델에게는 'VIX 지수: 43.0' 으로
+    나간다 — 같은 날 미국 VIX 는 15.66 이었다.
+    """
+    from backend.services.markets import get_market
+    return get_market(market).volatility_index["label"]
+
+
+def _volatility_row(market: str) -> str:
+    """시장 지표 블록에 넣을 그 시장 변동성 지수 한 줄.
+
+    가격 표(DB 캐시·yfinance)로는 못 받는 지수에만 쓴다 — VKOSPI 는 야후에
+    없다. 미국 VIX 는 가격 표에 이미 있어서 부르지 않는다.
+
+    **못 읽었으면 못 읽었다고 적는다.** 줄을 빼면 한국 블록에 남는 변동성
+    지표는 참고용 미국 VIX 뿐이라, '시장 변동성' 을 묻는 에이전트에게 쓸 수
+    있는 근거가 그것밖에 없다 — 이 줄을 넣은 이유가 그 대체를 막는 것이다.
+    """
+    label = _vol_label(market)
+    try:
+        from backend.services.market_data import volatility_index
+        vi = volatility_index(market)
+    except Exception:
+        # `volatility_index` 는 자기 실패를 value=None 으로 돌려준다. 여기로
+        # 오는 것은 그 바깥(임포트·시장 정의)이 깨진 경우다.
+        logger.warning("변동성 지수 조회가 예외로 끝났다 (market=%s)", market,
+                       exc_info=True)
+        vi = {}
+
+    value = vi.get("value")
+    if value is None:
+        return f"  {label}: 조회 실패 — {label} 수준·등락을 인용하거나 추정하지 마세요"
+    chg = vi.get("change_pct")
+    # 출처가 가격 표와 달라서 기준일이 같다는 보장이 없다. 날짜를 붙여 둔다.
+    when = f", {str(vi['as_of'])[:10]} 기준" if vi.get("as_of") else ""
+    move = f"{chg:+.2f}% d/d" if chg is not None else "d/d 불명 — 전일 값 없음"
+    return f"  {label}: {value:.2f} ({move}{when})"
+
+
+# 가격 표 안에서 '그 시장 변동성 지수 줄' 이 들어갈 자리. 가격 조회 대상이 아니다.
+_VOL_ROW = "__volatility_index__"
+
+
 def gather_yfinance_market_data(market: str = "US") -> str:
     """DB 캐시 우선, 핵심 지수 누락 시 직접 yfinance 다운로드로 시장 지표 수집.
     배경 스레드에서 실행되므로 블로킹 다운로드 가능."""
@@ -205,7 +252,15 @@ def gather_yfinance_market_data(market: str = "US") -> str:
             # 해외 지표는 참고용으로 뒤에 남긴다 — 한국 증시는 미국장·환율에
             # 크게 연동되므로 아예 빼면 인과를 설명할 수 없다.
             _kept = {"^GSPC", "^IXIC", "^VIX", "^TNX", "CL=F", "USDJPY=X"}
-            PRICE_TICKERS = _kr_first + [r for r in PRICE_TICKERS if r[0] in _kept]
+            # 한국 시장의 변동성은 VKOSPI 다. 한국 지수 바로 뒤에 두고, 참고용
+            # VIX 에는 '미국' 을 붙인다. 예전 한국 블록은 변동성 지표가 'VIX'
+            # 하나뿐이었는데 에이전트 3 은 "시장 변동성(VIX)" 을 물었다.
+            PRICE_TICKERS = (
+                _kr_first
+                + [(_VOL_ROW, "", "", "")]
+                + [(t, "미국 VIX" if t == "^VIX" else name, fmt, unit)
+                   for t, name, fmt, unit in PRICE_TICKERS if t in _kept]
+            )
             # 그 시장이 정의한 섹터를 **전부** 넣는다. 예전에는 `[:6]` 으로
             # 잘라서 에너지화학·철강·IT하드웨어가 빠졌는데, 한국 증시에서
             # 작은 섹터가 아니다. 더 나쁜 건 아래 '미수집' 알림이 그 셋을
@@ -216,7 +271,7 @@ def gather_yfinance_market_data(market: str = "US") -> str:
             # 한국어 리포트에 그대로 실리면 모델이 뭘로 옮길지 모른다.
             SECTOR_TICKERS = [(etf, f"{_sector_label(label)}({etf})")
                               for label, etf in _spec.sector_etfs]
-        all_price_tickers  = [t for t, *_ in PRICE_TICKERS]
+        all_price_tickers  = [t for t, *_ in PRICE_TICKERS if t != _VOL_ROW]
         all_sector_tickers = [t for t, _ in SECTOR_TICKERS]
         all_tickers = all_price_tickers + all_sector_tickers
 
@@ -306,6 +361,9 @@ def gather_yfinance_market_data(market: str = "US") -> str:
             lines.append("")
             lines.append("  [Indices & assets]")
             for t, name, fmt, unit in PRICE_TICKERS:
+                if t == _VOL_ROW:
+                    lines.append(_volatility_row(market))
+                    continue
                 c = cur_price.get(t)
                 p = prev_price.get(t)
                 if c is None:
@@ -537,7 +595,13 @@ def _build_agents(
     spec = get_market(market)
     is_kr = spec.code == "KR"
     idx_main   = "KOSPI" if is_kr else "S&P500"
-    idx_list   = "KOSPI·KOSDAQ·원/달러 환율·국고채 금리" if is_kr else "S&P500·NASDAQ·VIX·미 국채 금리"
+    # 변동성 지수 이름은 시장 정의에서 읽는다 (US VIX · KR VKOSPI). 한국 목록에는
+    # 원래 변동성 지수가 없었고, 아래 에이전트 3 은 시장을 가리지 않고
+    # "시장 변동성(VIX)" 을 물었다 — 한국 시나리오에도 미국 VIX 를 물은 것이다.
+    # 이 이름을 쓰는 근거 줄은 `gather_yfinance_market_data` 가 넣는다.
+    vol_label  = _vol_label(market)
+    idx_list   = (f"KOSPI·KOSDAQ·{vol_label}·원/달러 환율·국고채 금리" if is_kr
+                  else f"S&P500·NASDAQ·{vol_label}·미 국채 금리")
     stance = (
         "**분석 관점: 한국 주식시장.** 지수는 KOSPI/KOSDAQ 기준으로 말하고, "
         "금액은 원화로 씁니다. 종목을 예로 들 때는 **국내 상장 종목만** 사용하세요 "
@@ -616,7 +680,7 @@ def _build_agents(
 ## ⏱️ 단기 영향 분석 (이벤트 후 4주)
 - 주식시장에 미칠 수 있는 영향 및 리스크 요인
 - 달러·금·금리 등 안전자산 수요 변화 가능성
-- 시장 변동성(VIX) 변화 요인 분석
+- 시장 변동성({vol_label}) 변화 요인 분석
 
 ## 📅 중기 시나리오 (1~3개월)
 안정화 조건과 추가 하락 요인을 시나리오별로 구분해 분석
@@ -1116,26 +1180,49 @@ def parse_portfolio_actions(raw_text: str) -> list[dict] | None:
 
 # ── AI Analyst 실시간 피드백 ──────────────────────────────────────────────────
 
-def get_ai_analyst_feedback(
+# 변동성 지수 등급 경계 (하한, 등급). **두 시장에 같은 값을 쓴다.**
+#
+# 20·30 은 VIX 의 관행 경계다. VKOSPI 에도 맞는지는 두 지수의 일별 종가 분포를
+# 같은 구간(VKOSPI 이력이 있는 2013-08 이후)으로 잘라 비교해서 정했다
+# (2026-09-17 측정 · VIX 야후 ^VIX · VKOSPI 인베스팅 956761):
+#
+#   분포의 몸통이 거의 같다 — 사분위 VIX 13.5/16.2/20.5 · VKOSPI 13.4/16.3/20.6.
+#   20 의 백분위 VIX 73.5 · VKOSPI 72.6,  30 의 백분위 VIX 95.2 · VKOSPI 91.0.
+#
+# 즉 같은 숫자가 각자의 이력에서 같은 자리를 가리킨다. 30 의 차이는 2025–26 년
+# VKOSPI 가 장기간 30 위에 머문 데서 온다 (2024 년까지만 자르면 VIX 95.0 ·
+# VKOSPI 97.3 으로 방향이 반대다). 다시 재려면 두 출처의 일별 종가를 같은 구간으로
+# 잘라 사분위와 `(s < 20).mean()` · `(s < 30).mean()` 을 비교한다.
+_VOL_BANDS: tuple[tuple[float, str], ...] = ((30.0, "위험"), (20.0, "주의"))
+
+
+def _analyst_feedback_prompt(
     vix: "float | None",
     portfolio_beta: "float | None",
     today_chg_pct: "float | None",
     sector_summary: str,
-    is_portfolio_sectors: bool = False,
+    is_portfolio_sectors: bool,
+    market: str,
 ) -> str:
-    if not ANTHROPIC_API_KEY:
-        return "ANTHROPIC_API_KEY 미설정"
+    """`get_ai_analyst_feedback` 가 모델에 보내는 문자열. 바깥을 보지 않는다.
 
-    # VIX 도 베타와 같은 규칙을 받는다. 예전에는 `float` 만 받아서, 호출부가
+    `vix` 는 **그 시장의** 변동성 지수 값이다 (US VIX · KR VKOSPI). 인자 이름은
+    호출부(`metrics["vix"]` · `LiveMetrics.vix`)와 맞춰 두었다.
+    """
+    label = _vol_label(market)
+
+    # 변동성 지수도 베타와 같은 규칙을 받는다. 예전에는 `float` 만 받아서, 호출부가
     # 조회 실패를 18.0(장기 평균)이나 20.0 같은 상수로 메워 넘겨야 했다.
     # 그 값이 프롬프트에 실측처럼 실리면 모델은 '변동성 정상' 을 근거로
-    # 리스크를 서술한다 — 아무도 VIX 를 못 읽었는데도 (§1.3a·B4).
-    vix_line = (
-        f"- VIX 지수: {vix:.1f} "
-        f"({'위험' if vix >= 30 else ('주의' if vix >= 20 else '정상')})"
-        if vix is not None else
-        "- VIX 지수: 산출 불가 (VIX 수준이나 변동성 국면은 언급하지 말 것)"
-    )
+    # 리스크를 서술한다 — 아무도 지수를 못 읽었는데도 (§1.3a·B4).
+    if vix is None:
+        vol_line = f"- {label} 지수: 산출 불가 ({label} 수준이나 변동성 국면은 언급하지 말 것)"
+    else:
+        # 등급은 **적힌 숫자**로 가른다. 원값으로 가르면 19.97 이 "20.0 (정상)",
+        # 20.0 이 "20.0 (주의)" 로 나가 같은 숫자에 두 등급이 붙는다.
+        shown = f"{vix:.1f}"
+        grade = next((g for floor, g in _VOL_BANDS if float(shown) >= floor), "정상")
+        vol_line = f"- {label} 지수: {shown} ({grade})"
     # 베타를 못 구했으면 '1.00' 이라고 단정하지 않는다. 1.0 은 '시장과 동일하게
     # 움직인다'는 판단이라, 모르는 것을 아는 것처럼 적으면 모델이 그 전제로
     # 리스크를 서술한다.
@@ -1151,26 +1238,46 @@ def get_ai_analyst_feedback(
                 "- 오늘 포트폴리오 변동률: 산출 불가 (오늘 등락은 언급하지 말 것)")
 
     if is_portfolio_sectors:
-        prompt = f"""다음 데이터를 바탕으로 투자자에게 3~4문장(120자 이내)의 포트폴리오 섹터 분석 피드백을 한국어로 작성해줘.
+        return f"""다음 데이터를 바탕으로 투자자에게 3~4문장(120자 이내)의 포트폴리오 섹터 분석 피드백을 한국어로 작성해줘.
 보유 섹터의 오늘 흐름과 리스크를 관찰 기반 코멘트 톤으로, 구체적 수치를 인용해서 작성해.
 
-{vix_line}
+{vol_line}
 {beta_line}
 {chg_line}
 - 보유 섹터 비중 및 오늘 변동: {sector_summary}
 
 출력은 텍스트 3~4문장만, 따옴표나 마크다운 없이. 보유 섹터를 중심으로 분석할 것."""
-    else:
-        prompt = f"""다음 데이터를 바탕으로 투자자에게 1~2문장(80자 이내)의 간결한 매매 방향성 피드백을 한국어로 작성해줘.
+    return f"""다음 데이터를 바탕으로 투자자에게 1~2문장(80자 이내)의 간결한 매매 방향성 피드백을 한국어로 작성해줘.
 조언이 아닌 관찰 기반 코멘트 톤으로, 구체적 수치를 인용해서 작성해.
 
-{vix_line}
+{vol_line}
 {beta_line}
 {chg_line}
 - 주도 섹터(1일): {sector_summary}
 
 출력은 텍스트 1~2문장만, 따옴표나 마크다운 없이."""
 
+
+def get_ai_analyst_feedback(
+    vix: "float | None",
+    portfolio_beta: "float | None",
+    today_chg_pct: "float | None",
+    sector_summary: str,
+    is_portfolio_sectors: bool = False,
+    *,
+    market: str,
+) -> str:
+    """포트폴리오 AI 피드백. `vix` 는 그 시장의 변동성 지수 값이다.
+
+    `market` 에 기본값을 두지 않는다 (`_format_portfolio` 와 같은 이유). 이
+    함수가 시장을 모르면 지수 이름을 붙일 수 없고, 한동안 실제로 그랬다 —
+    한국 포트폴리오 피드백에도 'VIX 지수' 라는 이름이 붙었다. 빠뜨린 호출부는
+    기본값으로 조용히 미국이 되는 대신 TypeError 로 드러난다.
+    """
+    if not ANTHROPIC_API_KEY:
+        return "ANTHROPIC_API_KEY 미설정"
+    prompt = _analyst_feedback_prompt(vix, portfolio_beta, today_chg_pct,
+                                      sector_summary, is_portfolio_sectors, market)
     return call_claude(prompt, MODEL_OPTIONS["haiku"], 1200)
 
 
@@ -1322,6 +1429,12 @@ def generate_daily_brief(
         "당신은 월가 톱 헤지펀드의 포트폴리오 매니저입니다."
     )
 
+    # '매크로 헤드업' 은 **위에 준 매크로 지표**만 가리킨다. 예전에는
+    # "금리/달러/VIX 흐름" 을 두 시장에 똑같이 물었는데, 이 프롬프트에는 어느
+    # 시장에도 VIX 값이 없다(`build_macro_block` 은 FRED·한국은행 지표다).
+    # 값 없이 물으면 모델이 채울 곳은 기억뿐이고, 한국 브리프는 거기에 더해
+    # 한국 포트폴리오의 변동성을 미국 지수로 물은 셈이었다. 목록을 시장별로
+    # 다시 적으면 `build_macro_block` 과 어긋나는 사본이 하나 더 생긴다.
     prompt = f"""{persona}
 아래 데이터를 바탕으로 오늘의 포트폴리오 브리프를 작성하세요.
 
@@ -1354,7 +1467,7 @@ def generate_daily_brief(
 (등락 상위/하위 2~3개, 원인 한 줄씩)
 
 ## 매크로 헤드업
-(금리/달러/VIX 흐름이 포트폴리오에 미치는 영향 1~2문장)
+(위 '매크로 지표' 에 있는 지표의 흐름이 포트폴리오에 미치는 영향 1~2문장. 거기 없는 지표는 끌어오지 말 것)
 
 ## 내일 주시 포인트
 (구체적인 1~2가지 모니터링 포인트)

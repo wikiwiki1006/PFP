@@ -36,6 +36,9 @@ class MarketSpec:
     suffixes: tuple[str, ...] = ()
     # 화면·리포트에 쓰는 자연어 (LLM 프롬프트에도 들어간다)
     lang_note: str = ""
+    # 그 시장의 **내재 변동성 지수**. 포트폴리오 화면의 '변동성' 칸과 AI 입력에
+    # 쓴다. source 는 조회 경로("yahoo" | "investing"), symbol 은 그 경로의 식별자.
+    volatility_index: dict = field(default_factory=dict)
     extra: dict = field(default_factory=dict)
 
 
@@ -74,6 +77,7 @@ US = MarketSpec(
         "cpi_index":    "CPIAUCSL",
     },
     lang_note="미국 증시(NYSE·NASDAQ), 통화 USD",
+    volatility_index={"label": "VIX", "source": "yahoo", "symbol": "^VIX"},
 )
 
 KR = MarketSpec(
@@ -118,6 +122,14 @@ KR = MarketSpec(
     },
     suffixes=(".KS", ".KQ"),
     lang_note="한국 증시(KOSPI·KOSDAQ), 통화 KRW",
+    # 코스피200 변동성지수(VKOSPI). **야후에 없다** — ^VKOSPI · VKOSPI.KS ·
+    # ^KSVKOSPI 전부 0행, 네이버 모바일 API 는 "Not Found - VKOSPI". 그래서
+    # 한동안 한국 화면에도 미국 VIX 를 썼는데, 2026-09-17 실측으로 둘이 크게
+    # 갈렸다: VIX 15.66 / VKOSPI 43.02, 코스피 실현변동성(연율) 20일 31.9% ·
+    # 60일 70.9%. 미국 VIX 는 한국 포트폴리오의 위험을 3분의 1로 보여 줬다.
+    # 인베스팅 instrument 956761 ("KOSPI Volatility") 의 일별 JSON 을 쓴다.
+    # 구글 클라우드 asia-southeast1 에서도 열리는 것을 확인했다(HTTP 200).
+    volatility_index={"label": "VKOSPI", "source": "investing", "symbol": "956761"},
 )
 
 # 섹터 키 → 한글 표시명.
