@@ -29,6 +29,49 @@ _BENCHMARKS = {
 }
 
 
+def _vol_outside_benchmarks(market: str) -> str | None:
+    """그 시장 변동성 지수가 `_BENCHMARKS` 로 받아지지 않으면 그 이름, 받아지면 None.
+
+    미국 VIX 는 `^VIX` 로 위 표에 있어 다른 지표와 같은 yf.download · 같은 세션에서
+    나온다. 한국 VKOSPI 는 야후에 없어서(`markets.KR` 주석 참고) 표에 넣을 수 없고,
+    `market_data.volatility_index` 로 따로 받는다 → `price_data["__VOL"]`.
+
+    이름은 시장 정의에서 읽는다. 여기에 'VKOSPI' 를 적지 않는다.
+    """
+    from backend.services.markets import get_market
+    vi = get_market(market).volatility_index or {}
+    bench_syms = {sym for _, sym in _BENCHMARKS.get(market, _BENCHMARKS["US"])}
+    if vi.get("symbol") and vi["symbol"] not in bench_syms:
+        return vi.get("label")
+    return None
+
+
+def _volatility_entry(market: str) -> dict | None:
+    """`price_data["__VOL"]` 한 칸. 값을 못 받았으면 None — 프롬프트가 '데이터 없음' 으로 적는다.
+
+    **기준일을 같이 담는다.** 이 값은 위 yf.download 프레임이 아니라 다른 출처의
+    마지막 행이라, 브리프가 다루는 세션(`_fetch_price_data` 의 `shift` 가 고른다)과
+    날짜가 같다는 보장이 없다. 날짜를 안 적으면 모델은 스냅샷과 같은 날로 읽는다.
+    """
+    try:
+        from backend.services.market_data import volatility_index
+        vi = volatility_index(market)
+    except Exception:
+        # `volatility_index` 는 자기 실패를 value=None 으로 돌려준다. 여기로 오는
+        # 것은 그 바깥(임포트·시장 정의)이 깨진 경우다.
+        logger.warning("변동성 지수 조회가 예외로 끝났다 (market=%s) — 브리프에 없다고 적는다",
+                       market, exc_info=True)
+        return None
+    if vi.get("value") is None:
+        return None          # 원인은 volatility_index 가 경고로 남겼다
+    return {
+        "close":   round(float(vi["value"]), 2),
+        "prev":    vi.get("prev_close"),
+        "chg_pct": vi.get("change_pct"),
+        "as_of":   str(vi["as_of"])[:10] if vi.get("as_of") else None,
+    }
+
+
 def _fetch_price_data(holdings: dict, market: str = "US") -> dict:
     tickers = [t for t in holdings if t != "CASH"]
     if not tickers:
@@ -98,6 +141,12 @@ def _fetch_price_data(holdings: dict, market: str = "US") -> dict:
                     "chg_pct": round((b_now / b_prev - 1) * 100, 2),
                 }
 
+    # 표로 못 받는 변동성 지수(한국 VKOSPI). 미국은 ^VIX 가 표에 있어 부르지 않는다.
+    if _vol_outside_benchmarks(market):
+        vol = _volatility_entry(market)
+        if vol is not None:
+            result["__VOL"] = vol
+
     result["__date"] = close.index[-(1 + shift)].strftime("%Y년 %m월 %d일 (%a)")
     return result
 
@@ -120,6 +169,10 @@ def _fetch_yf_news(ticker: str, max_items: int = 5) -> list[dict]:
                 })
         return out
     except Exception:
+        # 빈 목록은 "이 종목 뉴스 없음" 과 같은 값이라, 조회가 죽어도 프롬프트에는
+        # "수집된 뉴스 없음" 으로만 나간다. 어느 쪽이었는지는 여기에만 남는다.
+        logger.warning("yfinance 뉴스 조회 실패 (%s) — 이 종목 헤드라인 없이 진행",
+                       ticker, exc_info=True)
         return []
 
 
@@ -154,8 +207,81 @@ def _collect_news(price_data: dict) -> dict:
     return {t: _fetch_yf_news(t, max_items=5) for t in stock_keys}
 
 
+def _news_section(news_text: str, kr_press: str | None, web_ctx: str) -> str:
+    """'=== 관련 뉴스 ===' 섹션 본문.
+
+    뉴스는 세 곳에서 온다 — 종목별 yfinance 헤드라인, 한국이면 국내 매체 수집
+    (`_collect_korean_news`), 급등락 종목이 있으면 그 원인 수집. **한 섹션에 모으고
+    '뉴스 없음' 은 셋 다 비었을 때만 적는다.**
+
+    예전에는 뒤의 둘을 `_generate_with_claude` 가 출력 형식 **뒤에** 이어 붙였고,
+    이 섹션은 첫째만 보고 "수집된 뉴스 없음 … 확보하지 못했다고 밝혀라" 를 적었다.
+    한국 종목은 yfinance 뉴스가 거의 비어 있어서, 급등락 원인을 받아 온 한국
+    브리프도 같은 프롬프트 안에서 "뉴스 없음" 지시를 함께 받았다 (미국도 헤드라인이
+    빈 날은 같다). 어느 쪽을 따르라는 말은 프롬프트 어디에도 없었다.
+
+    `kr_press` 는 None 과 "" 가 다르다. None 은 수집하지 않은 경로(미국)이고,
+    "" 는 수집했는데 받은 것이 없다 — 한국 지시문이 "근거는 국내 경제지를 우선한다"
+    고 말하므로, 그 재료가 없다는 것을 적어야 모델이 있는 척 인용하지 않는다.
+    """
+    from backend.services.perplexity import window_notice
+
+    blocks = []
+    if news_text.strip():
+        blocks.append(news_text.strip("\n"))
+    press_missing_at = None
+    if kr_press is not None:
+        if kr_press.strip():
+            # 요청 범위는 `_collect_korean_news` 의 "last 48 hours" 다.
+            blocks.append(f"[국내 매체 수집]\n{window_notice('48시간')}\n{kr_press.strip()}")
+        else:
+            press_missing_at = len(blocks)
+    if web_ctx and web_ctx.strip():
+        # 급등락 원인 질의는 '전일' 을 요청한다.
+        blocks.append(f"[급등락 종목 원인 수집]\n{window_notice('전 거래일')}\n{web_ctx.strip()}")
+
+    if not blocks:
+        return "수집된 뉴스 없음. 뉴스에 근거한 서술을 하지 말고, 뉴스를 확보하지 못했다고 밝혀라."
+    if press_missing_at is not None:
+        blocks.insert(press_missing_at,
+                      "[국내 매체 수집] 받은 것 없음 — 국내 경제지·증권사 보도를 근거로 인용하지 마라.")
+    return "\n\n".join(blocks)
+
+
+def _bench_text(label: str, info: dict | None, unit: str = "") -> str:
+    """매크로 지표 한 칸. **없으면 없다고, 있으면 있는 대로 적는다.**
+
+    예전에는 `info.get('close', '?')` · `info.get('chg_pct', 0)` 이었다. 두 지표 중
+    하나만 빠지면 `원/달러: ? (+0.00%)` 가 나갔다 — `?` 는 모델이 값처럼 인용하고
+    (B2), `+0.00%` 는 '보합' 이라는 관측이다 (§1.3a).
+    """
+    if not info or info.get("close") is None:
+        return f"{label}: 데이터 없음"
+    chg = info.get("chg_pct")
+    move = f"{chg:+.2f}%" if chg is not None else "전일 대비 불명"
+    # 다른 출처에서 온 값(`__VOL`)만 기준일을 들고 온다 (`_volatility_entry`).
+    when = f", {info['as_of']} 기준" if info.get("as_of") else ""
+    return f"{label}: {info['close']}{unit} ({move}{when})"
+
+
+def _macro_line(parts: list[tuple[str, dict | None, str]]) -> str:
+    """매크로 지표 줄. 받은 지표가 **하나도** 없을 때만 '매크로 데이터 없음'.
+
+    예전 미국 줄은 VIX 가 있는지만 보고 줄 전체를 정해서, VIX 가 빠지면 받아 온
+    10년물 금리까지 '매크로 데이터 없음' 으로 사라졌다.
+    """
+    if not any(info and info.get("close") is not None for _, info, _ in parts):
+        return "매크로 데이터 없음"
+    return "  ".join(_bench_text(label, info, unit) for label, info, unit in parts)
+
+
 def _build_prompt(holdings: dict, price_data: dict, news: dict,
-                  market: str = "US") -> str:
+                  market: str = "US", *, kr_press: str | None = None,
+                  web_ctx: str = "") -> str:
+    """브리프 프롬프트. 바깥을 보지 않는다 — 수집은 호출자가 끝내고 넘긴다.
+
+    `kr_press` · `web_ctx` 는 `_news_section` 을 본다.
+    """
     # 통화 포맷을 여기서 다시 만들지 않는다. `cur + 포맷 지정자` 로 조립하면
     # 원화 소수 자릿수 같은 규칙이 이 파일에만 빠지는 사본이 하나 더 생긴다 —
     # `_fmt_amount` 가 프론트와 갈렸던 것이 정확히 그렇게 시작했다 (§1.4).
@@ -187,26 +313,37 @@ def _build_prompt(holdings: dict, price_data: dict, news: dict,
     ]
 
     if is_kr:
-        ks = price_data.get("__KOSPI", {})
-        kq = price_data.get("__KOSDAQ", {})
-        fx = price_data.get("__USDKRW", {})
-        bench_name = "KOSPI"
-        spy_line = (f"KOSPI 전일 변동: {ks.get('chg_pct', 0):+.2f}%"
-                    if ks else "KOSPI 데이터 없음")
-        macro_line = (
-            f"KOSDAQ: {kq.get('close','?')} ({kq.get('chg_pct',0):+.2f}%)  "
-            f"원/달러: {fx.get('close','?')} ({fx.get('chg_pct',0):+.2f}%)"
-        ) if kq or fx else "매크로 데이터 없음"
+        bench_key, bench_name = "KOSPI", "KOSPI"
+        macro_parts = [
+            ("KOSDAQ",  price_data.get("__KOSDAQ"), ""),
+            ("원/달러", price_data.get("__USDKRW"), ""),
+        ]
     else:
-        spy_info   = price_data.get("__SPY", {})
-        vix_info   = price_data.get("__VIX", {})
-        tnx_info   = price_data.get("__TNX", {})
-        bench_name = "S&P 500"
-        spy_line   = f"SPY 전일 변동: {spy_info.get('chg_pct', 0):+.2f}%" if spy_info else "SPY 데이터 없음"
-        macro_line = (
-            f"VIX: {vix_info.get('close','?')} ({vix_info.get('chg_pct',0):+.2f}%)  "
-            f"10Y TNX: {tnx_info.get('close','?')}% ({tnx_info.get('chg_pct',0):+.2f}%)"
-        ) if vix_info else "매크로 데이터 없음"
+        bench_key, bench_name = "SPY", "S&P 500"
+        macro_parts = [
+            ("VIX",     price_data.get("__VIX"), ""),
+            ("10Y TNX", price_data.get("__TNX"), "%"),
+        ]
+    # 그 시장의 변동성 지수가 위 목록에 없으면(한국 VKOSPI) 여기서 더한다. 미국
+    # 브리프에는 VIX 가 있는데 한국 브리프에는 변동성 지표가 하나도 없었다.
+    # 못 받았으면 "VKOSPI: 데이터 없음" 으로 나간다 — 빼지 않는다.
+    vol_label = _vol_outside_benchmarks(market)
+    if vol_label:
+        macro_parts.append((vol_label, price_data.get("__VOL"), ""))
+    macro_line = _macro_line(macro_parts)
+    # 벤치마크 등락도 같은 규칙이다. `.get('chg_pct', 0)` 이면 값이 없을 때 '보합' 이 된다.
+    bench_chg = (price_data.get(f"__{bench_key}") or {}).get("chg_pct")
+    spy_line = (f"{bench_key} 전일 변동: {bench_chg:+.2f}%" if bench_chg is not None
+                else f"{bench_key} 데이터 없음")
+    # 그리고 없으면 비교를 시키지 않는다. 스냅샷은 "KOSPI 데이터 없음" 이라고 적고
+    # 출력 형식은 "[아웃퍼폼/언더퍼폼]" 을 채우라고 하면, 채울 곳은 기억뿐이다.
+    bench_cmp = (
+        f"전일 포트폴리오 전체 자산은 벤치마크({bench_name}) 대비 [아웃퍼폼/언더퍼폼] 했습니다. "
+        "[구체적 수치 포함 1~2문장]"
+        if bench_chg is not None else
+        f"벤치마크({bench_name}) 등락 데이터가 없어 대비 성과는 판단하지 않았습니다. "
+        "[포트폴리오 자체 수치로 1~2문장]"
+    )
 
     news_text = ""
     for t in stock_keys:
@@ -254,7 +391,7 @@ def _build_prompt(holdings: dict, price_data: dict, news: dict,
 절대 변동 3% 이상 종목: {big_movers_str}
 
 === 관련 뉴스 ===
-{news_text if news_text.strip() else "수집된 뉴스 없음. 뉴스에 근거한 서술을 하지 말고, 뉴스를 확보하지 못했다고 밝혀라."}
+{_news_section(news_text, kr_press, web_ctx)}
 
 === 지시사항 ===
 {style_line}
@@ -267,7 +404,7 @@ def _build_prompt(holdings: dict, price_data: dict, news: dict,
 ## 1. 포트폴리오 전일 요약 (Portfolio Snapshot)
 * **최고 상승 종목:** [Ticker] ([+X.XX%])
 * **최대 하락 종목:** [Ticker] ([-X.XX%])
-* **특이 사항:** 전일 포트폴리오 전체 자산은 벤치마크({bench_name}) 대비 [아웃퍼폼/언더퍼폼] 했습니다. [구체적 수치 포함 1~2문장]
+* **특이 사항:** {bench_cmp}
 
 ---
 
@@ -310,6 +447,10 @@ def generate_daily_report(
     """
     anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
     _log = log or (lambda m: print(f"  {m}"))
+    # 키는 **수집 전에** 본다. 예전에는 3단계에서 봐서, 키가 없어도 시세·뉴스를
+    # 다 모으고 한국이면 Perplexity 비용까지 쓴 뒤에 실패했다.
+    if not anthropic_key:
+        raise RuntimeError("ANTHROPIC_API_KEY가 설정되지 않았습니다.")
 
     _log("1/3 가격 데이터 수집 중...")
     price_data = _fetch_price_data(holdings, market)
@@ -319,26 +460,35 @@ def generate_daily_report(
     _log("2/3  뉴스 헤드라인 수집 중...")
     news = _collect_news(price_data)
     # 한국 종목은 yfinance 뉴스가 사실상 비어 있어 국내 매체로 따로 채운다.
-    kr_context = ""
+    #
+    # **받은 것을 프롬프트까지 넘긴다.** 이 수집은 345f240(2026-09-11) 에서
+    # `_generate_with_claude(extra_context=)` 와 함께 들어왔는데 호출부가 그 인자를
+    # 넘기지 않아, 그날부터 한국 브리프마다 국내 매체 수집(Perplexity)을 부르고
+    # 결과는 버렸다. 뉴스 섹션에는 "수집된 뉴스 없음" 이 나갔다.
+    kr_press: str | None = None          # None = 수집하지 않는 시장
     if market == "KR":
         _stocks = [k for k in price_data if not k.startswith("__")]
         try:
             from backend.services.markets import name_map_for
             _names = name_map_for(_stocks, "KR")
         except Exception:
+            # 이름 없이도 코드로 검색은 된다. 다만 국내 기사가 덜 걸리므로 남긴다.
+            logger.warning("국내 매체 수집용 종목명 조회 실패 — 코드로 진행", exc_info=True)
             _names = {}
-        kr_context = _collect_korean_news(_stocks, _names)
+        kr_press = _collect_korean_news(_stocks, _names)
+        if not kr_press:
+            # 원인(키 미설정·호출 실패)은 perplexity.search 가 남겼다. 여기서는
+            # 이 브리프가 국내 매체 없이 나간다는 결과를 남긴다.
+            logger.warning("한국 브리프: 국내 매체 수집 결과 없음 — 프롬프트에 없다고 적는다")
 
     _log("3/3  AI 브리프 생성 중 (약 30~60초)...")
-    if not anthropic_key:
-        raise RuntimeError("ANTHROPIC_API_KEY가 설정되지 않았습니다.")
-
-    report = _generate_with_claude(holdings, price_data, news, anthropic_key, _log, market)
+    report = _generate_with_claude(holdings, price_data, news, anthropic_key, _log, market,
+                                   kr_press=kr_press)
     return report, price_data
 
 
 def _generate_with_claude(holdings, price_data, news, api_key, log,
-                          market: str = "US", extra_context: str = "") -> str:
+                          market: str = "US", kr_press: str | None = None) -> str:
     from anthropic import Anthropic
     client = Anthropic(api_key=api_key)
 
@@ -380,18 +530,11 @@ def _generate_with_claude(holdings, price_data, news, api_key, log,
             except Exception as e:
                 log(f"웹서치 오류 (계속 진행): {e}")
 
-    base_prompt = _build_prompt(holdings, price_data, news, market)
-    from backend.services.perplexity import window_notice
-
-    full_prompt = base_prompt
-    if extra_context:
-        # `_collect_korean_news` 가 요청한 범위.
-        full_prompt += (f"\n\n=== 국내 매체 수집 ===\n{window_notice('48시간')}\n"
-                        f"{extra_context}")
-    if web_ctx:
-        # 급등락 원인 질의는 '전일' 을 요청한다.
-        full_prompt += (f"\n\n=== 웹서치 추가 컨텍스트 ===\n{window_notice('전 거래일')}\n"
-                        f"{web_ctx}")
+    # 수집한 뉴스는 전부 `_build_prompt` 의 뉴스 섹션으로 들어간다. 여기서 프롬프트
+    # 끝에 이어 붙이지 않는다 — 그러면 뉴스 섹션이 "뉴스 없음" 이라고 말하는
+    # 프롬프트 뒤에 뉴스가 붙는다 (`_news_section` 참고).
+    full_prompt = _build_prompt(holdings, price_data, news, market,
+                                kr_press=kr_press, web_ctx=web_ctx)
 
     resp = client.messages.create(
         model="claude-sonnet-4-6",
