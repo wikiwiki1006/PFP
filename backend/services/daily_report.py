@@ -120,6 +120,10 @@ def _fetch_yf_news(ticker: str, max_items: int = 5) -> list[dict]:
                 })
         return out
     except Exception:
+        # 빈 목록은 "이 종목 뉴스 없음" 과 같은 값이라, 조회가 죽어도 프롬프트에는
+        # "수집된 뉴스 없음" 으로만 나간다. 어느 쪽이었는지는 여기에만 남는다.
+        logger.warning("yfinance 뉴스 조회 실패 (%s) — 이 종목 헤드라인 없이 진행",
+                       ticker, exc_info=True)
         return []
 
 
@@ -154,8 +158,54 @@ def _collect_news(price_data: dict) -> dict:
     return {t: _fetch_yf_news(t, max_items=5) for t in stock_keys}
 
 
+def _news_section(news_text: str, kr_press: str | None, web_ctx: str) -> str:
+    """'=== 관련 뉴스 ===' 섹션 본문.
+
+    뉴스는 세 곳에서 온다 — 종목별 yfinance 헤드라인, 한국이면 국내 매체 수집
+    (`_collect_korean_news`), 급등락 종목이 있으면 그 원인 수집. **한 섹션에 모으고
+    '뉴스 없음' 은 셋 다 비었을 때만 적는다.**
+
+    예전에는 뒤의 둘을 `_generate_with_claude` 가 출력 형식 **뒤에** 이어 붙였고,
+    이 섹션은 첫째만 보고 "수집된 뉴스 없음 … 확보하지 못했다고 밝혀라" 를 적었다.
+    한국 종목은 yfinance 뉴스가 거의 비어 있어서, 급등락 원인을 받아 온 한국
+    브리프도 같은 프롬프트 안에서 "뉴스 없음" 지시를 함께 받았다 (미국도 헤드라인이
+    빈 날은 같다). 어느 쪽을 따르라는 말은 프롬프트 어디에도 없었다.
+
+    `kr_press` 는 None 과 "" 가 다르다. None 은 수집하지 않은 경로(미국)이고,
+    "" 는 수집했는데 받은 것이 없다 — 한국 지시문이 "근거는 국내 경제지를 우선한다"
+    고 말하므로, 그 재료가 없다는 것을 적어야 모델이 있는 척 인용하지 않는다.
+    """
+    from backend.services.perplexity import window_notice
+
+    blocks = []
+    if news_text.strip():
+        blocks.append(news_text.strip("\n"))
+    press_missing_at = None
+    if kr_press is not None:
+        if kr_press.strip():
+            # 요청 범위는 `_collect_korean_news` 의 "last 48 hours" 다.
+            blocks.append(f"[국내 매체 수집]\n{window_notice('48시간')}\n{kr_press.strip()}")
+        else:
+            press_missing_at = len(blocks)
+    if web_ctx and web_ctx.strip():
+        # 급등락 원인 질의는 '전일' 을 요청한다.
+        blocks.append(f"[급등락 종목 원인 수집]\n{window_notice('전 거래일')}\n{web_ctx.strip()}")
+
+    if not blocks:
+        return "수집된 뉴스 없음. 뉴스에 근거한 서술을 하지 말고, 뉴스를 확보하지 못했다고 밝혀라."
+    if press_missing_at is not None:
+        blocks.insert(press_missing_at,
+                      "[국내 매체 수집] 받은 것 없음 — 국내 경제지·증권사 보도를 근거로 인용하지 마라.")
+    return "\n\n".join(blocks)
+
+
 def _build_prompt(holdings: dict, price_data: dict, news: dict,
-                  market: str = "US") -> str:
+                  market: str = "US", *, kr_press: str | None = None,
+                  web_ctx: str = "") -> str:
+    """브리프 프롬프트. 바깥을 보지 않는다 — 수집은 호출자가 끝내고 넘긴다.
+
+    `kr_press` · `web_ctx` 는 `_news_section` 을 본다.
+    """
     # 통화 포맷을 여기서 다시 만들지 않는다. `cur + 포맷 지정자` 로 조립하면
     # 원화 소수 자릿수 같은 규칙이 이 파일에만 빠지는 사본이 하나 더 생긴다 —
     # `_fmt_amount` 가 프론트와 갈렸던 것이 정확히 그렇게 시작했다 (§1.4).
@@ -254,7 +304,7 @@ def _build_prompt(holdings: dict, price_data: dict, news: dict,
 절대 변동 3% 이상 종목: {big_movers_str}
 
 === 관련 뉴스 ===
-{news_text if news_text.strip() else "수집된 뉴스 없음. 뉴스에 근거한 서술을 하지 말고, 뉴스를 확보하지 못했다고 밝혀라."}
+{_news_section(news_text, kr_press, web_ctx)}
 
 === 지시사항 ===
 {style_line}
@@ -310,6 +360,10 @@ def generate_daily_report(
     """
     anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
     _log = log or (lambda m: print(f"  {m}"))
+    # 키는 **수집 전에** 본다. 예전에는 3단계에서 봐서, 키가 없어도 시세·뉴스를
+    # 다 모으고 한국이면 Perplexity 비용까지 쓴 뒤에 실패했다.
+    if not anthropic_key:
+        raise RuntimeError("ANTHROPIC_API_KEY가 설정되지 않았습니다.")
 
     _log("1/3 가격 데이터 수집 중...")
     price_data = _fetch_price_data(holdings, market)
@@ -319,26 +373,35 @@ def generate_daily_report(
     _log("2/3  뉴스 헤드라인 수집 중...")
     news = _collect_news(price_data)
     # 한국 종목은 yfinance 뉴스가 사실상 비어 있어 국내 매체로 따로 채운다.
-    kr_context = ""
+    #
+    # **받은 것을 프롬프트까지 넘긴다.** 이 수집은 345f240(2026-09-11) 에서
+    # `_generate_with_claude(extra_context=)` 와 함께 들어왔는데 호출부가 그 인자를
+    # 넘기지 않아, 그날부터 한국 브리프마다 국내 매체 수집(Perplexity)을 부르고
+    # 결과는 버렸다. 뉴스 섹션에는 "수집된 뉴스 없음" 이 나갔다.
+    kr_press: str | None = None          # None = 수집하지 않는 시장
     if market == "KR":
         _stocks = [k for k in price_data if not k.startswith("__")]
         try:
             from backend.services.markets import name_map_for
             _names = name_map_for(_stocks, "KR")
         except Exception:
+            # 이름 없이도 코드로 검색은 된다. 다만 국내 기사가 덜 걸리므로 남긴다.
+            logger.warning("국내 매체 수집용 종목명 조회 실패 — 코드로 진행", exc_info=True)
             _names = {}
-        kr_context = _collect_korean_news(_stocks, _names)
+        kr_press = _collect_korean_news(_stocks, _names)
+        if not kr_press:
+            # 원인(키 미설정·호출 실패)은 perplexity.search 가 남겼다. 여기서는
+            # 이 브리프가 국내 매체 없이 나간다는 결과를 남긴다.
+            logger.warning("한국 브리프: 국내 매체 수집 결과 없음 — 프롬프트에 없다고 적는다")
 
     _log("3/3  AI 브리프 생성 중 (약 30~60초)...")
-    if not anthropic_key:
-        raise RuntimeError("ANTHROPIC_API_KEY가 설정되지 않았습니다.")
-
-    report = _generate_with_claude(holdings, price_data, news, anthropic_key, _log, market)
+    report = _generate_with_claude(holdings, price_data, news, anthropic_key, _log, market,
+                                   kr_press=kr_press)
     return report, price_data
 
 
 def _generate_with_claude(holdings, price_data, news, api_key, log,
-                          market: str = "US", extra_context: str = "") -> str:
+                          market: str = "US", kr_press: str | None = None) -> str:
     from anthropic import Anthropic
     client = Anthropic(api_key=api_key)
 
@@ -380,18 +443,11 @@ def _generate_with_claude(holdings, price_data, news, api_key, log,
             except Exception as e:
                 log(f"웹서치 오류 (계속 진행): {e}")
 
-    base_prompt = _build_prompt(holdings, price_data, news, market)
-    from backend.services.perplexity import window_notice
-
-    full_prompt = base_prompt
-    if extra_context:
-        # `_collect_korean_news` 가 요청한 범위.
-        full_prompt += (f"\n\n=== 국내 매체 수집 ===\n{window_notice('48시간')}\n"
-                        f"{extra_context}")
-    if web_ctx:
-        # 급등락 원인 질의는 '전일' 을 요청한다.
-        full_prompt += (f"\n\n=== 웹서치 추가 컨텍스트 ===\n{window_notice('전 거래일')}\n"
-                        f"{web_ctx}")
+    # 수집한 뉴스는 전부 `_build_prompt` 의 뉴스 섹션으로 들어간다. 여기서 프롬프트
+    # 끝에 이어 붙이지 않는다 — 그러면 뉴스 섹션이 "뉴스 없음" 이라고 말하는
+    # 프롬프트 뒤에 뉴스가 붙는다 (`_news_section` 참고).
+    full_prompt = _build_prompt(holdings, price_data, news, market,
+                                kr_press=kr_press, web_ctx=web_ctx)
 
     resp = client.messages.create(
         model="claude-sonnet-4-6",
