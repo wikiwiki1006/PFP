@@ -80,9 +80,15 @@ def test_kr_prompt_has_no_dollar_sign(prompt: Prompt):
 
 # 한쪽만 검사하면 반대 방향 회귀를 놓친다. 단어 경계를 쓰는 이유는 'Fed' 가
 # 'Federal'·'feed' 안에 들어가 오탐을 내기 때문이다.
+#
+# 변동성 지수도 시장 것이다 (US VIX · KR VKOSPI). 한국 프롬프트의 `VIX` 는 "미국 "
+# 이 바로 앞에 붙어 미국 지표라고 밝힐 때만 허용한다 — 리포트 품질 역할의 제안.
+# 그 세 글자 없이 "VIX 지수: 17.7" 이 한국 프롬프트에 실리면 모델은 그걸 한국
+# 변동성으로 읽는다 (한국 피드백에 실제로 "VIX 지수" 가 붙어 나갔다, f2b7802).
 _US_ONLY_MACRO = [r"\bFed funds\b", r"\bFOMC\b", r"\bFed rate\b",
-                  r"10Y-2Y", r"\bUnemployment\b", r"\bHY spread\b"]
-_KR_ONLY_MACRO = [r"한국은행 기준금리", r"국고채"]
+                  r"10Y-2Y", r"\bUnemployment\b", r"\bHY spread\b",
+                  r"(?<!미국 )\bVIX\b"]
+_KR_ONLY_MACRO = [r"한국은행 기준금리", r"국고채", r"\bVKOSPI\b"]
 
 
 @pytest.mark.parametrize("prompt", _cases())
@@ -257,6 +263,14 @@ def test_placeholder_detector(text, should_match, why):
     (r"\bUnemployment\b", "unemployment insurance", True),
     (r"한국은행 기준금리", "한국은행 기준금리: 2.50%", True),
     (r"국고채", "국고채 3년: 2.61%", True),
+    (r"(?<!미국 )\bVIX\b", "- VIX 지수: 17.7 (정상)", True),
+    (r"(?<!미국 )\bVIX\b", "매크로 지표: VIX: 18.0 (-1.00%)", True),
+    (r"(?<!미국 )\bVIX\b", "시장 변동성(VIX) 변화 요인", True),
+    (r"(?<!미국 )\bVIX\b", "미국 VIX 는 15.7 이다", False),
+    (r"(?<!미국 )\bVIX\b", "- VKOSPI 지수: 43.0 (위험)", False),
+    (r"(?<!미국 )\bVIX\b", "VIXY ETF", False),
+    (r"\bVKOSPI\b", "VKOSPI: 43.02 (-3.11%, 2026-09-17 기준)", True),
+    (r"\bVKOSPI\b", "KOSPI 전일 변동: +0.40%", False),
 ])
 def test_macro_token_detector(pattern, text, should_match):
     assert bool(re.search(pattern, text, re.IGNORECASE)) is should_match
@@ -279,12 +293,41 @@ def test_corpus_covers_every_known_builder():
         "report_writer._equity_prompt_part2",
         "report_writer._industry_prompt",
         "portfolio_optimizer._build_ticker_section",
+        "ai_analysis._analyst_feedback_prompt",
     }
     missing = expected - builders
     assert not missing, f"prompt corpus lost {sorted(missing)} -- rules stopped covering them"
 
     empty = [p.id for p in _CORPUS if not p.text.strip()]
     assert not empty, f"these builders produced an empty prompt: {empty} -- nothing was checked"
+
+
+# 변형 항목이 **그 경로를 실제로 지나는지.** 빌더가 `__VOL` 을 더는 안 그리거나 뉴스
+# 섹션 머리를 바꾸면, 위 규칙들은 그 변형에서 아무것도 안 보고 통과한다. 문구 전체가
+# 아니라 경로의 흔적(섹션 머리 · 지수 이름과 값이 한 줄에)만 본다 — 문장 다듬기는
+# 막지 않는다.
+_PATH_MARKS = {
+    "daily_report._build_prompt(변동성·뉴스)[KR]":
+        [r"\bVKOSPI\b[^\n]*43\.02", r"\[국내 매체 수집\]", r"\[급등락 종목 원인 수집\]"],
+    "daily_report._build_prompt(국내매체-빈수집)[KR]": [r"\[국내 매체 수집\][^\n]*없음"],
+    "daily_report._build_prompt(변동성·뉴스)[US]": [r"\[급등락 종목 원인 수집\]"],
+    "ai_analysis._analyst_feedback_prompt(값)[KR]": [r"^- VKOSPI\b[^\n]*43\.0"],
+    "ai_analysis._analyst_feedback_prompt(값)[US]": [r"^- VIX\b[^\n]*17\.7"],
+    "ai_analysis._analyst_feedback_prompt(값-없음)[KR]": [r"^- VKOSPI\b[^\n]*산출 불가"],
+    "ai_analysis._analyst_feedback_prompt(값-없음)[US]": [r"^- VIX\b[^\n]*산출 불가"],
+}
+
+
+@pytest.mark.parametrize("prompt_id", sorted(_PATH_MARKS))
+def test_corpus_variants_reach_the_path_they_were_added_for(prompt_id):
+    by_id = {p.id: p for p in _CORPUS}
+    assert prompt_id in by_id, f"{prompt_id} is no longer in the corpus"
+    text = by_id[prompt_id].text
+    missing = [m for m in _PATH_MARKS[prompt_id] if not re.search(m, text, re.M)]
+    assert not missing, (
+        f"{prompt_id} no longer renders {missing} -- the rules above now pass on this "
+        "variant without seeing the section it was added to cover"
+    )
 
 
 def test_intercepted_builders_reached_the_model():
