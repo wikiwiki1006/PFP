@@ -290,26 +290,50 @@ def get_scan_universe() -> list[str]:
 
 
 def search_listed(query: str, limit: int = 5) -> list[dict]:
-    """한국 상장 종목 검색. 종목명(한글)과 종목코드 둘 다로 찾는다.
+    """한국 상장 종목 검색. 종목명과 종목코드 둘 다로 찾는다.
 
     사용자는 '삼성전자'로도 '005930'으로도 찾는다. 정렬은 사람이 기대하는
-    순서 — 코드 완전일치 → 이름이 검색어로 시작 → 이름에 포함 — 로 둔다.
+    순서 — 코드·이름 완전일치 → 이름이 검색어로 시작 → 이름에 포함 — 로 둔다.
     '삼성'을 쳤을 때 '삼성전자'보다 '에스원(구 삼성...)'이 위에 오면 안 된다.
+
+    **이름이 두 벌이다.** KRX 상장목록은 정식명('케이티'·'현대자동차'·
+    '한국전력공사'), 화면이 쓰는 이름 사전(name_map)은 통칭('KT'·'현대차'·
+    '한국전력')이다. 예전에는 상장목록만 검색해서, 화면에 'KT' 로 보이는
+    종목을 'KT' 로 치면 상위 5개에 KT 가 없었고(KTcs·KTis…), 'KT&G'·
+    'KODEX 200' 은 결과가 아예 없었다. 한국 화면이 종목을 이름으로만 보여
+    주게 되면서 — 코드를 안 보여 주니 사람은 **보이는 이름**을 친다 — 이
+    어긋남이 곧바로 "못 찾음" 이 됐다. 그리고 목록 첫 줄이 Enter 의 답이라
+    순서가 틀리면 엉뚱한 종목이 골라진다.
+
+    그래서 두 이름 모두로 찾고, 돌려주는 이름은 **화면과 같은 이름**(사전 우선)
+    이다. 사전에만 있는 종목(ETF 등)도 찾는다. 상장목록에 같은 종목이 두 번
+    있는 경우가 있어 티커로 접는다.
     """
     q = (query or "").strip()
     if not q:
         return []
     qu = q.upper()
 
-    exact, starts, contains = [], [], []
+    display = name_map()
+    candidates: dict[str, set[str]] = {}
     for row in get_listed_all():
-        code = row["ticker"].split(".")[0]
-        name = row.get("name", "")
-        if code == q:
+        t = row.get("ticker")
+        if t:
+            candidates.setdefault(t, set()).add(row.get("name", "") or "")
+    for t, n in display.items():
+        candidates.setdefault(t, set()).add(n or "")
+
+    exact, starts, contains = [], [], []
+    for t, names in candidates.items():
+        code = t.split(".")[0]
+        ups = {n.upper() for n in names if n}
+        shown = display.get(t) or next((n for n in sorted(names) if n), "")
+        row = {"ticker": t, "name": shown}
+        if code == q or qu in ups:
             exact.append(row)
-        elif name.startswith(q) or code.startswith(q):
+        elif code.startswith(q) or any(n.startswith(qu) for n in ups):
             starts.append(row)
-        elif q in name or qu in name.upper():
+        elif any(qu in n for n in ups):
             contains.append(row)
 
     # 같은 묶음 안에서는 큰 회사를 먼저 보여준다. 이름 길이로만 정렬하면
@@ -317,12 +341,10 @@ def search_listed(query: str, limit: int = 5) -> list[dict]:
     # 종목코드 순으로 밀린다) — 사용자가 찾던 것은 거의 항상 큰 쪽이다.
     ranks = {t: i for i, t in enumerate(get_scan_universe())}
     big = len(ranks) + 1
-    for group in (starts, contains):
-        group.sort(key=lambda r: (ranks.get(r["ticker"], big),
-                                  len(r.get("name", "")), r["ticker"]))
+    for group in (exact, starts, contains):
+        group.sort(key=lambda r: (ranks.get(r["ticker"], big), len(r["name"]), r["ticker"]))
 
-    merged = (exact + starts + contains)[:limit]
-    return [{"ticker": r["ticker"], "name": r.get("name", "")} for r in merged]
+    return (exact + starts + contains)[:limit]
 
 
 def lookup(ticker: str) -> Optional[dict]:
