@@ -389,16 +389,25 @@ interface Props {
 export default function TickerDetailModal({ initialTicker, onClose }: Props) {
   const C = usePalette()
   const isMobile = useIsMobile()
+  const market = useMarket()
+  const names = useTickerNames()
   const [ticker,   setTicker]   = useState(initialTicker || '')
-  const [query,    setQuery]    = useState(initialTicker || '')
+  // 검색칸에 사용자가 **친** 글자. null 이면 아직 안 쳤다는 뜻이고, 칸에는 지금
+  // 보고 있는 종목을 보여 준다(한국은 이름). 칸에 티커 문자열을 넣어 두면
+  // 한국 종목을 열었을 때 '005930.KS' 가 그대로 보인다 — 이름 사전은 비동기로
+  // 오므로, 값으로 복사해 두지 않고 그릴 때마다 사전에서 읽는다.
+  const [query,    setQuery]    = useState<string | null>(null)
   const [period,   setPeriod]   = useState<Period>('1y')
   const [showMA,   setShowMA]   = useState(true)
   const [showBB,   setShowBB]   = useState(true)
   const [data,     setData]     = useState<TickerDetail | null>(null)
   const [loading,  setLoading]  = useState(false)
   const [error,    setError]    = useState<string | null>(null)
-  const [suggests, setSuggests] = useState<{ ticker: string; name: string }[]>([])
+  const [suggests, setSuggests] = useState<Suggestion[]>([])
   const [showSug,  setShowSug]  = useState(false)
+  const [sugIdx,   setSugIdx]   = useState(-1)
+  const searchRef = useRef<HTMLInputElement>(null)
+  const shownQuery = query ?? selectionLabel(market, ticker, names[ticker])
 
   // ── zoom/pan state ─────────────────────────────────────────────────────
   const [viewStart, setViewStart] = useState(0)
@@ -615,6 +624,7 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
   // ── 자동완성 ─────────────────────────────────────────────────────────────
   const onQueryChange = (v: string) => {
     setQuery(v)
+    setSugIdx(-1)
     if (sugTimer.current) clearTimeout(sugTimer.current)
     if (!v.trim()) { setSuggests([]); return }
     sugTimer.current = setTimeout(async () => {
@@ -622,14 +632,21 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
     }, 250)
   }
 
-  const selectSuggest = (s: { ticker: string; name: string }) => {
-    setQuery(s.ticker); setTicker(s.ticker); setSuggests([]); setShowSug(false)
+  const selectSuggest = (s: Suggestion) => {
+    // 칸은 비워 두지 않고 고른 종목을 보여 준다 — query 를 null 로 돌리면
+    // shownQuery 가 그 종목의 이름(한국)/티커(미국)를 그린다.
+    setQuery(null); setTicker(s.ticker); setSuggests([]); setShowSug(false); setSugIdx(-1)
   }
 
+  /** Enter 와 검색 버튼이 같이 쓴다. 목록이 보이면 목록에서 고른다 —
+   *  예전에는 "하이닉스" 를 그대로 티커로 불러 "데이터 없음" 이 떴다. */
   const onSearch = () => {
-    const sym = query.trim().toUpperCase()
+    const typed = query ?? ''
+    const pick = showSug && suggests.length > 0 ? pickOnEnter(typed, suggests, sugIdx) : null
+    if (pick) { selectSuggest(pick); return }
+    const sym = typed.trim().toUpperCase()
     if (!sym) return
-    setTicker(sym); setSuggests([]); setShowSug(false)
+    setQuery(null); setTicker(sym); setSuggests([]); setShowSug(false); setSugIdx(-1)
   }
 
   // ── 가시 데이터 슬라이스 ─────────────────────────────────────────────────
@@ -729,56 +746,55 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
           {/* 검색창 */}
           <div style={{ position: 'relative', display: 'flex', alignItems: 'center', gap: 0 }}>
             <input
-              value={query}
+              ref={searchRef}
+              value={shownQuery}
               onChange={e => { onQueryChange(e.target.value); setShowSug(true) }}
-              onKeyDown={e => e.key === 'Enter' && onSearch()}
+              onKeyDown={e => {
+                // 한글 조합 중의 키는 IME 몫이다 — 받으면 확정용 Enter 가 검색으로도 처리될 수 있다.
+                if (e.nativeEvent.isComposing) return
+                const listOpen = showSug && suggests.length > 0
+                if (listOpen && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+                  e.preventDefault()
+                  setSugIdx(i => moveHighlight(i, e.key === 'ArrowDown' ? 1 : -1, suggests.length))
+                } else if (listOpen && e.key === 'Escape') {
+                  setShowSug(false); setSugIdx(-1)
+                } else if (e.key === 'Enter') {
+                  e.preventDefault()
+                  onSearch()
+                }
+              }}
               onFocus={() => setShowSug(true)}
-              onBlur={() => setTimeout(() => setShowSug(false), 150)}
-              placeholder="티커 검색 (예: AAPL)"
+              onBlur={() => setTimeout(() => { setShowSug(false); setSugIdx(-1) }, 150)}
+              placeholder={market === 'KR' ? '종목 검색 (예: 삼성전자)' : '티커 검색 (예: AAPL)'}
+              autoComplete="off"
               style={{
                 background: C.inputBg, border: `1px solid ${C.border}`,
                 borderRadius: '6px 0 0 6px', color: C.text, padding: '5px 10px',
                 fontSize: 12, width: 160, outline: 'none',
               }}
             />
-            <button onClick={onSearch}
+            <button
+              // 포커스를 입력칸에 남긴다 — blur 가 목록을 닫는 타이머와 클릭이
+              // 경쟁하면 같은 입력이 Enter 와 다르게 처리될 수 있다.
+              onMouseDown={e => e.preventDefault()}
+              onClick={onSearch}
               style={{
                 background: C.btn, border: 'none', borderRadius: '0 6px 6px 0',
                 color: '#fff', padding: '5px 10px', cursor: 'pointer', display: 'flex',
               }}>
               <Search size={13} />
             </button>
-            {showSug && suggests.length > 0 && (
-              <div style={{
-                position: 'absolute', top: '100%', left: 0, zIndex: 100,
-                background: C.inputBg, border: `1px solid ${C.border}`, borderRadius: 6,
-                minWidth: 220, overflow: 'hidden', marginTop: 2,
-              }}>
-                {suggests.map(s => (
-                  <div key={s.ticker} onClick={() => selectSuggest(s)}
-                    style={{
-                      padding: '7px 12px', cursor: 'pointer', fontSize: 12,
-                      display: 'flex', gap: 8, alignItems: 'center',
-                    }}
-                    onMouseEnter={e => (e.currentTarget.style.background = C.hover)}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                  >
-                    {/* 한국은 이름이 먼저 — 코드만 굵게 보여 주면 무슨 회사인지 알 수 없다. */}
-                    {getMarket() === 'KR' && s.name ? (
-                      <>
-                        <span style={{ color: C.text, fontWeight: 700 }}>{s.name}</span>
-                        <span style={{ color: C.muted, fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.ticker}</span>
-                      </>
-                    ) : (
-                      <>
-                        <span style={{ color: C.text, fontFamily: 'monospace', fontWeight: 700 }}>{s.ticker}</span>
-                        <span style={{ color: C.muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.name}</span>
-                      </>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
+            {/* 목록은 body 로 띄운다 — 이 모달(z 9999) 위에 와야 하고, 모달 본문이
+                overflow 로 자르는 경계에 걸리지 않게. 한국은 이름만 보인다. */}
+            <SuggestionList
+              anchorRef={searchRef}
+              open={showSug}
+              items={suggests}
+              highlighted={sugIdx}
+              onPick={selectSuggest}
+              minWidth={220}
+              palette={{ bg: C.inputBg, border: C.border, text: C.text, muted: C.muted, hover: C.hover }}
+            />
           </div>
 
           {/* 기간 버튼 */}

@@ -12,14 +12,15 @@
  * 종목 입력 단계에서는 현금이 아직 0이지만 매수를 허용해야 하므로, 일반 매매
  * 경로(POST /trades)를 쓰지 않고 등록 전용 경로로 한 번에 보낸다.
  */
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { X, Plus, Trash2, Loader2, AlertTriangle, ArrowRight, Check } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { marketSymbol, MARKETS, getMarket, setMarket, moneyInputProps } from '@/lib/market'
 import { useMarket } from '@/lib/useMarket'
 import { setupPortfolio, getTickerPrice, searchTickers, type SetupHolding } from '@/api'
 import { formatPrice } from '@/lib/market'
-import TickerLabel from '@/components/TickerLabel'
+import SuggestionList from '@/components/SuggestionList'
+import { pickOnEnter, moveHighlight, selectionLabel, type Suggestion } from '@/lib/suggestions'
 
 interface Props {
   open: boolean
@@ -30,6 +31,9 @@ interface Props {
 }
 
 interface Row extends SetupHolding {
+  /** 입력칸에 보이는 글자. `ticker` 는 서버로 보내는 값이다 — 목록에서 한국
+      종목을 고르면 칸에는 이름이, ticker 에는 '005930.KS' 가 들어간다. */
+  label?: string
   /** 티커별 가격 자동조회 진행 표시 */
   loading?: boolean
   error?: string
@@ -43,6 +47,9 @@ const today = () => new Date().toISOString().slice(0, 10)
 
 const emptyRow = (): Row => ({ ticker: '', q: 0, price: 0, date: today() })
 
+/** 목록이 닫힌 행에 넘기는 빈 목록 — 렌더마다 새 배열을 만들지 않는다. */
+const NO_SUGGESTIONS: Suggestion[] = []
+
 // 시장 선택 단계. 등록 절차의 일부가 아니라 그 앞에 오는 선택이라 음수로 둔다 —
 // 이렇게 하면 진행 표시(1·2단계)와 하단 버튼의 `step > 0` 조건을 손대지 않아도 된다.
 const MARKET_STEP = -1
@@ -53,7 +60,8 @@ const money = (n: number) => formatPrice(n)
 export default function SetupWizard({ open, replace = false, onClose, onDone }: Props) {
   // 통화 표기는 시장을 따른다. 한국 화면에 (USD) 라고 적혀 있으면
   // 사용자가 원화를 달러로 잘못 입력한다.
-  const curLabel = useMarket() === 'KR' ? 'KRW' : 'USD' 
+  const market = useMarket()
+  const curLabel = market === 'KR' ? 'KRW' : 'USD'
   // replace(새로 등록)면 경고 단계(0)부터.
   // 최초 등록이면 시장 선택(-1)부터 — 어느 시장에 담는지부터 정해야 한다.
   // 종목을 다 넣은 뒤에 시장을 바꾸면 그 입력이 전부 다른 시장 것이 된다.
@@ -62,7 +70,10 @@ export default function SetupWizard({ open, replace = false, onClose, onDone }: 
   const [cash, setCash]   = useState('')
   const [busy, setBusy]   = useState(false)
   const [error, setError] = useState('')
-  const [sug, setSug]     = useState<{ i: number; list: { ticker: string; name: string }[] }>({ i: -1, list: [] })
+  const [sug, setSug]     = useState<{ i: number; list: Suggestion[] }>({ i: -1, list: [] })
+  const [sugIdx, setSugIdx] = useState(-1)
+  // 제안 목록을 붙일 입력칸 — 행마다 칸이 있어서, 지금 포커스된 칸을 기억한다.
+  const activeInputRef = useRef<HTMLInputElement | null>(null)
 
   if (!open) return null
 
@@ -75,10 +86,10 @@ export default function SetupWizard({ open, replace = false, onClose, onDone }: 
 
   /** 티커를 확정하면 현재가를 받아 '현재가' 참고란에 표시한다.
       매수 단가(price)는 사용자가 직접 입력해야 한다 — 자동으로 채우지 않는다. */
-  const fillPrice = async (i: number, ticker: string) => {
+  const fillPrice = async (i: number, ticker: string, label?: string) => {
     const t = ticker.trim().toUpperCase()
     if (!t) return
-    setRow(i, { ticker: t, loading: true, error: '', currentPrice: undefined })
+    setRow(i, { ticker: t, ...(label != null ? { label } : {}), loading: true, error: '', currentPrice: undefined })
     try {
       const r = await getTickerPrice(t)
       setRow(i, { loading: false, currentPrice: r.price })
@@ -89,11 +100,38 @@ export default function SetupWizard({ open, replace = false, onClose, onDone }: 
 
   const onTickerInput = async (i: number, v: string) => {
     const t = v.toUpperCase()
-    setRow(i, { ticker: t, error: '' })
+    // 직접 친 글자는 그대로 티커 후보다(미국 티커를 끝까지 친 경우). 목록에서
+    // 고르면 pickSuggestion 이 티커로 바꾸고 칸에는 이름을 남긴다.
+    setRow(i, { ticker: t, label: t, error: '' })
+    setSugIdx(-1)
     if (t.length < 1) { setSug({ i: -1, list: [] }); return }
     try {
       setSug({ i, list: await searchTickers(t) })
     } catch { setSug({ i: -1, list: [] }) }
+  }
+
+  const pickSuggestion = (i: number, s: Suggestion) => {
+    setSug({ i: -1, list: [] })
+    setSugIdx(-1)
+    fillPrice(i, s.ticker, selectionLabel(market, s.ticker, s.name))
+  }
+
+  const onTickerKeyDown = (i: number, e: React.KeyboardEvent<HTMLInputElement>) => {
+    const listOpen = sug.i === i && sug.list.length > 0
+    if (!listOpen) return
+    // 한글 조합 중의 키는 IME 몫이다 — 받으면 확정용 Enter 가 선택으로도 처리될 수 있다.
+    if (e.nativeEvent.isComposing) return
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault()
+      setSugIdx(k => moveHighlight(k, e.key === 'ArrowDown' ? 1 : -1, sug.list.length))
+    } else if (e.key === 'Enter') {
+      // 목록이 보이면 Enter 는 목록에서 고른다 (lib/suggestions.ts). 예전에는
+      // Enter 를 받지 않아 "삼성" 이 그대로 남고, 칸을 떠나면 "확인할 수 없는 종목".
+      const pick = pickOnEnter(rows[i]?.label ?? rows[i]?.ticker ?? '', sug.list, sugIdx)
+      if (pick) { e.preventDefault(); pickSuggestion(i, pick) }
+    } else if (e.key === 'Escape') {
+      setSug({ i: -1, list: [] }); setSugIdx(-1)
+    }
   }
 
   const submit = async () => {
@@ -254,11 +292,18 @@ export default function SetupWizard({ open, replace = false, onClose, onDone }: 
                         가격인지도 눈으로 이어 붙여야 한다. */}
                     <div className="relative col-span-2 sm:col-span-1">
                       <input
-                        value={r.ticker}
+                        value={r.label ?? r.ticker}
                         onChange={e => onTickerInput(i, e.target.value)}
-                        onBlur={() => { setTimeout(() => setSug({ i: -1, list: [] }), 150); fillPrice(i, r.ticker) }}
+                        onFocus={e => { activeInputRef.current = e.currentTarget }}
+                        onKeyDown={e => onTickerKeyDown(i, e)}
+                        onBlur={() => { setTimeout(() => { setSug({ i: -1, list: [] }); setSugIdx(-1) }, 150); fillPrice(i, r.ticker) }}
                         placeholder={MARKETS[getMarket()].tickerExample}
-                        className="w-full rounded-lg border border-[#1e2d40] bg-[#0d1526] py-2 pl-3 pr-20 font-mono text-sm text-[#e2e8f0] outline-none focus:border-[#10b981]"
+                        autoComplete="off"
+                        className={cn(
+                          'w-full rounded-lg border border-[#1e2d40] bg-[#0d1526] py-2 pl-3 pr-20 text-sm text-[#e2e8f0] outline-none focus:border-[#10b981]',
+                          // 이름(한글)에는 고정폭을 쓰지 않는다 — 글자 사이가 벌어진다.
+                          market !== 'KR' && 'font-mono',
+                        )}
                       />
                       <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 flex items-center gap-1">
                         {r.loading && <Loader2 size={12} className="animate-spin text-[#10b981]" />}
@@ -301,20 +346,17 @@ export default function SetupWizard({ open, replace = false, onClose, onDone }: 
 
                   {r.error && <p className="mt-1 pl-1 text-[11px] text-[#ef4444]">{r.error}</p>}
 
-                  {sug.i === i && sug.list.length > 0 && (
-                    <div className="absolute left-0 top-full z-20 mt-1 max-h-44 w-72 overflow-y-auto rounded-lg border border-[#1e2d40] bg-[#0b1220] shadow-xl">
-                      {sug.list.map(s => (
-                        <button key={s.ticker}
-                          onMouseDown={() => { setSug({ i: -1, list: [] }); fillPrice(i, s.ticker) }}
-                          className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] transition hover:bg-[#1e2d40]">
-                          {/* 한국은 이름이 먼저 — 코드만 굵게 두면 무슨 회사인지 모른다. */}
-                          <TickerLabel ticker={s.ticker} name={s.name}
-                                       primaryClass="text-[11px] font-bold"
-                                       secondaryClass="text-[10px]" />
-                        </button>
-                      ))}
-                    </div>
-                  )}
+                  {/* 목록은 body 로 띄운다. 예전에는 이 카드 안에 absolute 로 붙여서
+                      스크롤 영역에 갇혔고, 마지막 줄이 하단 '취소' 버튼 밑에 깔려
+                      눌리지 않았다 (실측 5줄 중 4줄만 눌림). 한국은 이름만 보인다. */}
+                  <SuggestionList
+                    anchorRef={activeInputRef}
+                    open={sug.i === i}
+                    items={sug.i === i ? sug.list : NO_SUGGESTIONS}
+                    highlighted={sugIdx}
+                    onPick={s => pickSuggestion(i, s)}
+                    minWidth={288}
+                  />
                 </div>
               ))}
 

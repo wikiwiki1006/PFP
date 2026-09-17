@@ -42,6 +42,8 @@ import { formatPrice, formatCompact, formatMoney, marketSymbol,
 import { useMarket } from '@/lib/useMarket'
 import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
 import TickerLabel from '@/components/TickerLabel'
+import SuggestionList from '@/components/SuggestionList'
+import { pickOnEnter, moveHighlight, selectionLabel, type Suggestion } from '@/lib/suggestions'
 import { marketSession } from '@/lib/marketStorage'
 import type { EquityCurvePoint, PortfolioMetrics } from '@/types'
 
@@ -1075,14 +1077,22 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
   // ── Trade form state ───────────────────────────────────────────────────
   const todayStr = useMemo(() => new Date().toISOString().slice(0, 10), [])
   const [form,        setForm]        = useState({ ticker: '', type: 'BUY', q: 0, price: 0, date: todayStr })
-  const [suggestions, setSuggestions] = useState<{ ticker: string; name: string }[]>([])
+  // 입력칸에 **보이는** 글자. form.ticker 는 거래·시세 조회에 보내는 티커다.
+  // 둘을 한 값으로 두면 한국 종목을 고른 뒤 칸에 '005930.KS' 가 남는다 —
+  // 목록에서 고르면 칸에는 이름을, form.ticker 에는 티커를 넣는다.
+  const [tickerText,  setTickerText]  = useState('')
+  const [suggestions, setSuggestions] = useState<Suggestion[]>([])
   const [showSug,     setShowSug]     = useState(false)
   const [sugIdx,      setSugIdx]      = useState(-1)
   const [tickerError, setTickerError] = useState('')
   const [priceLoading,setPriceLoading]= useState(false)
   // 현재가는 참고용 표시 전용 — form.price(평단가/거래가)에는 자동으로 채우지 않는다.
   const [currentPrice, setCurrentPrice] = useState<number | null>(null)
+  // 입력칸이 두 번 그려진다(데스크탑 하단 바 · 모바일 팝업). 한 ref 를 같이 쓰면
+  // 팝업이 닫힐 때 React 가 ref 를 null 로 비워, 남아 있는 데스크탑 칸의 제안
+  // 목록이 기준 요소를 잃는다. 그래서 칸마다 따로 둔다.
   const tickerInputRef = useRef<HTMLInputElement>(null)
+  const tickerInputRefMobile = useRef<HTMLInputElement>(null)
   // 모바일 전용 — "추가 매수/매도" 팝업 표시 여부
   const [showTradeModal, setShowTradeModal] = useState(false)
 
@@ -1116,6 +1126,7 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
     onSuccess: (_data, vars) => {
       _invalidateAll()
       setForm(f => ({ ...f, ticker: '', q: 0, price: 0, date: new Date().toISOString().slice(0, 10) }))
+      setTickerText('')
       setCurrentPrice(null)
       setTickerError('')
       setShowTradeModal(false)
@@ -1176,6 +1187,9 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
 
   const handleTickerChange = (val: string) => {
     const upper = val.toUpperCase()
+    // 직접 친 글자는 그대로 티커 후보다 — 미국 티커를 끝까지 치고 목록을 안 거쳐도
+    // 예전처럼 거래가 된다. 목록에서 고르면 selectSuggestion 이 티커로 바꾼다.
+    setTickerText(upper)
     setForm(f => ({ ...f, ticker: upper }))
     setTickerError('')
     setSugIdx(-1)
@@ -1191,16 +1205,18 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
     }, 200)
   }
 
-  const selectSuggestion = async (ticker: string) => {
-    setForm(f => ({ ...f, ticker }))
+  const selectSuggestion = async (s: Suggestion) => {
+    const label = selectionLabel(tradeMarket, s.ticker, s.name || names[s.ticker])
+    setForm(f => ({ ...f, ticker: s.ticker }))
+    setTickerText(label)
     setSuggestions([]); setShowSug(false); setSugIdx(-1); setTickerError('')
-    await fetchCurrentPrice(ticker)
+    await fetchCurrentPrice(s.ticker, label)
   }
 
   /** 현재가를 조회해 참고용으로만 표시한다 — form.price(직접 입력하는 거래 단가)는
       건드리지 않는다. 자동으로 채우면 사용자가 알아채지 못하고 오늘 시세를
       그대로 평단가로 등록해버릴 수 있다. */
-  const fetchCurrentPrice = async (ticker: string) => {
+  const fetchCurrentPrice = async (ticker: string, label: string = ticker) => {
     if (!ticker) return
     setPriceLoading(true)
     try {
@@ -1209,8 +1225,9 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
       setTickerError('')
     } catch {
       setCurrentPrice(null)
-      setTickerError(`"${ticker}"은(는) 유효하지 않은 티커입니다. 다시 시도해주세요.`)
+      setTickerError(`"${label}"은(는) 유효하지 않은 종목입니다. 다시 시도해주세요.`)
       setForm(f => ({ ...f, ticker: '' }))
+      setTickerText('')
     } finally {
       setPriceLoading(false)
     }
@@ -1218,15 +1235,18 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
 
   const handleTickerKeyDown = (e: React.KeyboardEvent) => {
     if (!showSug || suggestions.length === 0) return
-    if (e.key === 'ArrowDown') {
+    // 한글 조합 중(isComposing)의 키는 IME 가 조합을 확정하는 입력이다. 여기서
+    // 받으면 확정용 Enter 가 선택으로도 처리될 수 있어 넘긴다. (headless 브라우저는
+    // IME 를 거치지 않아 이 분기는 실측하지 못했다.)
+    if (e.nativeEvent.isComposing) return
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault()
-      setSugIdx(i => Math.min(i + 1, suggestions.length - 1))
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault()
-      setSugIdx(i => Math.max(i - 1, 0))
-    } else if (e.key === 'Enter' && sugIdx >= 0) {
-      e.preventDefault()
-      selectSuggestion(suggestions[sugIdx].ticker)
+      setSugIdx(i => moveHighlight(i, e.key === 'ArrowDown' ? 1 : -1, suggestions.length))
+    } else if (e.key === 'Enter') {
+      // 목록이 보이면 Enter 는 목록에서 고른다 (lib/suggestions.ts 의 규칙).
+      // 예전에는 화살표로 고른 경우만 받아서 "삼성" + Enter 가 아무 일도 안 했다.
+      const pick = pickOnEnter(tickerText, suggestions, sugIdx)
+      if (pick) { e.preventDefault(); selectSuggestion(pick) }
     } else if (e.key === 'Escape') {
       setShowSug(false); setSugIdx(-1)
     }
@@ -1252,7 +1272,7 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
 
   // 매수/매도 입력 필드 — 데스크탑 하단 바와 모바일 팝업이 이 하나를 공유한다.
   // (똑같은 마크업을 두 곳에 따로 두면 나중에 한쪽만 고쳐 어긋나기 쉽다.)
-  const renderTradeFields = (autoFocusTicker = false) => (
+  const renderTradeFields = (inMobilePopup = false) => (
     <>
       {tickerError && (
         <div className="text-[11px] text-[#ef4444] flex items-center gap-1">
@@ -1260,46 +1280,34 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
         </div>
       )}
       <div className="flex items-center gap-2 flex-wrap">
-        {/* Ticker — 전체 미국 티커 검색 */}
+        {/* Ticker — 시장별 상장 종목 검색 (한국은 이름으로도 찾는다) */}
         <div className="relative">
           <input
-            ref={tickerInputRef}
-            autoFocus={autoFocusTicker}
-            value={form.ticker}
+            ref={inMobilePopup ? tickerInputRefMobile : tickerInputRef}
+            autoFocus={inMobilePopup}
+            value={tickerText}
             onChange={e => handleTickerChange(e.target.value)}
             onBlur={handleTickerBlur}
             onKeyDown={handleTickerKeyDown}
             placeholder={MARKETS[tradeMarket].tickerExample}
             autoComplete="off"
-            className="w-32 bg-[#0b1220] border border-[#1e2d40] text-sm font-mono text-[#e2e8f0] rounded px-2 py-1.5 placeholder-[#334155] focus:outline-none focus:border-[#10b981]"
+            className={cn(
+              'w-32 bg-[#0b1220] border border-[#1e2d40] text-sm text-[#e2e8f0] rounded px-2 py-1.5 placeholder-[#334155] focus:outline-none focus:border-[#10b981]',
+              // 이름(한글)에는 고정폭을 쓰지 않는다 — 글자 사이가 벌어진다.
+              tradeMarket !== 'KR' && 'font-mono',
+            )}
           />
-          {/* 목록은 입력칸 **아래**로 편다. 위(bottom-full)에 두면 방금 친 글자를
-              가려서, 무엇을 입력했는지 보면서 고를 수가 없다. */}
-          {showSug && suggestions.length > 0 && (
-            <div className="absolute top-full mt-1 left-0 z-50 max-h-64 overflow-y-auto bg-[#0b1220] border border-[#1e2d40] rounded shadow-xl min-w-[180px]">
-              {suggestions.map((s, idx) => (
-                <button key={s.ticker}
-                  onMouseDown={e => { e.preventDefault(); selectSuggestion(s.ticker) }}
-                  className={cn(
-                    'flex items-center gap-2 w-full text-left px-3 py-2 transition-colors',
-                    idx === sugIdx ? 'bg-[#1e2d40] text-[#e2e8f0]' : 'text-[#cbd5e1] hover:bg-[#0f1e30] hover:text-[#e2e8f0]'
-                  )}>
-                  {/* 보유 목록과 같은 규칙 — 한국은 이름이 먼저, 미국은 티커가 먼저. */}
-                  {tradeMarket === 'KR' && s.name ? (
-                    <>
-                      <span className="font-bold text-[13px] flex-shrink-0">{s.name}</span>
-                      <span className="font-mono text-[11px] text-[#94a3b8] truncate">{s.ticker}</span>
-                    </>
-                  ) : (
-                    <>
-                      <span className="font-mono font-bold text-[13px] flex-shrink-0">{s.ticker}</span>
-                      <span className="text-[11px] text-[#94a3b8] truncate">{s.name}</span>
-                    </>
-                  )}
-                </button>
-              ))}
-            </div>
-          )}
+          {/* 목록은 입력칸 **아래**로 편다 (아래가 모자랄 때만 위로). 보유 패널이
+              overflow-hidden 이라 칸 옆에 absolute 로 붙이면 패널 경계에서 잘려
+              첫 줄만 보였다 — 그래서 body 로 띄운다 (SuggestionList 주석). */}
+          <SuggestionList
+            anchorRef={inMobilePopup ? tickerInputRefMobile : tickerInputRef}
+            open={showSug}
+            items={suggestions}
+            highlighted={sugIdx}
+            onPick={selectSuggestion}
+            minWidth={180}
+          />
         </div>
 
         {/* BUY / SELL */}
@@ -2527,9 +2535,24 @@ export default function AlphaTerminal() {
   }, [])
   const [tickerModal,  setTickerModal]  = useState<string | null>(null)
   const [searchQuery,  setSearchQuery]  = useState('')
-  const [searchSugs,   setSearchSugs]   = useState<{ ticker: string; name: string }[]>([])
+  const [searchSugs,   setSearchSugs]   = useState<Suggestion[]>([])
   const [showTopSugs,  setShowTopSugs]  = useState(false)
+  const [searchIdx,    setSearchIdx]    = useState(-1)
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const searchInputRef = useRef<HTMLInputElement>(null)
+
+  const openTickerModal = (ticker: string) => {
+    setTickerModal(ticker); setSearchQuery(''); setSearchSugs([]); setShowTopSugs(false); setSearchIdx(-1)
+  }
+  /** Enter 와 검색 버튼이 같이 쓴다. 목록이 보이면 목록에서 고른다 —
+   *  예전에는 "삼성" 을 그대로 티커로 열어 모달이 "데이터 없음" 을 띄웠다. */
+  const submitSearch = () => {
+    const listOpen = showTopSugs && searchSugs.length > 0
+    const pick = listOpen ? pickOnEnter(searchQuery, searchSugs, searchIdx) : null
+    if (pick) { openTickerModal(pick.ticker); return }
+    const sym = searchQuery.trim().toUpperCase()
+    if (sym) openTickerModal(sym)
+  }
 
   // 핵심 지표: 60초 주기 (30초는 너무 자주 백엔드 호출)
   // 개인 데이터 쿼리 — 비로그인이면 서버를 부르지 않고(어차피 401) 예시 데이터를
@@ -2669,10 +2692,12 @@ export default function AlphaTerminal() {
       <div data-tour="search" className="flex-shrink-0 bg-[#060b14] border-b border-[#1e2d40] px-4 py-2" style={{ position: 'relative' }}>
         <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
           <input
+            ref={searchInputRef}
             value={searchQuery}
             onChange={e => {
               setSearchQuery(e.target.value)
               setShowTopSugs(true)
+              setSearchIdx(-1)
               if (searchTimer.current) clearTimeout(searchTimer.current)
               if (!e.target.value.trim()) { setSearchSugs([]); return }
               searchTimer.current = setTimeout(async () => {
@@ -2680,44 +2705,44 @@ export default function AlphaTerminal() {
               }, 250)
             }}
             onKeyDown={e => {
-              if (e.key === 'Enter') {
-                const sym = searchQuery.trim().toUpperCase()
-                if (sym) { setTickerModal(sym); setSearchQuery(''); setSearchSugs([]); setShowTopSugs(false) }
+              // 한글 조합 중의 키는 IME 몫이다 — 받으면 확정용 Enter 가 검색으로도 처리될 수 있다.
+              if (e.nativeEvent.isComposing) return
+              const listOpen = showTopSugs && searchSugs.length > 0
+              if (listOpen && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+                e.preventDefault()
+                setSearchIdx(i => moveHighlight(i, e.key === 'ArrowDown' ? 1 : -1, searchSugs.length))
+              } else if (listOpen && e.key === 'Escape') {
+                setShowTopSugs(false); setSearchIdx(-1)
+              } else if (e.key === 'Enter') {
+                e.preventDefault()
+                submitSearch()
               }
             }}
             onFocus={() => setShowTopSugs(true)}
-            onBlur={() => setTimeout(() => setShowTopSugs(false), 150)}
+            onBlur={() => setTimeout(() => { setShowTopSugs(false); setSearchIdx(-1) }, 150)}
             placeholder="종목 검색 (티커·이름)…"
+            autoComplete="off"
             className="bg-[#0b1220] border border-[#1e2d40] text-[#e2e8f0] rounded-l text-[12px] focus:outline-none focus:border-[#10b981]"
             style={{ padding: '5px 10px', width: 280 }}
           />
           <button
-            onClick={() => {
-              const sym = searchQuery.trim().toUpperCase()
-              if (sym) { setTickerModal(sym); setSearchQuery(''); setSearchSugs([]); setShowTopSugs(false) }
-            }}
+            // 누르는 순간 입력칸 포커스를 뺏지 않는다 — 뺏으면 blur 가 목록을 닫는
+            // 타이머와 클릭이 경쟁해, 같은 입력이 Enter 와 다르게 처리될 수 있다.
+            onMouseDown={e => e.preventDefault()}
+            onClick={submitSearch}
             className="bg-[#10b981] hover:bg-[#059669] border border-[#10b981] rounded-r flex items-center gap-1.5 transition-colors"
             style={{ padding: '5px 12px' }}>
             <Search size={13} color="#fff" />
             <span className="text-white text-[11px] font-bold">검색</span>
           </button>
-          {showTopSugs && searchSugs.length > 0 && (
-            <div
-              className="bg-[#0b1220] border border-[#1e2d40]"
-              style={{
-                position: 'absolute', top: '100%', left: 0, zIndex: 1000,
-                borderRadius: 6, minWidth: 300, marginTop: 2, overflow: 'hidden',
-              }}>
-              {searchSugs.map(s => (
-                <div key={s.ticker}
-                  onMouseDown={() => { setTickerModal(s.ticker); setSearchQuery(''); setSearchSugs([]); setShowTopSugs(false) }}
-                  className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-[#1e2d40] text-[11px]">
-                  <TickerLabel ticker={s.ticker} name={names[s.ticker]} primaryClass="text-sm font-bold" />
-                  <span className="text-[#94a3b8] truncate">{s.name}</span>
-                </div>
-              ))}
-            </div>
-          )}
+          <SuggestionList
+            anchorRef={searchInputRef}
+            open={showTopSugs}
+            items={searchSugs}
+            highlighted={searchIdx}
+            onPick={s => openTickerModal(s.ticker)}
+            minWidth={300}
+          />
         </div>
       </div>
 

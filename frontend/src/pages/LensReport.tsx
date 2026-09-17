@@ -19,8 +19,10 @@ import { useAuth } from '@/lib/AuthContext'
 import { useFeatures } from '@/lib/useFeatures'
 import { useMarket } from '@/lib/useMarket'
 import { marketSession } from '@/lib/marketStorage'
-import TickerLabel from '@/components/TickerLabel'
 import { getMarket } from '@/lib/market'
+import { useTickerNames } from '@/lib/useTickerNames'
+import SuggestionList from '@/components/SuggestionList'
+import { pickOnEnter, moveHighlight, selectionLabel } from '@/lib/suggestions'
 
 // ── sessionStorage 키 ──────────────────────────────────────────────────────────
 const EQ_JOB_ID  = 'lens_eq_job_id'
@@ -495,7 +497,16 @@ function EquityTab() {
   // 리포트 생성·과거 이력은 로그인이 필요하다. 예시 리포트는 만들지 않는다 —
   // 로그인 전에는 결과도 이력도 비어 있고, 버튼을 누르면 로그인을 요구한다.
   const { isAuthed, requireLogin, modalEl } = useLoginPrompt()
+  const names = useTickerNames()
+  // ticker 는 리포트를 요청할 티커, tickerText 는 입력칸에 **친** 글자다.
+  // tickerText 가 null 이면 아직 안 쳤다는 뜻이고 칸에는 ticker 의 이름(한국)을
+  // 그린다 — 목록에서 한국 종목을 고르면 칸에 '005930.KS' 가 남던 자리다.
+  // 이름 사전은 비동기로 오므로 값으로 복사하지 않고 그릴 때 읽는다.
   const [ticker,    setTicker]    = useState(() => marketSession.get(EQ_TICKER) || '')
+  const [tickerText, setTickerText] = useState<string | null>(null)
+  const shownTicker = tickerText ?? selectionLabel(market, ticker, names[ticker])
+  const [sugIdx,    setSugIdx]    = useState(-1)
+  const tickerInputRef = useRef<HTMLInputElement>(null)
   const [modelTier, setModelTier] = useState(() => marketSession.get(EQ_TIER)   || 'basic')
   const [jobId,  setJobId]    = useState<string | null>(() => marketSession.get(EQ_JOB_ID))
   const [result, setResult]   = useState<EquityResult | null>(() => {
@@ -512,13 +523,23 @@ function EquityTab() {
   const wantCancelRef   = useRef(false)
   const autoStartedRef  = useRef(false)
 
-  // 티커 자동완성
+  // 티커 자동완성 — 칸에 보이는 글자로 찾는다.
   const tickerSearchQ = useQuery({
-    queryKey: ['ticker-search', ticker],
-    queryFn:  () => searchTickers(ticker),
-    enabled:  ticker.length >= 2 && showDropdown,
+    queryKey: ['ticker-search', shownTicker],
+    queryFn:  () => searchTickers(shownTicker),
+    enabled:  shownTicker.length >= 2 && showDropdown,
     staleTime: 30_000,
   })
+  const sugList = tickerSearchQ.data ?? []
+  const sugOpen = showDropdown && sugList.length > 0
+
+  const selectTicker = (item: { ticker: string; name: string }) => {
+    setTicker(item.ticker)
+    setTickerText(null)
+    marketSession.set(EQ_TICKER, item.ticker)
+    setShowDropdown(false)
+    setSugIdx(-1)
+  }
 
   // 히스토리
   const histQ = useQuery({
@@ -544,9 +565,10 @@ function EquityTab() {
     },
   })
 
-  // 잡 시작 뮤테이션
+  // 잡 시작 뮤테이션 — 티커를 **인자로** 받는다. 클로저의 ticker 를 읽으면,
+  // Enter 로 목록에서 고른 직후 같은 핸들러에서 시작할 때 고르기 전 글자가 간다.
   const startMut = useMutation({
-    mutationFn: () => startEquityReport({ ticker, model_tier: modelTier }),
+    mutationFn: (t: string) => startEquityReport({ ticker: t, model_tier: modelTier }),
     onSuccess: ({ job_id }) => {
       if (wantCancelRef.current) {
         wantCancelRef.current = false
@@ -625,7 +647,7 @@ function EquityTab() {
     const hasJobId   = !!marketSession.get(EQ_JOB_ID)
     if (hasPending && !hasJobId && ticker.trim()) {
       autoStartedRef.current = true
-      startMut.mutate()
+      startMut.mutate(ticker)
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -657,8 +679,8 @@ function EquityTab() {
   }
 
   // 시작 핸들러
-  const startAnalysis = () => {
-    marketSession.set(EQ_TICKER,  ticker)
+  const startAnalysis = (t: string = ticker) => {
+    marketSession.set(EQ_TICKER,  t)
     marketSession.set(EQ_TIER,    modelTier)
     marketSession.set(EQ_START,   String(Date.now()))
     marketSession.set(EQ_PENDING, '1')
@@ -669,7 +691,7 @@ function EquityTab() {
     setJobId(null)
     setProgress(0)
     setElapsedMs(0)
-    startMut.mutate()
+    startMut.mutate(t)
   }
 
   // PDF 다운로드
@@ -792,41 +814,60 @@ function EquityTab() {
           )}>
             <Search className="w-3.5 h-3.5 text-[#475569] flex-shrink-0" />
             <input
-              value={ticker}
+              ref={tickerInputRef}
+              value={shownTicker}
               onChange={e => {
-                setTicker(e.target.value.toUpperCase())
+                const v = e.target.value.toUpperCase()
+                // 직접 친 글자는 그대로 요청 후보다 (미국 티커를 끝까지 친 경우).
+                setTickerText(v)
+                setTicker(v)
                 setShowDropdown(true)
+                setSugIdx(-1)
               }}
               onFocus={() => setShowDropdown(true)}
-              onBlur={() => setTimeout(() => setShowDropdown(false), 200)}
-              onKeyDown={e => { if (e.key === 'Enter' && ticker.trim() && !isRunning) startAnalysis() }}
+              onBlur={() => setTimeout(() => { setShowDropdown(false); setSugIdx(-1) }, 200)}
+              onKeyDown={e => {
+                // 한글 조합 중의 키는 IME 몫이다 — 받으면 확정용 Enter 가 시작으로도 처리될 수 있다.
+                if (e.nativeEvent.isComposing) return
+                if (sugOpen && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+                  e.preventDefault()
+                  setSugIdx(i => moveHighlight(i, e.key === 'ArrowDown' ? 1 : -1, sugList.length))
+                  return
+                }
+                if (sugOpen && e.key === 'Escape') { setShowDropdown(false); setSugIdx(-1); return }
+                if (e.key !== 'Enter' || isRunning) return
+                // 목록이 보이면 목록에서 고른 종목으로 시작한다. 예전에는 "삼성" 을
+                // 그대로 티커로 보내 "종목 정보 없음" 으로 끝났다.
+                const pick = sugOpen ? pickOnEnter(shownTicker, sugList, sugIdx) : null
+                if (pick) {
+                  e.preventDefault()
+                  selectTicker(pick)
+                  startAnalysis(pick.ticker)
+                  return
+                }
+                if (ticker.trim()) startAnalysis()
+              }}
               placeholder={market === 'KR'
                 ? "종목 검색 (예: 삼성전자, SK하이닉스)"
                 : "티커 검색 (예: AAPL, NVDA, TSLA)"}
               readOnly={isRunning}
-              className="flex-1 bg-transparent text-sm font-mono text-[#e2e8f0] focus:outline-none placeholder-[#374151]"
+              autoComplete="off"
+              className={cn(
+                'flex-1 bg-transparent text-sm text-[#e2e8f0] focus:outline-none placeholder-[#374151]',
+                // 이름(한글)에는 고정폭을 쓰지 않는다 — 글자 사이가 벌어진다.
+                market !== 'KR' && 'font-mono',
+              )}
             />
           </div>
-          {showDropdown && tickerSearchQ.data && tickerSearchQ.data.length > 0 && (
-            <div className="absolute z-20 w-full mt-1 bg-[#0a1628] border border-[#1e2d40] rounded-lg shadow-xl overflow-hidden">
-              {tickerSearchQ.data.map(item => (
-                <button
-                  key={item.ticker}
-                  onMouseDown={() => {
-                    setTicker(item.ticker)
-                    marketSession.set(EQ_TICKER, item.ticker)
-                    setShowDropdown(false)
-                  }}
-                  className="w-full text-left px-3 py-2 hover:bg-[#0f172a] transition-colors flex items-center gap-3 border-b border-[#0f172a] last:border-0"
-                >
-                  {/* 한국은 이름이 주, 코드가 보조 */}
-                  <TickerLabel ticker={item.ticker} name={item.name}
-                               primaryClass="text-xs font-bold" secondaryClass="text-[10px]"
-                               className="min-w-0 flex-1" />
-                </button>
-              ))}
-            </div>
-          )}
+          {/* 목록은 body 로 띄운다 (SuggestionList 주석). 한국은 이름만 보인다. */}
+          <SuggestionList
+            anchorRef={tickerInputRef}
+            open={showDropdown && !isRunning}
+            items={sugList}
+            highlighted={sugIdx}
+            onPick={selectTicker}
+            minWidth={260}
+          />
         </div>
 
         <div className="flex flex-wrap items-end gap-3">
