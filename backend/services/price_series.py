@@ -19,6 +19,8 @@ services/price_series.py
 """
 from __future__ import annotations
 
+import logging
+import time as _time
 from datetime import datetime
 from functools import lru_cache
 from typing import NamedTuple, Optional
@@ -62,6 +64,8 @@ class PortfolioChange(NamedTuple):
     holdings_n: int                      # 구해야 했던 종목 수 (CASH 제외, 수량>0)
     stale:      tuple[str, ...]          # 자기 시장 기준 뒤처진 종목
 
+
+_logger = logging.getLogger(__name__)
 
 def _market_now(ticker: str, now: Optional[datetime]) -> datetime:
     """티커가 상장된 거래소 기준 현재 시각.
@@ -252,6 +256,9 @@ def last_price(
     return float(s.iloc[-1])
 
 
+_BEHIND_CHECK_ERR_AT = 0.0
+
+
 def _is_behind_own_market(
     ticker: str, as_of: pd.Timestamp, now: Optional[datetime],
 ) -> bool:
@@ -282,6 +289,15 @@ def _is_behind_own_market(
     except Exception:
         # 캘린더를 못 읽으면 "뒤처졌다" 고 단정하지 않는다 — 없는 결손을
         # 만드는 것이 빠뜨리는 것보다 나쁘다.
+        #
+        # 다만 **열었다는 사실은 남긴다** (§1.3c). 예전에는 로그가 없어서 이
+        # 판정이 꺼진 채로 돌아도 아무도 몰랐다. 종목마다 불리므로 10분에 한 번.
+        global _BEHIND_CHECK_ERR_AT
+        now_ts = _time.time()
+        if now_ts - _BEHIND_CHECK_ERR_AT >= 600:
+            _BEHIND_CHECK_ERR_AT = now_ts
+            _logger.warning("기준일 뒤처짐 판정 불가 — 캘린더 오류, 뒤처지지 않은 것으로 둔다 "
+                            "(%s, 10분에 한 번만 기록)", ticker, exc_info=True)
         return False
 
 
