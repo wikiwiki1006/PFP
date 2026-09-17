@@ -29,6 +29,49 @@ _BENCHMARKS = {
 }
 
 
+def _vol_outside_benchmarks(market: str) -> str | None:
+    """그 시장 변동성 지수가 `_BENCHMARKS` 로 받아지지 않으면 그 이름, 받아지면 None.
+
+    미국 VIX 는 `^VIX` 로 위 표에 있어 다른 지표와 같은 yf.download · 같은 세션에서
+    나온다. 한국 VKOSPI 는 야후에 없어서(`markets.KR` 주석 참고) 표에 넣을 수 없고,
+    `market_data.volatility_index` 로 따로 받는다 → `price_data["__VOL"]`.
+
+    이름은 시장 정의에서 읽는다. 여기에 'VKOSPI' 를 적지 않는다.
+    """
+    from backend.services.markets import get_market
+    vi = get_market(market).volatility_index or {}
+    bench_syms = {sym for _, sym in _BENCHMARKS.get(market, _BENCHMARKS["US"])}
+    if vi.get("symbol") and vi["symbol"] not in bench_syms:
+        return vi.get("label")
+    return None
+
+
+def _volatility_entry(market: str) -> dict | None:
+    """`price_data["__VOL"]` 한 칸. 값을 못 받았으면 None — 프롬프트가 '데이터 없음' 으로 적는다.
+
+    **기준일을 같이 담는다.** 이 값은 위 yf.download 프레임이 아니라 다른 출처의
+    마지막 행이라, 브리프가 다루는 세션(`_fetch_price_data` 의 `shift` 가 고른다)과
+    날짜가 같다는 보장이 없다. 날짜를 안 적으면 모델은 스냅샷과 같은 날로 읽는다.
+    """
+    try:
+        from backend.services.market_data import volatility_index
+        vi = volatility_index(market)
+    except Exception:
+        # `volatility_index` 는 자기 실패를 value=None 으로 돌려준다. 여기로 오는
+        # 것은 그 바깥(임포트·시장 정의)이 깨진 경우다.
+        logger.warning("변동성 지수 조회가 예외로 끝났다 (market=%s) — 브리프에 없다고 적는다",
+                       market, exc_info=True)
+        return None
+    if vi.get("value") is None:
+        return None          # 원인은 volatility_index 가 경고로 남겼다
+    return {
+        "close":   round(float(vi["value"]), 2),
+        "prev":    vi.get("prev_close"),
+        "chg_pct": vi.get("change_pct"),
+        "as_of":   str(vi["as_of"])[:10] if vi.get("as_of") else None,
+    }
+
+
 def _fetch_price_data(holdings: dict, market: str = "US") -> dict:
     tickers = [t for t in holdings if t != "CASH"]
     if not tickers:
@@ -97,6 +140,12 @@ def _fetch_price_data(holdings: dict, market: str = "US") -> dict:
                     "prev":    round(b_prev, 2),
                     "chg_pct": round((b_now / b_prev - 1) * 100, 2),
                 }
+
+    # 표로 못 받는 변동성 지수(한국 VKOSPI). 미국은 ^VIX 가 표에 있어 부르지 않는다.
+    if _vol_outside_benchmarks(market):
+        vol = _volatility_entry(market)
+        if vol is not None:
+            result["__VOL"] = vol
 
     result["__date"] = close.index[-(1 + shift)].strftime("%Y년 %m월 %d일 (%a)")
     return result
@@ -210,7 +259,9 @@ def _bench_text(label: str, info: dict | None, unit: str = "") -> str:
         return f"{label}: 데이터 없음"
     chg = info.get("chg_pct")
     move = f"{chg:+.2f}%" if chg is not None else "전일 대비 불명"
-    return f"{label}: {info['close']}{unit} ({move})"
+    # 다른 출처에서 온 값(`__VOL`)만 기준일을 들고 온다 (`_volatility_entry`).
+    when = f", {info['as_of']} 기준" if info.get("as_of") else ""
+    return f"{label}: {info['close']}{unit} ({move}{when})"
 
 
 def _macro_line(parts: list[tuple[str, dict | None, str]]) -> str:
@@ -263,16 +314,23 @@ def _build_prompt(holdings: dict, price_data: dict, news: dict,
 
     if is_kr:
         bench_key, bench_name = "KOSPI", "KOSPI"
-        macro_line = _macro_line([
+        macro_parts = [
             ("KOSDAQ",  price_data.get("__KOSDAQ"), ""),
             ("원/달러", price_data.get("__USDKRW"), ""),
-        ])
+        ]
     else:
         bench_key, bench_name = "SPY", "S&P 500"
-        macro_line = _macro_line([
+        macro_parts = [
             ("VIX",     price_data.get("__VIX"), ""),
             ("10Y TNX", price_data.get("__TNX"), "%"),
-        ])
+        ]
+    # 그 시장의 변동성 지수가 위 목록에 없으면(한국 VKOSPI) 여기서 더한다. 미국
+    # 브리프에는 VIX 가 있는데 한국 브리프에는 변동성 지표가 하나도 없었다.
+    # 못 받았으면 "VKOSPI: 데이터 없음" 으로 나간다 — 빼지 않는다.
+    vol_label = _vol_outside_benchmarks(market)
+    if vol_label:
+        macro_parts.append((vol_label, price_data.get("__VOL"), ""))
+    macro_line = _macro_line(macro_parts)
     # 벤치마크 등락도 같은 규칙이다. `.get('chg_pct', 0)` 이면 값이 없을 때 '보합' 이 된다.
     bench_chg = (price_data.get(f"__{bench_key}") or {}).get("chg_pct")
     spy_line = (f"{bench_key} 전일 변동: {bench_chg:+.2f}%" if bench_chg is not None
