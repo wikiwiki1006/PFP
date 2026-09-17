@@ -20,8 +20,10 @@ DB 를 둔 것이 그걸 가능하게 하려는 것이다.
 """
 from __future__ import annotations
 
+import asyncio.proactor_events
 import socket
 import uuid
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -49,11 +51,67 @@ import backend.db as db
 # 지금 아무 테스트도 깨뜨리지 않으면서 그 부류를 통째로 막는다.
 #
 # localhost 는 연다. 실DB 테스트가 로컬 도커 postgres 를 쓴다.
+#
+# ## 파이썬 소켓만 막으면 C 로 나가는 길이 샌다
+#
+# `socket.socket.connect` 는 파이썬이 여는 연결만 본다. 두 길이 그걸 지나지
+# 않는다 — 둘 다 이 가드를 건 채로 실제로 나가는 것을 재현했다:
+#
+#   curl_cffi   yfinance 1.4 가 쓰는 HTTP 클라이언트. libcurl 이 C 에서 소켓을
+#               연다. `yf.Ticker("^VIX").history("5d")` 가 5행을 받아 왔고
+#               같은 프로세스의 `requests` 는 막혔다.
+#   asyncio     윈도우 기본 루프(Proactor)는 `ConnectEx` 로 연결한다.
+#               `asyncio.open_connection` 이 OutboundBlocked 대신 타임아웃이
+#               됐다. (리눅스 셀렉터 루프는 `sock.connect` 를 불러 원래 막힌다.)
+#
+# 그래서 셋을 건다. curl 은 요청 URL 을 넣는 `Curl.setopt(CurlOpt.URL)` —
+# 동기·비동기·웹소켓이 전부 이 한 곳을 지난다. asyncio 는 `sock_connect`.
+#
+# **이 가드가 안 덮는 것**: 다른 C 확장이 여는 연결(grpc 코어 등 — 지금
+# 백엔드는 쓰지 않는다), 그리고 curl 에서 URL 은 로컬인데 프록시 옵션으로
+# 바깥에 붙는 경우.
 _LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0", ""}
 
 
 class OutboundBlocked(RuntimeError):
     """테스트가 바깥으로 연결을 시도했다."""
+
+
+# 막은 시도를 **어느 테스트가** 했는지 남기고, 그 테스트를 실패시킨다.
+#
+# 막기만 하면 부족하다. 호출한 코드가 예외를 폴백으로 삼키면 테스트는 초록이고
+# "나가려 했다" 는 사실은 어디에도 안 남는다 — 위의 18번이 그렇게 숨어 있었다.
+# curl 가드를 걸고 재 보니 게이트마다 야후로 3번 나가고 있었다 (KRX 관측
+# 캘린더). 기대고 있던 테스트는 둘이다: 하나는 `in (True, False)` 라는 늘 참인
+# 단언이라 통과했고, 다른 하나는 **앞 테스트가 받아 온 캘린더를 프로세스 메모로
+# 물려받아** 통과했다 — 혼자 돌리면 그 자신이 나갔고, 오프라인이면 실패했다.
+# 결과가 네트워크 상태와 실행 순서에 달려 있었다.
+#
+# 그래서 테스트 안에서 막힌 시도는 그 테스트의 **teardown 오류**가 된다.
+# 가드를 일부러 건드리는 검사는 `refused_outbound` 로 시도를 받아 간다.
+# 어느 테스트의 검사 구간에도 들지 않은 시도(수집 중·테스트 사이·모듈 범위
+# 픽스처 준비)는 세션을 실패로 만든다.
+#
+# 한계: 테스트가 끝난 뒤에도 도는 백그라운드 스레드의 시도는 그다음 테스트에
+# 붙는다. 그런 오류가 나면 앞 테스트가 띄운 스레드부터 본다. 그리고 프로세스
+# 메모가 있는 경로는 **처음 부른 테스트만** 나간다 — 오류는 그 테스트에 뜬다.
+_ATTEMPTS: list[tuple[str, str, str]] = []          # (테스트, 경로, 호스트)
+_CLAIMED: set[int] = set()                           # 일부러 낸 시도
+_OWNED: set[int] = set()                             # 어느 테스트의 검사 구간에 든 시도
+_OUTSIDE_TESTS = ("(수집 중)", "(테스트 사이)")
+_RUNNING = [_OUTSIDE_TESTS[0]]
+
+
+def _refuse(via: str, host: str) -> OutboundBlocked:
+    _ATTEMPTS.append((_RUNNING[0], via, host))
+    return OutboundBlocked(
+        f"a test tried to reach {host} via {via}. Tests must not use the network: "
+        "the result stops being deterministic, and five windows running "
+        "the gate together will trip the same rate limit. Mock the entry "
+        "point this code path actually uses -- note that two functions "
+        "with similar names often do not share one. "
+        "(테스트가 바깥으로 나갔다.)"
+    )
 
 
 def _host_of(address) -> str:
@@ -64,27 +122,65 @@ def _host_of(address) -> str:
 
 _real_connect = socket.socket.connect
 _real_connect_ex = socket.socket.connect_ex
+_real_proactor_sock_connect = asyncio.proactor_events.BaseProactorEventLoop.sock_connect
 
 
 def _guard(self, address, *args, **kwargs):
     host = _host_of(address)
     if host not in _LOCAL_HOSTS:
-        raise OutboundBlocked(
-            f"a test tried to reach {host}. Tests must not use the network: "
-            "the result stops being deterministic, and five windows running "
-            "the gate together will trip the same rate limit. Mock the entry "
-            "point this code path actually uses -- note that two functions "
-            "with similar names often do not share one. "
-            "(테스트가 바깥으로 나갔다.)"
-        )
+        raise _refuse("socket", host)
     return _real_connect(self, address, *args, **kwargs)
 
 
 def _guard_ex(self, address, *args, **kwargs):
     host = _host_of(address)
     if host not in _LOCAL_HOSTS:
-        raise OutboundBlocked(f"a test tried to reach {host}")
+        raise _refuse("socket", host)
     return _real_connect_ex(self, address, *args, **kwargs)
+
+
+async def _guard_proactor(self, sock, address):
+    host = _host_of(address)
+    if host not in _LOCAL_HOSTS:
+        raise _refuse("asyncio", host)
+    return await _real_proactor_sock_connect(self, sock, address)
+
+
+def _curl_url_host(value) -> str:
+    raw = value.decode("utf-8", "replace") if isinstance(value, (bytes, bytearray)) else str(value)
+    try:
+        return (urlsplit(raw).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+_curl_restore = None
+
+
+def _install_curl_guard() -> None:
+    """curl_cffi 가 없으면 걸 곳도 새는 길도 없다."""
+    global _curl_restore
+    try:
+        from curl_cffi.curl import Curl, CurlOpt
+    except ImportError:
+        return
+    real_setopt = Curl.setopt
+
+    def guarded_setopt(self, option, value):
+        if option == CurlOpt.URL:
+            host = _curl_url_host(value)
+            # URL 에서 호스트를 못 읽으면 로컬로 치지 않는다 — 소켓 쪽의 "" 는
+            # '모든 인터페이스' 지만 URL 에서는 '모름' 이다.
+            if not host or host not in _LOCAL_HOSTS:
+                raise _refuse("curl_cffi", host or repr(value)[:80])
+        return real_setopt(self, option, value)
+
+    Curl.setopt = guarded_setopt
+
+    def restore():
+        Curl.setopt = real_setopt
+
+    _curl_restore = restore
 
 
 def pytest_configure(config):
@@ -97,11 +193,90 @@ def pytest_configure(config):
     """
     socket.socket.connect = _guard
     socket.socket.connect_ex = _guard_ex
+    asyncio.proactor_events.BaseProactorEventLoop.sock_connect = _guard_proactor
+    _install_curl_guard()
 
 
 def pytest_unconfigure(config):
     socket.socket.connect = _real_connect
     socket.socket.connect_ex = _real_connect_ex
+    asyncio.proactor_events.BaseProactorEventLoop.sock_connect = _real_proactor_sock_connect
+    if _curl_restore is not None:
+        _curl_restore()
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_protocol(item, nextitem):
+    _RUNNING[0] = item.nodeid
+    yield
+    _RUNNING[0] = _OUTSIDE_TESTS[1]
+
+
+@pytest.fixture
+def refused_outbound():
+    """가드를 **일부러** 건드리는 검사용. 부르면 이 테스트에서 막힌 시도를
+    `[(경로, 호스트)]` 로 돌려주고, 그것들을 의도한 것으로 표시한다.
+
+    부르지 않으면 그 시도는 아래 자동 검사에 걸린다 — 가드 검사도 자기가 무엇을
+    막았는지 확인하게 하려는 것이다.
+    """
+    start = len(_ATTEMPTS)
+
+    def seen() -> list[tuple[str, str]]:
+        end = len(_ATTEMPTS)
+        _CLAIMED.update(range(start, end))
+        return [(via, host) for _, via, host in _ATTEMPTS[start:end]]
+
+    return seen
+
+
+@pytest.fixture(autouse=True)
+def _outbound_attempt_fails_the_test():
+    start = len(_ATTEMPTS)
+    yield
+    end = len(_ATTEMPTS)
+    _OWNED.update(range(start, end))
+    stray = [(via, host) for i, (_, via, host) in enumerate(_ATTEMPTS[start:end], start)
+             if i not in _CLAIMED]
+    if stray:
+        pytest.fail(
+            f"this test tried to reach the network and was refused: {sorted(set(stray))}. "
+            "The code under test may have swallowed the refusal, in which case the test "
+            "passed while measuring its offline fallback -- and outside the guard its "
+            "result depended on the network. Mock the entry point the code actually uses. "
+            "(테스트가 바깥으로 나가려 했다 — 막혔지만 삼켜졌을 수 있다)",
+            pytrace=False,
+        )
+
+
+def _unowned() -> list[int]:
+    return [i for i in range(len(_ATTEMPTS)) if i not in _CLAIMED and i not in _OWNED]
+
+
+def pytest_sessionfinish(session, exitstatus):
+    if _unowned() and session.exitstatus == 0:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    """의도하지 않은 시도만 적는다. 가드 검사가 일부러 낸 시도까지 매번 찍으면
+    게이트 출력에 늘 뜨는 줄이 되고, 늘 뜨는 줄은 곧 아무도 안 읽는다."""
+    unowned = set(_unowned())
+    by_test: dict[str, list[str]] = {}
+    for i, (test, via, host) in enumerate(_ATTEMPTS):
+        if i not in _CLAIMED:
+            mark = " (no test owns this)" if i in unowned else ""
+            by_test.setdefault(test, []).append(f"{via}:{host}{mark}")
+    if not by_test:
+        return
+    terminalreporter.section("outbound attempts refused by the network guard")
+    for test, hits in by_test.items():
+        terminalreporter.line(f"{test}  x{len(hits)}  {sorted(set(hits))}")
+    if unowned:
+        terminalreporter.line(
+            "attempts marked 'no test owns this' happened at import/collection, in a "
+            "module- or session-scoped fixture, or in a leftover thread -- the session is "
+            "marked failed because no single test reported them.", red=True)
 
 # 원격이면 아무것도 하지 않는다. Neon 에는 실사용자 데이터가 있고
 # (users 12 · holdings 30 · reports 46) 역할 창이 붙을 곳이 아니다.

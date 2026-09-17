@@ -5,7 +5,7 @@
      (KST 오전은 미국 기준 전날 밤이고, 미국 공휴일에 한국이 열린 날도 잘렸다)
   ② 'LIVE' 배지가 한국장 중에 꺼지고 미국장 중에 켜졌다
 """
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import patch
 import zoneinfo
 
@@ -61,9 +61,21 @@ def test_live_badge_follows_its_own_market():
         assert _market_open_flag("KR") is False
 
 
-def test_kr_status_does_not_depend_on_lagging_calendar():
-    """오늘은 KRX 캘린더에 없다 — 그걸로 판단하면 장중에 'closed' 가 된다."""
+def test_kr_status_does_not_depend_on_lagging_calendar(monkeypatch):
+    """오늘은 KRX 캘린더에 없다 — 그걸로 판단하면 장중에 'closed' 가 된다.
+
+    **캘린더가 오늘을 모르는 상태를 직접 만든다.** 예전에는 진짜 관측 캘린더를
+    불러 `in (True, False)` 로 확인했다. 그 단언은 무엇이 와도 참이라 전제를
+    재지 못했고, 부르는 순간 야후로 3번 나갔다 (curl_cffi 가 소켓 가드를 우회).
+    """
+    today = KR_SESSION.date()
+    lagging = frozenset(
+        today - timedelta(days=i) for i in range(1, 60)
+        if (today - timedelta(days=i)).weekday() < 5
+    )
+    monkeypatch.setattr(mc, "_krx_trading_days", lambda: lagging)
+
     with _at(KR_SESSION):
+        # 전제 — 관측 캘린더는 오늘을 모른다. 이게 참이어야 아래가 무언가를 잰다.
+        assert mc.is_kr_trading_day(today) is False
         assert mc.kr_market_status() == "open"
-        # 캘린더는 여전히 오늘을 모른다는 사실 자체를 고정해 둔다
-        assert mc.is_kr_trading_day(KR_SESSION.date()) in (True, False)
