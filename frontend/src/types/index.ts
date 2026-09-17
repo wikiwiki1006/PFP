@@ -437,7 +437,15 @@ export interface AIView {
   confidence: number
   sentiment: 'Bullish' | 'Neutral' | 'Bearish'
   key_driver?: string
+  /** 공용 캐시에서 꺼낸(재사용된) 뷰에만 온다 — 그 뷰를 저장한 UTC ISO 시각. */
+  cached_at?: string
 }
+
+/** 종목별 AI 뷰의 출처 (backend portfolio_optimizer 의 ai_view_source).
+ *  fresh    — 이번 요청에서 AI 가 분석했다
+ *  reused   — 같은 주기에 앞선 요청이 분석해 둔 뷰를 꺼냈다
+ *  fallback — AI 뷰를 받지 못해 **과거 수익률로 만든 대체 뷰**다 (AI 판단이 아니다) */
+export type AIViewSource = 'fresh' | 'reused' | 'fallback'
 
 export interface PriceStats {
   current_price: number
@@ -473,6 +481,8 @@ export interface OptimizationMode {
 export interface AIOptimizationResult {
   tickers: string[]
   ai_views: { [ticker: string]: AIView }
+  /** 없을 수 있다 — 이 필드 전에 세션에 저장된 결과. 그때는 출처를 모른다고 본다. */
+  ai_view_source?: Record<string, AIViewSource>
   price_stats: { [ticker: string]: PriceStats }
   optimizations: {
     black_litterman: OptimizationMode | null

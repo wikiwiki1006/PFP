@@ -627,9 +627,25 @@ function RetCell({ v }: { v: number | null | undefined }) {
   )
 }
 
+/** AI 가 답하지 않아 과거 수익률로 채운 행의 설명. 이 값들은 AI 판단이 아니다. */
+const FALLBACK_NOTE = 'AI 분석 불가 — 과거 1년 수익률로 만든 대체 값입니다 (AI 판단이 아닙니다).'
+
+/** 공용 캐시에서 꺼낸 뷰의 설명. 시각을 못 읽으면 시각을 지어내지 않는다. */
+function reusedNote(cachedAt?: string): string {
+  const d = cachedAt ? new Date(cachedAt) : null
+  if (!d || Number.isNaN(d.getTime())) return '이미 분석해 둔 AI 결과를 재사용했습니다 (분석 시각을 알 수 없음).'
+  const when = d.toLocaleString('ko-KR', {
+    timeZone: 'Asia/Seoul', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+  })
+  return `이미 분석해 둔 AI 결과를 재사용했습니다 (분석 시각 ${when} KST).`
+}
+
 function AIViewsTable({ result }: { result: AIOptimizationResult }) {
   const names = useTickerNames()
   const { tickers, ai_views, price_stats, posterior_returns } = result
+  // 종목별 뷰의 출처. 이 필드가 없는 결과(예전에 세션에 저장된 것)는 출처를 모른다 —
+  // 그때는 아무 표시도 하지 않는다. 모르는 것을 'AI 분석' 이라고 단정하지 않는다.
+  const source = result.ai_view_source ?? {}
   return (
     <div className="space-y-3">
       <div>
@@ -657,6 +673,13 @@ function AIViewsTable({ result }: { result: AIOptimizationResult }) {
               const stats = price_stats[t]
               const post  = posterior_returns[t]
               const confPct = view ? Math.round(view.confidence * 100) : 0
+              // 대체 뷰는 'AI 심리'·'AI 예상수익' 칸에 AI 판단처럼 앉아 있었다 — 서버가
+              // Neutral · 과거 1년 수익률로 채운 값이다 (§1.3). 심리는 판단이 없으므로
+              // '—', 예상수익은 최적화에 실제로 쓰인 값이라 보여 주되 AI 가 아님을 붙인다.
+              // 재사용은 강조하지 않고 제목(마우스를 올리면 보인다)으로만 알린다.
+              const isFallback = source[t] === 'fallback'
+              const aiTitle = isFallback ? FALLBACK_NOTE
+                : source[t] === 'reused' ? reusedNote(view?.cached_at) : undefined
               const rows = [
                 <tr key={t} className="border-b border-[#1e2d40]/20 hover:bg-[#1a2540] transition-colors">
                   <td className="py-2 px-3"><TickerLabel ticker={t} name={names[t]} primaryClass="text-sm font-bold" /></td>
@@ -677,17 +700,24 @@ function AIViewsTable({ result }: { result: AIOptimizationResult }) {
                   <td className="py-2 px-3 font-mono text-[#64748b]">
                     {stats?.annual_vol_1y != null ? `${stats.annual_vol_1y.toFixed(1)}%` : '—'}
                   </td>
-                  <td className="py-2 px-3">
-                    {view ? <SentimentBadge s={view.sentiment} /> : '—'}
+                  <td className="py-2 px-3" title={aiTitle}>
+                    {view && !isFallback ? <SentimentBadge s={view.sentiment} /> : <span className="text-[#64748b]">—</span>}
                   </td>
                   {/* 색도 값과 같은 판단을 해야 한다. `?? 0` 이면 view 가 없을 때
                       0 >= 0 이 되어 '—' 가 초록으로 칠해진다 — 값은 모른다고 하면서
-                      색은 긍정을 말하는 셈이다. colorForValue 는 null 을 회색으로 준다. */}
+                      색은 긍정을 말하는 셈이다. colorForValue 는 null 을 회색으로 준다.
+                      대체 뷰도 회색이다 — 초록·빨강은 AI 의 방향 판단으로 읽힌다. */}
                   <td className={cn('py-2 px-3 font-mono font-semibold',
-                    colorForValue(view?.expected_return))}>
+                    isFallback ? 'text-[#64748b]' : colorForValue(view?.expected_return))}
+                    title={aiTitle}>
                     {view ? `${view.expected_return >= 0 ? '+' : ''}${(view.expected_return * 100).toFixed(1)}%` : '—'}
+                    {view && isFallback && (
+                      <span className="ml-1.5 px-1 py-0.5 rounded bg-[#1e2d40] text-[10px] font-sans font-medium text-[#94a3b8] whitespace-nowrap">
+                        과거 수익률
+                      </span>
+                    )}
                   </td>
-                  <td className="py-2 px-3">
+                  <td className="py-2 px-3" title={aiTitle}>
                     {view ? (
                       <div className="flex items-center gap-1.5">
                         <div className="w-14 h-1.5 bg-[#1e2d40] rounded-full overflow-hidden">
