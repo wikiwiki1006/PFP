@@ -678,7 +678,16 @@ def get_market_snapshot(close_df: pd.DataFrame) -> dict:
 
 _VOL_TTL_OK   = 600      # 성공값 10분 (DB 공용 캐시 · 인스턴스 사이 공유)
 _VOL_TTL_FAIL = 60       # 실패는 1분만 기억 — 출처가 죽은 동안 요청마다 두드리지 않게
+_VOL_STALE_OK = 3600     # 다른 요청이 가져오는 중일 때만 1시간 이내 마지막 성공값을 준다
 _vol_memo: dict[str, tuple[float, dict]] = {}
+_vol_last_good: dict[str, tuple[float, dict]] = {}
+_vol_locks: dict[str, "threading.Lock"] = {}
+_vol_locks_guard = threading.Lock()
+
+
+def _vol_lock(key: str) -> "threading.Lock":
+    with _vol_locks_guard:
+        return _vol_locks.setdefault(key, threading.Lock())
 
 
 def _investing_daily(instrument_id: str, days: int = 14) -> list[dict]:
@@ -697,7 +706,9 @@ def _investing_daily(instrument_id: str, days: int = 14) -> list[dict]:
             "domain-id": "kr", "Accept": "application/json",
             "Referer": "https://kr.investing.com/",
         },
-        timeout=15,
+        # (연결, 읽기). 15초였을 때 인베스팅이 멈추면 한국 /metrics 요청마다
+        # 그만큼 기다렸다 — 이 값은 지표 한 칸이라 기다릴 가치가 없다.
+        timeout=(3, 5),
     )
     r.raise_for_status()
     rows = (r.json() or {}).get("data") or []
@@ -730,8 +741,33 @@ def volatility_index(market: str) -> dict:
     cached = get_common(key)
     if isinstance(cached, dict) and cached.get("value") is not None:
         _vol_memo[key] = (now + _VOL_TTL_OK, cached)
+        _vol_last_good[key] = (now, cached)
         return cached
 
+    # 한 번에 하나만 가져온다. 잠금이 없을 때 출처가 느려지면 동시에 들어온
+    # 요청이 **각자** 출처를 두드리고 각자 기다렸다 (실측: 동시 10요청 → 호출
+    # 10회, 전부 대기). 이미 누가 가져오는 중이면 기다리지 않고, 1시간 이내의
+    # 마지막 성공값이 있으면 그걸, 없으면 빈 값을 준다 — 이 칸 하나 때문에
+    # 포트폴리오 지표 전체가 늦어지면 안 된다.
+    lock = _vol_lock(key)
+    if not lock.acquire(blocking=False):
+        last = _vol_last_good.get(key)
+        if last and now - last[0] <= _VOL_STALE_OK:
+            return last[1]
+        return empty
+    try:
+        hit = _vol_memo.get(key)                 # 기다리는 사이 다른 요청이 채웠을 수 있다
+        if hit and hit[0] > time.time():
+            return hit[1]
+        return _volatility_index_fetch(spec.code, key, source, symbol, empty)
+    finally:
+        lock.release()
+
+
+def _volatility_index_fetch(code: str, key: str, source: str, symbol: str, empty: dict) -> dict:
+    """volatility_index 의 실제 조회. `_vol_lock(key)` 를 쥔 채로만 부른다."""
+    from backend.db.market_cache import save_common
+    now = time.time()
     out = dict(empty)
     try:
         if source == "investing":
@@ -753,15 +789,25 @@ def volatility_index(market: str) -> dict:
             raise ValueError(f"알 수 없는 변동성 지수 출처: {source!r}")
     except Exception as e:
         _logger.warning("변동성 지수 조회 실패 (%s %s:%s) — 값 없이 둔다: %s",
-                       spec.code, source, symbol, e)
+                       code, source, symbol, e)
 
     if out["value"] is not None and out["prev_close"]:
         out["change_pct"] = round((out["value"] / out["prev_close"] - 1) * 100, 2)
 
     if out["value"] is None:
-        _logger.warning("변동성 지수 %s 값 없음 (%s:%s)", spec.code, source, symbol)
+        # 1시간 이내의 마지막 성공값이 있으면 그걸 준다. 안 그러면 같은 순간에
+        # 잠금을 못 얻은 요청은 그 값을, 가져오던 요청과 이후 1분은 '—' 를 받아
+        # 화면이 요청마다 번갈아 바뀐다. 오래된 값을 쓴다는 사실은 남긴다.
+        last = _vol_last_good.get(key)
+        if last and now - last[0] <= _VOL_STALE_OK:
+            _logger.warning("변동성 지수 %s 조회 실패 — %d초 전 마지막 성공값을 쓴다 (%s:%s)",
+                            code, int(now - last[0]), source, symbol)
+            _vol_memo[key] = (now + _VOL_TTL_FAIL, last[1])
+            return last[1]
+        _logger.warning("변동성 지수 %s 값 없음 (%s:%s)", code, source, symbol)
         _vol_memo[key] = (now + _VOL_TTL_FAIL, out)
         return out
     save_common(key, out, ttl_seconds=_VOL_TTL_OK)
     _vol_memo[key] = (now + _VOL_TTL_OK, out)
+    _vol_last_good[key] = (now, out)
     return out
