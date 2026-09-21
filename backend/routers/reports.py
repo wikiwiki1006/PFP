@@ -490,6 +490,10 @@ def report_history(_auth: dict = Depends(current_user), market: str = Depends(ma
             "mtime":      r.get("created_at"),
             "created_at": r.get("created_at"),
             "model_tier": (r.get("metadata") or {}).get("model_tier", "basic"),
+            # 종목 리포트의 티커. 화면은 파일명(`lens_005930KS_…`)이 아니라 이 값으로
+            # 종목 이름을 찾는다 — 파일명의 티커는 점이 빠진 형태라 되짚으려면 추측이
+            # 필요하다. 저장 때 metadata 에 넣는다(두 생성 경로 모두). 산업은 None.
+            "ticker":     (r.get("metadata") or {}).get("ticker"),
             # 목록에는 본인이 만든 것만 담긴다(list_reports 참고).
             # shared 는 "내 리포트가 공용으로도 재사용된다"는 표시일 뿐,
             # 남의 리포트라는 뜻이 아니다.

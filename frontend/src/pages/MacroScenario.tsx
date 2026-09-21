@@ -282,7 +282,18 @@ function mdToHtml(raw: string): string {
   return `<p class="p">${s}</p>`
 }
 
-function buildPdfHtml(result: MacroAnalysisResult, dateStr: string): string {
+/**
+ * PDF 용 HTML. `nameOf` 는 화면의 액션 표와 같은 종목 표기 규칙(한국은 이름)이다 —
+ * 화면은 이름인데 내려받은 PDF 만 '005930.KS' 로 남으면 같은 결과가 두 표기로 나간다.
+ */
+function buildPdfHtml(
+  result: MacroAnalysisResult, dateStr: string,
+  nameOf: (ticker: string) => string = t => t, tickerHeader = '티커',
+): string {
+  // AI 가 쓴 값을 innerHTML 로 넣는다 — 종목명 'KT&G' 의 & 같은 글자가 태그·엔티티로
+  // 읽히지 않게 칸마다 이스케이프한다.
+  const escCell = (v: unknown) => String(v ?? '—')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
   function actionTableHtml(actions: Array<Record<string, unknown>>): string {
     if (!actions?.length) return ''
     const rows = actions.map(a => {
@@ -292,16 +303,20 @@ function buildPdfHtml(result: MacroAnalysisResult, dateStr: string): string {
       const color = isBuy ? '#16a34a' : isSell ? '#dc2626' : '#4b5563'
       const urg = String(a.urgency ?? '—')
       const urgColor = urg === '즉시' ? '#dc2626' : urg === '1개월 내' ? '#d97706' : '#16a34a'
+      const raw = a.ticker == null ? null : String(a.ticker)
+      const label = raw == null ? '—' : nameOf(raw)
+      // 이름(한글)에는 고정폭을 쓰지 않는다. 티커가 그대로 나가는 경우(미국·사전에 없음)만.
+      const mono = raw != null && label === raw ? 'font-family:monospace;' : ''
       return `<tr>
-        <td style="font-family:monospace;font-weight:700;white-space:nowrap;width:70px">${String(a.ticker ?? '—')}</td>
-        <td style="width:80px;white-space:nowrap"><span style="color:${color};font-weight:700;border:1px solid ${color};padding:2px 6px;border-radius:4px;font-size:11px;display:inline-block">${String(a.action ?? '—')}</span></td>
-        <td style="color:${urgColor};font-weight:600;white-space:nowrap;width:80px">${urg}</td>
-        <td style="word-break:break-word;line-height:1.5">${String(a.reason ?? '—')}</td>
+        <td style="${mono}font-weight:700;white-space:nowrap;width:90px">${escCell(label)}</td>
+        <td style="width:80px;white-space:nowrap"><span style="color:${color};font-weight:700;border:1px solid ${color};padding:2px 6px;border-radius:4px;font-size:11px;display:inline-block">${escCell(a.action)}</span></td>
+        <td style="color:${urgColor};font-weight:600;white-space:nowrap;width:80px">${escCell(urg)}</td>
+        <td style="word-break:break-word;line-height:1.5">${escCell(a.reason)}</td>
       </tr>`
     }).join('')
     return `<h3>포트폴리오 액션 플랜</h3>
       <table style="table-layout:fixed"><thead><tr>
-        <th style="width:70px">티커</th>
+        <th style="width:90px">${escCell(tickerHeader)}</th>
         <th style="width:80px">액션</th>
         <th style="width:80px">시급도</th>
         <th>추천 이유</th>
@@ -411,6 +426,9 @@ export default function MacroScenario() {
   }, [features.deep_analysis_enabled])
   // 시나리오 분석·과거 이력은 로그인이 필요하다. 예시 분석 결과는 만들지 않는다.
   const { isAuthed, requireLogin, modalEl } = useLoginPrompt()
+  // PDF 의 액션 표도 화면 표와 같은 종목 표기(한국은 이름)를 쓴다.
+  const pageMarket = useMarket()
+  const pageNames = useTickerNames()
   // sessionStorage 에서 이전 상태 복원
   const [event,    setEvent]    = useState(() => marketSession.get(SK_EVENT)    || '')
   // 기본은 '기본 분석'(haiku). 심층 분석은 토큰을 훨씬 많이 쓰므로 사용자가
@@ -608,7 +626,11 @@ export default function MacroScenario() {
       const html2canvas = (h2cMod as any).default ?? h2cMod
 
       const dateStr = new Date().toLocaleDateString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric' })
-      const htmlContent = buildPdfHtml(displayResult, dateStr)
+      const htmlContent = buildPdfHtml(
+        displayResult, dateStr,
+        t => displayTicker(t, pageNames),
+        pageMarket === 'KR' ? '종목' : '티커',
+      )
 
       const container = document.createElement('div')
       container.style.cssText = 'position:fixed;top:0;left:-9999px;width:900px;background:#fff;z-index:-9999;pointer-events:none'

@@ -19,7 +19,7 @@ import { useAuth } from '@/lib/AuthContext'
 import { useFeatures } from '@/lib/useFeatures'
 import { useMarket } from '@/lib/useMarket'
 import { marketSession } from '@/lib/marketStorage'
-import { useTickerNames } from '@/lib/useTickerNames'
+import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
 import SuggestionList from '@/components/SuggestionList'
 import { pickOnEnter, moveHighlight, selectionLabel } from '@/lib/suggestions'
 
@@ -179,7 +179,8 @@ function mdToHtml(raw: string): string {
 }
 
 // ── PDF HTML 빌더 ─────────────────────────────────────────────────────────────
-function buildEquityPdfHtml(result: EquityResult, dateStr: string): string {
+/** `title` 은 표지 제목 — 한국은 종목명만, 미국은 '티커 — 회사명' (호출자가 정한다). */
+function buildEquityPdfHtml(result: EquityResult, dateStr: string, title: string): string {
   const entries = Object.entries(result.sections || {})
   const bodyHtml = entries.map(([key, content], i) => `
     <div class="sec-card">
@@ -216,7 +217,7 @@ function buildEquityPdfHtml(result: EquityResult, dateStr: string): string {
   </style></head><body>
   <div class="hdr">
     <div class="brand">LENS CAPITAL RESEARCH</div>
-    <div class="title">${result.ticker} — ${result.company_name}</div>
+    <div class="title">${title.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
     <div class="sub">종목 리서치 레포트 · ${dateStr}</div>
   </div>
   <div class="body">${bodyHtml}<div class="footer">본 레포트는 AI 자동 생성 참고용으로, 투자 조언이 아닙니다.</div></div>
@@ -306,7 +307,7 @@ function buildGenericPdfHtml(title: string, subtitle: string, sections: Record<s
   </style></head><body>
   <div class="hdr">
     <div class="brand">LENS CAPITAL RESEARCH</div>
-    <div class="title">${title}</div>
+    <div class="title">${title.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
     <div class="sub">${subtitle}</div>
   </div>
   <div class="body">${bodyHtml}<div class="footer">본 레포트는 AI 자동 생성 참고용으로, 투자 조언이 아닙니다.</div></div>
@@ -322,6 +323,38 @@ function reportDisplayTitle(name: string, isIndustry: boolean): string {
     .replace(/_\d{8}_\d{4}\.md$/, '')
   return isIndustry ? base.replace(/_/g, ' ') : base.toUpperCase()
 }
+
+/** 과거 목록 한 줄. 서버가 종목 리포트면 `ticker`(저장 때 metadata)를 함께 준다. */
+type HistoryRow = { name: string; type?: string; ticker?: string | null }
+
+/**
+ * 과거 종목 리포트의 티커. 서버가 준 값이 먼저다.
+ *
+ * 없으면 파일명에서 되짚는다 — 저장할 때 티커의 점을 뺐으므로(`lens_005930KS_…`,
+ * routers/reports.py 의 `re.sub(r"[^\w]", "", ticker)`) 이름 사전의 키에서 같은
+ * 규칙으로 점을 뺀 것과 맞춘다. 산업 리포트면 null.
+ */
+function historyTicker(row: HistoryRow, names: Record<string, string>): string | null {
+  if (row.ticker) return row.ticker
+  if (!row.name.startsWith('lens_') || row.name.startsWith('lens_industry_')) return null
+  const slug = row.name.replace(/^lens_/, '').replace(/_\d{8}_\d{4}\.md$/, '').toUpperCase()
+  if (!slug) return null
+  return Object.keys(names).find(t => t.replace(/[^\w]/g, '').toUpperCase() === slug) ?? null
+}
+
+/**
+ * 과거 목록에 보일 제목. **한국 종목 리포트는 종목명** — 파일명에는 코드
+ * (`lens_005930KS_20260917_1234.md`)가 들어 있다. 날짜·시각은 같은 줄에 따로 보인다.
+ * 미국·산업은 예전처럼 파일명 그대로.
+ */
+function historyTitle(row: HistoryRow, market: string, names: Record<string, string>): string {
+  if (market !== 'KR') return row.name
+  const t = historyTicker(row, names)
+  return t ? displayTicker(t, names) : row.name
+}
+
+/** 내려받는 PDF 파일 이름에 넣어도 되는 글자만 (종목명의 공백·& 등). */
+const pdfSafe = (s: string) => s.replace(/[\\/:*?"<>|&\s]+/g, '_')
 
 // ── 진행 바 컴포넌트 ──────────────────────────────────────────────────────────
 function ProgressBar({ progress, elapsedMs, type }: {
@@ -548,12 +581,16 @@ function EquityTab() {
     enabled:  showHist && isAuthed,
   })
   const loadHistMut = useMutation({
-    mutationFn: getReportFile,
-    onSuccess: (data) => {
+    // 목록의 행을 받는다 — 파일명만 넘기면 티커를 파일명에서 추측해야 한다.
+    mutationFn: (row: HistoryRow) => getReportFile(row.name),
+    onSuccess: (data, row) => {
       const sections = parseSections(data.content)
+      const t = historyTicker(row, names)
       const r: EquityResult = {
-        ticker: data.name.replace(/lens_|_\d{8}_\d{4}\.md/g, '').toUpperCase(),
-        company_name: data.name,
+        ticker: t ?? data.name.replace(/lens_|_\d{8}_\d{4}\.md/g, '').toUpperCase(),
+        // 한국은 종목명 — 예전에는 파일명을 넣어 결과 머리가 'lens_005930KS_…md' 였다.
+        // 미국은 예전 그대로(파일명).
+        company_name: market === 'KR' ? (t ? displayTicker(t, names) : '') : data.name,
         raw: data.content,
         sections,
         report_type: 'equity',
@@ -699,9 +736,13 @@ function EquityTab() {
     setPdfBusy(true)
     try {
       const dateStr = new Date().toLocaleDateString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric' })
+      // 한국은 표지·파일 이름 모두 종목명 (화면의 '종목:' 머리와 같은 규칙).
+      const krName = result.company_name && result.company_name !== result.ticker
+        ? result.company_name : displayTicker(result.ticker, names)
+      const title = market === 'KR' ? krName : `${result.ticker} — ${result.company_name}`
       await downloadPdfFromHtml(
-        buildEquityPdfHtml(result, dateStr),
-        `lens_${result.ticker}_${new Date().toISOString().slice(0, 10)}.pdf`,
+        buildEquityPdfHtml(result, dateStr, title),
+        `lens_${market === 'KR' ? pdfSafe(krName) : result.ticker}_${new Date().toISOString().slice(0, 10)}.pdf`,
       )
     } catch (e) {
       console.error('PDF 생성 실패:', e)
@@ -743,7 +784,7 @@ function EquityTab() {
               {equityHistRows.map(r => (
                 <button
                   key={r.name}
-                  onClick={() => loadHistMut.mutate(r.name)}
+                  onClick={() => loadHistMut.mutate(r as HistoryRow)}
                   disabled={loadHistMut.isPending}
                   className="w-full text-left px-4 py-3 hover:bg-[#0f172a] transition-colors"
                 >
@@ -751,7 +792,10 @@ function EquityTab() {
                     <span className={cn('text-[9px] px-1 py-0.5 rounded font-bold', r.model_tier === 'deep' ? 'bg-[#9b59b6]/20 text-[#c084fc]' : 'bg-[#2e75b6]/20 text-[#60a5fa]')}>
                       {r.model_tier === 'deep' ? '심층' : '기본'}
                     </span>
-                    <div className="text-xs font-medium text-[#e2e8f0] truncate">{r.name}</div>
+                    {/* 한국은 종목명 — 파일명에는 코드가 들어 있다 (historyTitle). */}
+                    <div className="text-xs font-medium text-[#e2e8f0] truncate">
+                      {historyTitle(r as HistoryRow, market, names)}
+                    </div>
                   </div>
                   <div className="text-[10px] text-[#475569]">
                     {r.created_at ? new Date(r.created_at).toLocaleString('ko-KR') : ''}
@@ -888,7 +932,6 @@ function EquityTab() {
                   )}>
                   <div className="text-[11px] font-bold">{label}</div>
                   {locked && <div className="text-[9px] opacity-70">사용 불가</div>}
-                {limited && <div className="text-[9px] opacity-70">하루 1회</div>}
                   {limited && <div className="text-[9px] opacity-70">하루 1회</div>}
                 </button>
               )})}
@@ -1382,6 +1425,8 @@ function IndustryTab() {
 
 // ── 과거 레포트 탭 ─────────────────────────────────────────────────────────────
 function HistoryTab() {
+  const market = useMarket()
+  const names = useTickerNames()
   const [filter,  setFilter]  = useState<'all' | 'equity' | 'industry'>('all')
   const [selected, setSelected] = useState<string | null>(null)
   const [viewResult, setViewResult] = useState<{ sections: Record<string, string>; raw: string; name: string } | null>(null)
@@ -1416,19 +1461,28 @@ function HistoryTab() {
   const viewSections = viewResult?.sections ? Object.entries(viewResult.sections) : []
   const viewHeader   = viewResult?.sections?.['header'] || ''
   const viewType     = selected?.includes('industry') ? 'industry' : 'equity'
+  // 선택한 행 — 한국 종목 리포트의 이름을 찾는 데 쓴다 (파일명에는 코드가 들어 있다).
+  const selectedRow  = (histQ.data || []).find(r => r.name === selected) as HistoryRow | undefined
+  const selectedTitle = selected
+    ? historyTitle(selectedRow ?? { name: selected }, market, names)
+    : ''
 
   // PDF 다운로드 — 저장된 레포트는 EquityResult/IndustryResult 구조가 없어
-  // buildGenericPdfHtml 을 쓴다(제목은 파일명에서 뽑는다).
+  // buildGenericPdfHtml 을 쓴다(제목은 파일명에서 뽑는다 · 한국 종목은 종목명).
   const downloadPDF = async () => {
     if (!viewResult || !selected) return
     setPdfBusy(true)
     try {
       const isIndustry = viewType === 'industry'
-      const title    = reportDisplayTitle(selected, isIndustry)
+      const krEquity = market === 'KR' && !isIndustry && selectedTitle !== selected
+      const title    = krEquity ? selectedTitle : reportDisplayTitle(selected, isIndustry)
       const subtitle = `${isIndustry ? '산업 리서치' : '종목 리서치'} 레포트 · 과거 이력`
+      const stamp    = selected.match(/_(\d{8}_\d{4})\.md$/)?.[1]
       await downloadPdfFromHtml(
         buildGenericPdfHtml(title, subtitle, viewResult.sections, isIndustry ? '#9b59b6' : '#2e75b6'),
-        `${selected.replace(/\.md$/, '')}.pdf`,
+        krEquity
+          ? `lens_${pdfSafe(selectedTitle)}${stamp ? `_${stamp}` : ''}.pdf`
+          : `${selected.replace(/\.md$/, '')}.pdf`,
       )
     } catch (e) {
       console.error('PDF 생성 실패:', e)
@@ -1513,7 +1567,8 @@ function HistoryTab() {
                   {r.created_at ? new Date(r.created_at).toLocaleString('ko-KR') : ''}
                 </span>
               </div>
-              <div className="text-xs text-[#94a3b8] truncate">{r.name}</div>
+              {/* 한국 종목 리포트는 종목명 (historyTitle) — 파일명에는 코드가 들어 있다. */}
+              <div className="text-xs text-[#94a3b8] truncate">{historyTitle(r as HistoryRow, market, names)}</div>
             </button>
           )
         })}
@@ -1528,7 +1583,7 @@ function HistoryTab() {
           <div className="bg-[#060b14] border border-[#1e2d40] rounded-lg p-3 flex items-center justify-between gap-2">
             <div>
               <span className="text-[10px] text-[#4a5568] font-bold tracking-wider">레포트: </span>
-              <span className="text-xs text-[#94a3b8]">{viewResult.name}</span>
+              <span className="text-xs text-[#94a3b8]">{selectedTitle || viewResult.name}</span>
             </div>
             <button
               onClick={downloadPDF}

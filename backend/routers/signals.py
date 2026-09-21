@@ -455,11 +455,18 @@ def _universe_for(market: str) -> list[str]:
     return get_sp500_universe()
 
 
+# 화면에 적는 스캔 대상 이름. **위 `_universe_for` 와 같은 자리에 둔다** — 화면이
+# 시장을 보고 따로 이름을 지으면 유니버스를 바꿀 때 문구만 옛 이름으로 남는다
+# (실제로 한국 화면이 "S&P500 350개 종목" 이라고 적고 있었다).
+_UNIVERSE_LABEL = {"US": "S&P500", "KR": "KOSPI200·KOSDAQ150"}
+
+
 @router.get("/signal-scan")
 def signal_scan(top_n: int = Query(default=10, ge=1, le=30),
                 market: str = Depends(market_param)):
     """
-    S&P500 매매신호 스캔 — SMA 1차 필터 → 통과 종목만 MACD/RSI 스코어링 → 매수/매도 상위 N개.
+    매매신호 스캔 (미국 S&P500 · 한국 KOSPI200·KOSDAQ150) — SMA 1차 필터 → 통과 종목만
+    MACD/RSI 스코어링 → 매수/매도 상위 N개. 응답의 `universe_label` 이 스캔 대상 이름이다.
 
     스케줄러가 일별 가격·거래량 수집 직후 계산해 common_cache 에 저장한다.
     캐시 미스일 때만 DB(market_prices)의 종가·거래량으로 즉석 계산한다 — yfinance 호출 없음.
@@ -499,7 +506,8 @@ def signal_scan(top_n: int = Query(default=10, ge=1, le=30),
         long_picks  = [{**p, "name": names.get(p.get("ticker"), "")} for p in long_picks]
         short_picks = [{**p, "name": names.get(p.get("ticker"), "")} for p in short_picks]
 
-    return {**cached, "long_picks": long_picks, "short_picks": short_picks}
+    return {**cached, "long_picks": long_picks, "short_picks": short_picks,
+            "universe_label": _UNIVERSE_LABEL.get(market)}
 
 
 @router.get("/signal-score")

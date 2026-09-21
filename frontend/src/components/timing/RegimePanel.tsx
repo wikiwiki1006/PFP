@@ -7,7 +7,7 @@ import { Search, Star } from 'lucide-react'
 import { getMarketRegime } from '@/api'
 import { COLOR_UP, COLOR_DOWN, COLOR_NEUTRAL, regimeColor, regimeLabel } from './colors'
 import { useTouchDismissTooltip } from '@/lib/useTouchDismissTooltip'
-import { formatPrice, getMarket } from '@/lib/market'
+import { formatAxisPrice, formatPrice, getMarket } from '@/lib/market'
 import { useMarket } from '@/lib/useMarket'
 import type { HoldingsMap } from '@/types'
 import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
@@ -26,7 +26,16 @@ interface RegimePanelProps {
   holdings?: HoldingsMap
 }
 
-function ChartTooltip({ active, payload, label }: any) {
+// 지수(^KS11 · ^GSPC 등)는 **포인트**라 통화가 아니다. 이 패널의 기본 대상이 시장
+// 지수라, 종목과 같은 포맷을 쓰면 코스피 2,500 이 '₩2,500' 으로 찍힌다 (§1.4).
+const isIndexTicker = (t: string | undefined) => !!t && t.startsWith('^')
+const fmtLevel = (v: number, index: boolean) =>
+  index ? v.toLocaleString('en-US', { maximumFractionDigits: 2 }) : formatPrice(v)
+// 축은 자리가 좁다 — 종목은 formatAxisPrice(₩71,900 / 100만 이상 '만' 축약), 지수는 정수.
+const fmtAxis = (v: number, index: boolean) =>
+  index ? Math.round(v).toLocaleString('en-US') : formatAxisPrice(v)
+
+function ChartTooltip({ active, payload, label, isIndex }: any) {
   if (!active || !payload?.length) return null
   const p = payload.find((x: any) => x.value != null)
   if (!p) return null
@@ -35,7 +44,7 @@ function ChartTooltip({ active, payload, label }: any) {
   return (
     <div className="bg-[#1a2035] border border-[#1e2d40] rounded-lg p-3 text-[11px] shadow-xl">
       <p className="text-[#64748b] mb-1">{label}</p>
-      <p className="text-[#e2e8f0] font-mono">{formatPrice(Number(p.payload.price))}</p>
+      <p className="text-[#e2e8f0] font-mono">{fmtLevel(Number(p.payload.price), !!isIndex)}</p>
       <p className="font-bold" style={{ color }}>{regimeLabel(regime)}</p>
     </div>
   )
@@ -223,8 +232,10 @@ export default function RegimePanel({ holdings = {} }: RegimePanelProps) {
             <ComposedChart data={chartData} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#1e2d40" vertical={false} />
               <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} minTickGap={50} />
-              <YAxis tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} domain={['auto', 'auto']} width={55} />
-              <Tooltip active={tooltipActive} content={<ChartTooltip />} />
+              {/* 예전에는 포맷이 없어 한국 종목 축이 '150000' 처럼 ₩ 도 쉼표도 없이 찍혔다. */}
+              <YAxis tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} domain={['auto', 'auto']} width={64}
+                     tickFormatter={(v: number) => fmtAxis(Number(v), isIndexTicker(q.data?.ticker))} />
+              <Tooltip active={tooltipActive} content={<ChartTooltip isIndex={isIndexTicker(q.data?.ticker)} />} />
               <Legend wrapperStyle={{ fontSize: '11px', color: '#64748b' }} />
               <Line type="monotone" dataKey="bull"     stroke={COLOR_UP}      strokeWidth={2.5} dot={false} connectNulls={false} name="상승" isAnimationActive={false} />
               <Line type="monotone" dataKey="sideways" stroke={COLOR_NEUTRAL} strokeWidth={2.5} dot={false} connectNulls={false} name="횡보" isAnimationActive={false} />

@@ -5,7 +5,7 @@ import { getSignalScan, getSignalScore } from '@/api'
 import { getMarket } from '@/lib/market'
 import BollingerChart from './BollingerChart'
 import { COLOR_UP, COLOR_DOWN } from './colors'
-import type { SignalScanPick, HoldingsMap } from '@/types'
+import type { SignalScanPick, SignalScanResult, HoldingsMap } from '@/types'
 import TickerLabel from '@/components/TickerLabel'
 import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
 import { tickerByExactName } from '@/lib/suggestions'
@@ -167,6 +167,10 @@ export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelPr
     queryFn:  () => getSignalScan(10),
     staleTime: 1800_000,
   })
+  // 서버가 스캔 대상 이름을 함께 준다 (routers/signals.py `_UNIVERSE_LABEL`).
+  // 공용 타입(types/index.ts)에는 아직 없는 필드라 여기서만 넓혀 읽는다.
+  const universeLabel = (scanQ.data as (SignalScanResult & { universe_label?: string | null }) | undefined)
+    ?.universe_label ?? null
 
   function submitSearch() {
     // 한국은 이름으로 찾는다 — 코드를 화면 어디에도 안 보여 주므로 사용자가 코드를
@@ -220,7 +224,7 @@ export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelPr
             </div>
           )}
 
-          {/* S&P500 scan results */}
+          {/* 시장별 스캔 결과 (미국 S&P500 · 한국 KOSPI200·KOSDAQ150) */}
           {scanQ.isLoading && <div className="text-sm text-[#64748b]">스캔 중… (최초 1회)</div>}
           {/* 서버가 왜 안 되는지 말해 주면 그대로 보여 준다.
               "불러올 수 없습니다" 로 뭉개면 **"데이터가 아직 없다" 와 "신호가
@@ -274,8 +278,12 @@ export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelPr
                   )}
                 </div>
               </div>
+              {/* 스캔 대상 이름은 서버가 유니버스를 고르는 자리에서 같이 준다
+                  (`universe_label`). 화면이 "S&P500" 을 박아 두면 한국 화면이 미국
+                  유니버스를 스캔했다고 말한다(§1.1). 이름이 없으면 지어내지 않는다. */}
               <div className="text-[10px] text-[#374151] pt-1">
-                S&P500 {scanQ.data.scanned}개 종목 · SMA 1차 필터 + MACD/RSI 스코어링
+                {universeLabel ? `${universeLabel} ` : ''}
+                {scanQ.data.scanned}개 종목 · SMA 1차 필터 + MACD/RSI 스코어링
                 {scanQ.data.as_of ? ` · ${scanQ.data.as_of} 기준` : ''}
               </div>
             </>

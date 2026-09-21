@@ -30,12 +30,15 @@ import ConfirmDialog from '@/components/auth/ConfirmDialog'
 import { useDemoQuery } from '@/lib/useDemoQuery'
 import { useAuth } from '@/lib/AuthContext'
 import { useIsMobile } from '@/lib/useIsMobile'
-// 시장에 따라 갈리는 넷은 **함수로** 받는다. 상수로 받으면 모듈 최상위에서
-// 한 번 고른 값이 박히고, 그건 시장 전환이 전체 새로고침을 유지하는 동안만
-// 맞다. 나머지 넷은 시장 중립이라 상수 그대로다 (곡선은 퍼센트).
+// 예시 데이터는 **전부 시장별 접근자(함수)로** 받고, 렌더할 때 부른다. 상수로 받으면
+// 모듈 최상위에서 한 번 고른 값이 박히고, 그건 시장 전환이 전체 새로고침을 유지하는
+// 동안만 맞다.
+// 예전에는 곡선·실적·뉴스·AI 피드백 넷을 "시장 중립" 이라 보고 미국 상수를 그대로
+// 넘겼다 — 실적·뉴스에는 AAPL·NVDA 가, AI 피드백에는 미국 VIX 문장이 들어 있어
+// 한국 미리보기에 그대로 나갔다 (곡선도 총자산이 달러 규모였다).
 import {
   demoMetrics, demoHoldingsDetail, demoHoldingsRaw, demoSectorWeights,
-  DEMO_EQUITY_CURVE, DEMO_ANALYST_FEEDBACK, DEMO_NEWS, DEMO_EARNINGS,
+  demoEquityCurve, demoAnalystFeedback, demoNews, demoEarnings,
 } from '@/lib/demoData'
 import { formatPrice, formatCompact, formatMoney, marketSymbol,
          MARKETS, moneyInputProps, type Market } from '@/lib/market'
@@ -112,6 +115,17 @@ function realizedTitle(m: PortfolioMetrics): string {
     : `수익률 ${fp(m.realized_pnl_pct)} (매도된 주식의 취득원가 ${formatPrice(m.realized_cost)} 기준 — 총 투자원가가 아니다).`
   return `매도 ${m.realized_sales}건으로 확정한 손익. ${pct}`
 }
+
+// 거래 내역의 유형 색. 매수 초록 · 매도 빨강 · 입금 주황 · 출금 장미색.
+// 예전에는 매수가 아니면 전부 빨강이라 **입금(DEPOSIT)이 매도와 같은 색**이었다 —
+// 돈이 들어온 기록이 손실·처분처럼 읽힌다. 입출금 색은 자산 곡선의 입금·출금
+// 표식(◆)과 같은 색이다.
+const tradeTypeColor = (type: string) =>
+  type === 'ADD' || type === 'BUY'  ? '#10b981'
+  : type === 'SOLD' || type === 'SELL' ? '#ef4444'
+  : type === 'DEPOSIT'  ? '#f59e0b'
+  : type === 'WITHDRAW' ? '#f43f5e'
+  : '#94a3b8'
 
 // 상승 녹색 / 하락 빨강 / 정확히 0 또는 없음 → 회색 (0%를 녹색으로 칠하지 않는다)
 const chgColor = (v: number | null | undefined) =>
@@ -1821,7 +1835,7 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
                       </td>
                       <td className="py-1.5 px-2"><TickerLabel ticker={t.ticker} name={names[t.ticker]} primaryClass="text-sm font-bold" /></td>
                       <td className="py-1.5 px-2 text-[12px]"
-                        style={{ color: t.type === 'ADD' || t.type === 'BUY' ? '#10b981' : '#ef4444' }}>
+                        style={{ color: tradeTypeColor(t.type) }}>
                         {t.type}
                       </td>
                       {t.ticker === 'CASH' ? (
@@ -1876,7 +1890,7 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
                       <td className="py-2 px-2 font-mono text-[11px] text-[#94a3b8]">{t.date}</td>
                       <td className="py-2 px-2"><TickerLabel ticker={t.ticker} name={names[t.ticker]} primaryClass="text-[13px] font-bold" stacked /></td>
                       <td className="py-2 px-2 text-[11px] font-bold"
-                        style={{ color: t.type === 'ADD' || t.type === 'BUY' ? '#10b981' : '#ef4444' }}>
+                        style={{ color: tradeTypeColor(t.type) }}>
                         {t.type}
                       </td>
                       {/* 현금 입출금은 수량 1 · 금액=입출금액으로 보여 준다. 저장은 q=금액,
@@ -2630,7 +2644,7 @@ export default function AlphaTerminal() {
   // 돌려준다. 화면은 정상적으로 그려지고 LockedPreview 가 그 위에 흐림을 씌운다.
   const metricsQ  = useDemoQuery(['portfolio-metrics'], getPortfolioMetrics, demoMetrics(),        { refetchInterval: 60_000, staleTime: 55_000 })
   // 에쿼티 커브/섹터: 5분 캐시 (자주 변하지 않음)
-  const curveQ    = useDemoQuery(['equity-curve'],      getEquityCurve,      DEMO_EQUITY_CURVE,  { staleTime: 300_000 })
+  const curveQ    = useDemoQuery(['equity-curve'],      getEquityCurve,      demoEquityCurve(),  { staleTime: 300_000 })
   // 보유 종목 상세: 60초 (현재가 업데이트용)
   const holdQ     = useDemoQuery(['holdings-detail'],   getHoldingsDetail,   demoHoldingsDetail(), { refetchInterval: 60_000, staleTime: 55_000 })
   const rawHoldQ  = useDemoQuery(['holdings-raw'],      getHoldings,         demoHoldingsRaw(),  { staleTime: 300_000, placeholderData: (prev: any) => prev })
@@ -2647,7 +2661,7 @@ export default function AlphaTerminal() {
       portfolio_beta: m.portfolio_beta,
       today_chg_pct: m.today_change_pct,
     } : undefined),
-    DEMO_ANALYST_FEEDBACK,
+    demoAnalystFeedback(),
     { staleTime: 300_000, enabled: rightTab === 1 },
   )
 
@@ -2656,14 +2670,14 @@ export default function AlphaTerminal() {
   const newsQ = useDemoQuery(
     ['market-news', holdTickers],
     () => getMarketNews(holdTickers.split(',').filter(Boolean)),
-    DEMO_NEWS,
+    demoNews(),
     { enabled: !!holdTickers && rightTab === 2, staleTime: 300_000 },
   )
   // 실적/배당: Earnings 탭 활성 시에만 요청 (병렬화했지만 여전히 yfinance N개 호출)
   const earningsQ = useDemoQuery(
     ['earnings', holdTickers],
     () => getEarnings(holdTickers.split(',').filter(Boolean)),
-    DEMO_EARNINGS,
+    demoEarnings(),
     { enabled: !!holdTickers && botTab === 0, staleTime: 3600_000 },
   )
 
@@ -3060,6 +3074,16 @@ export default function AlphaTerminal() {
                     <div className="flex items-center gap-2 py-4 justify-center">
                       <span className="w-2 h-2 rounded-full bg-[#10b981] animate-pulse" />
                       <span className="text-sm text-[#94a3b8]">AI 분석 중…</span>
+                    </div>
+                  )}
+                  {/* 실패하면 아무것도 안 그려 '분석 중' 도 결과도 없는 빈 패널이 남았다.
+                      브리핑과 같은 방식으로 사유를 보여 준다 (서버 detail → 예외 메시지). */}
+                  {feedbackQ.isError && !feedbackQ.isFetching && (
+                    <div className="py-4 text-center">
+                      <p className="text-sm text-[#ef4444]">AI 분석을 불러오지 못했습니다</p>
+                      <p className="mt-1 text-[12px] text-[#cbd5e1] leading-relaxed whitespace-pre-wrap break-words">
+                        {errorText(feedbackQ.error)}
+                      </p>
                     </div>
                   )}
                   {feedbackQ.data && !feedbackQ.isFetching && (
