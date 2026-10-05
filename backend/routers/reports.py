@@ -123,6 +123,11 @@ def _job_get(job_id: str, owner: str | None = None) -> dict | None:
 
 @router.post("/daily-brief")
 async def daily_brief(_auth: dict = Depends(ai_feature_user), market: str = Depends(market_param)):
+    """한 요청으로 만들어 돌려주는 옛 경로. 화면은 `/daily-brief/start` 를 쓴다.
+
+    배포 직후 옛 번들을 연 탭이 부를 수 있어 남겨 둔다. 운영에서는 60초에 끊길 수
+    있다 (`daily_brief_start` docstring).
+    """
     uid = _auth["uid"]
     holdings = get_holdings(uid, market=market)
     if not holdings:
@@ -159,6 +164,69 @@ async def daily_brief(_auth: dict = Depends(ai_feature_user), market: str = Depe
         "file_path":  filename,
         "logs":       logs,
     }
+
+
+# 잡 경로의 일반 실패 문장 (원인은 로그로만).
+_BRIEF_FAILED = ("브리핑을 만드는 중 서버 오류가 났습니다. 잠시 후 다시 시도해 주세요. "
+                 "계속되면 관리자에게 알려 주세요.")
+
+
+@router.post("/daily-brief/start")
+def daily_brief_start(_auth: dict = Depends(ai_feature_user), market: str = Depends(market_param)):
+    """전날 브리핑 백그라운드 잡 시작. 즉시 {job_id} — 상태는 GET /job/{job_id}.
+
+    위의 `/daily-brief`(한 요청으로 만들어 돌려줌)를 잡으로 바꾼 것이다. 보유 종목
+    **전부**의 뉴스를 찾게 되면서(2026-10) 걸리는 시간이 종목 수에 비례하게 됐는데,
+    운영의 요청 경로(Firebase Hosting → Cloud Run rewrite)는 **60초**에서 끊는다.
+    예전 브리핑도 평균 48초였다. 끊기면 화면은 오류를 보이는데 서버는 끝까지 만들어
+    기록에 저장했다 — 실패처럼 보이는 성공이다.
+
+    진행 중 잡에는 `pct`(0~100)·`stage`(단계 문구)가 실린다. 화면이 경과 시간으로
+    진행률을 흉내 내지 않게 하려는 것이다 — 종목 수에 따라 걸리는 시간이 다르다.
+    """
+    uid = _auth["uid"]
+    holdings = get_holdings(uid, market=market)
+    if not holdings:
+        raise HTTPException(status_code=400, detail="보유 종목 없음")
+
+    job_id = str(uuid.uuid4())
+    _job_set(job_id, {"status": "pending", "pct": 0, "stage": "준비 중"}, owner=uid)
+    should_cancel = _store.cancel_token(job_id)
+
+    def _progress(pct: int, stage: str) -> None:
+        # pending 일 때만 바꾼다 — 취소된 잡을 진행 중으로 되살리지 않는다.
+        _store.update_if(job_id, "pending", {"status": "pending", "pct": pct, "stage": stage})
+
+    def _run() -> None:
+        logs: list[str] = []
+        try:
+            report, _price_data = generate_daily_report(holdings, logs.append, market,
+                                                        on_progress=_progress)
+            # 취소한 브리핑은 기록에 남기지 않는다.
+            if should_cancel():
+                return
+            date_str = datetime.now().strftime("%Y%m%d_%H%M")
+            filename = f"daily_brief_{date_str}.md"
+            save_report(filename, report, report_type="daily_brief",
+                        metadata={"user_id": uid}, user_id=uid, market=market)
+            # price_data 는 싣지 않는다 — 화면이 쓰지 않고, 잡 결과는 JSON 으로 저장된다.
+            result = {"report": report, "file_path": filename, "logs": logs}
+            if not _store.update_if(job_id, "pending", {"status": "done", "result": result}):
+                logger.info("데일리 브리프 잡 %s: 완료 시점에 이미 pending 이 아니다(취소)", job_id)
+        except Exception as e:
+            # 만들지 않기로 한 사유(서비스가 사용자용 문장으로 올린 것)는 그대로,
+            # 그 밖은 일반 안내 — 원인은 로그로만 (§1.3, _errors.py).
+            reason = user_sentence(e, _BRIEF_USER_REASONS) if isinstance(e, RuntimeError) else None
+            if reason is not None:
+                logger.warning("데일리 브리프를 만들지 않았다 (%s): %s", market, reason)
+                message = reason
+            else:
+                log_hidden(logger, f"데일리 브리프 잡 ({market})", e)
+                message = _BRIEF_FAILED
+            _store.update_if(job_id, "pending", {"status": "error", "message": message})
+
+    threading.Thread(target=_run, daemon=True, name=f"daily-brief-{job_id[:8]}").start()
+    return {"job_id": job_id}
 
 
 @router.get("/daily-brief/history")

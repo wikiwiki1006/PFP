@@ -8,7 +8,7 @@ import type {
   ScanResult, PairsSignal, MeanReversionSignal, MomentumSignal,
   MarketRegime,
   MacroModes, MacroAnalysisResult, AnalystFeedback,
-  DailyBriefResult, ReportFile, Industry, EquityReportResult, IndustryReportResult,
+  ReportFile, Industry, EquityReportResult, IndustryReportResult,
   SignalScanResult, SignalScoreResult, TechnicalChartResult, PairsAutoResult,
   TickerDetail, AIOptimizationResult,
 } from '@/types'
@@ -105,7 +105,12 @@ export const getSectorWeights = async (): Promise<SectorWeights> =>
 export const getTrades = async (): Promise<Trade[]> =>
   (await api.get('/api/portfolio/trades')).data
 
-export const postTrade = async (trade: TradeForm): Promise<{ ok: boolean; record: Trade }> =>
+/** `initial_deposit_adjusted` — 최초 입금보다 이른 매수를 넣었을 때 서버가 최초 입금을
+ *  그 날짜로 당기고 금액을 늘렸으면 그 결과 (routers/portfolio.py `_add_trade_locked`). */
+export const postTrade = async (trade: TradeForm): Promise<{
+  ok: boolean; record: Trade
+  initial_deposit_adjusted?: { date: string; q: number; previous_date: string; previous_q: number } | null
+}> =>
   (await api.post('/api/portfolio/trades', trade)).data
 
 export const updateHolding = async (ticker: string, body: { q: number; avg: number; sector?: string; date?: string }): Promise<void> =>
@@ -181,6 +186,7 @@ export const getMarketRegime = async (ticker = '^GSPC', years = 1): Promise<Mark
   (await api.get('/api/signals/regime', { params: { ticker, years } })).data
 
 // ── Timing Engine ──────────────────────────────────────────────────────────────
+/** 매수·매도 점수 상위 `topN` 개 (섹터 무관). 보유 종목은 쓰지 않는다. */
 export const getSignalScan = async (topN = 10): Promise<SignalScanResult> =>
   (await api.get('/api/signals/signal-scan', { params: { top_n: topN } })).data
 
@@ -244,7 +250,7 @@ export const getMacroModes = async (): Promise<MacroModes> =>
   (await api.get('/api/macro/modes')).data
 
 export const startMacroAnalysis = async (body: {
-  event: string; model?: string; mode?: string; portfolio?: Record<string, unknown>
+  event: string; model?: string; mode?: string; tickers?: string[]
 }): Promise<{ job_id: string }> =>
   (await api.post('/api/macro/analyze', body)).data
 
@@ -271,6 +277,9 @@ export const getReportJob = async (jobId: string): Promise<{
   status: 'pending' | 'done' | 'error' | 'cancelled'
   result?: Record<string, unknown>
   message?: string
+  /** 진행 중 잡의 진행률(0~100)·단계 문구 — 전날 브리핑 잡이 싣는다. */
+  pct?: number
+  stage?: string
 }> => (await api.get(`/api/reports/job/${jobId}`)).data
 
 export const cancelReportJob = async (jobId: string): Promise<{ ok: boolean }> =>
@@ -293,8 +302,11 @@ export const getAnalystFeedback = async (metrics?: {
   (await api.post('/api/macro/analyst-feedback/auto', metrics ?? {})).data
 
 // ── Reports ────────────────────────────────────────────────────────────────────
-export const generateDailyBrief = async (): Promise<DailyBriefResult> =>
-  (await api.post('/api/reports/daily-brief')).data
+// 전날 브리핑은 잡이다 — 시작하면 job_id 를 받고 getReportJob 으로 폴링한다.
+// 한 요청으로 만들던 예전 방식은 운영 경로(Firebase Hosting → Cloud Run)의 60초
+// 제한에 걸렸다 (backend/routers/reports.py `daily_brief_start`).
+export const startDailyBrief = async (): Promise<{ job_id: string }> =>
+  (await api.post('/api/reports/daily-brief/start')).data
 
 export const getDailyBriefHistory = async (): Promise<{ name: string; path: string; size: number }[]> =>
   (await api.get('/api/reports/daily-brief/history')).data

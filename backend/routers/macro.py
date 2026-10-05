@@ -26,21 +26,15 @@ from backend.models.macro import MacroAnalysisRequest
 from backend.services.ai_analysis import (
     run_macro_agents,
     parse_verdict_cards,
-    parse_portfolio_actions,
+    parse_ticker_impacts,
     get_ai_analyst_feedback,
-    generate_daily_brief,
     ANALYSIS_MODES,
     MODEL_OPTIONS,
 )
 from backend.services.job_store import JobCancelled, JobStore
 from backend.db.reports_repo import save_report, list_reports, get_report_content
-from backend.services.market_data import (
-    get_close_df,
-    get_sector_changes,
-    get_portfolio_news,
-)
+from backend.services.market_data import get_close_df, get_sector_changes
 from backend.services.portfolio_calculator import calculate_metrics, build_equity_curve
-from backend.services.price_series import daily_change
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +85,10 @@ def analyze_macro(
     ev           = req.event
     req_model    = req.model
     req_mode     = req.mode
-    req_port     = req.portfolio
+    # 분석 대상은 **요청에 적힌 티커만**이다. 예전에는 이 값이 비면
+    # `_load_holdings(uid)` 로 보유 종목을 읽어 채웠고, 그 결과 같은 이벤트를
+    # 물어도 사용자마다 다른 답이 나갔다(개별성 → 투자자문업). 폴백을 없앴다.
+    req_tickers  = [str(t).strip().upper() for t in (req.tickers or []) if str(t).strip()]
     uid          = _auth["uid"]
 
     # 심층 분석이 잠겨 있으면 sonnet 요청을 basic(haiku)으로 낮춘다.
@@ -121,10 +118,9 @@ def analyze_macro(
 
     def _run() -> None:
         try:
-            portfolio = req_port or _load_holdings(uid, market=market)
             agent_results = run_macro_agents(
                 event=ev,
-                portfolio=portfolio,
+                tickers=req_tickers,
                 model_key="sonnet" if tier == "deep" else "haiku",
                 mode=req_mode,
                 should_cancel=should_cancel,
@@ -132,18 +128,21 @@ def analyze_macro(
             )
 
             verdict_cards = None
-            portfolio_actions = None
+            ticker_impacts = None
             for ag in agent_results:
                 if ag["id"] == 9:
                     verdict_cards = parse_verdict_cards(ag["text"])
                 if ag["id"] == 8:
-                    portfolio_actions = parse_portfolio_actions(ag["text"])
+                    ticker_impacts = parse_ticker_impacts(ag["text"])
 
             result = {
                 "event":             ev,
                 "agents":            agent_results,
                 "verdict_cards":     verdict_cards,
-                "portfolio_actions": portfolio_actions,
+                # 키 이름이 `portfolio_actions` 였다. 그 이름 자체가 "이 사람의
+                # 포트폴리오에 대한 행동 지시" 라는 뜻이라 같이 바꿨다 — 지금
+                # 담기는 것은 입력된 종목별 이벤트 영향이다.
+                "ticker_impacts":    ticker_impacts,
             }
 
             date_str   = datetime.now().strftime("%Y%m%d_%H%M")
@@ -250,6 +249,31 @@ class LiveMetrics(BaseModel):
     today_chg_pct: Optional[float] = None
 
 
+def _feedback_session_key(market: str) -> str:
+    """AI 피드백 저장 키 — **가장 최근에 시작된 정규장**의 날짜.
+
+    한 번 만든 피드백을 다음 장이 열리기 전까지 재사용한다 (사용자 요청, 2026-10).
+    장중·마감 후·주말 내내 같은 키이고, 새 장이 열리는 순간 키가 바뀌어 다음 요청이
+    새로 만든다. 시장마다 시각과 휴장일이 다르다 — 미국 09:30 ET, 한국 09:00 KST.
+    """
+    from datetime import time as _t, timedelta as _td
+    from backend.services.market_calendar import (
+        now_et, now_kst, is_us_trading_day, is_kr_trading_day,
+    )
+    if market == "KR":
+        n, opens, is_day = now_kst(), _t(9, 0), is_kr_trading_day
+    else:
+        n, opens, is_day = now_et(), _t(9, 30), is_us_trading_day
+    d = n.date()
+    if not (is_day(d) and n.time() >= opens):
+        d -= _td(days=1)
+        for _ in range(12):            # 연휴가 길어도 이 안에서 끝난다
+            if is_day(d):
+                break
+            d -= _td(days=1)
+    return f"{market}_session_{d.isoformat()}"
+
+
 @router.post("/analyst-feedback/auto")
 def analyst_feedback_auto(
     live: LiveMetrics = LiveMetrics(),
@@ -258,33 +282,20 @@ def analyst_feedback_auto(
 ):
     """포트폴리오 섹터 기반 AI 피드백 생성.
 
-    장이 닫혀 있는 동안에는 값이 변하지 않는다. 그때마다 새로 만들면 같은 답을
-    받으려고 LLM 비용과 20~30초를 다시 쓰게 되므로, 다음 장이 열릴 때까지
-    한 번 만든 결과를 재사용한다. 장중에는 지표가 실시간으로 움직이므로
-    누를 때마다 새로 만든다.
+    **한 장에 한 번 만든다.** 이번 장(가장 최근에 시작된 정규장)에 이미 만든 피드백이
+    있으면 다시 만들지 않고 그것을 돌려준다 — 장중에도 같다(사용자 요청, 2026-10).
+    새 장이 시작된 뒤의 첫 요청이 새로 만든다. 저장은 사용자별·시장별이다
+    (`_feedback_session_key` 에 시장, `save_analysis` 에 user_id).
     """
     uid = _auth["uid"]
 
+    from datetime import datetime as _dt
     from backend.db.reports_repo import get_analysis, save_analysis
-    from backend.services.market_calendar import (
-        is_us_market_open, is_kr_market_open, next_session_open,
-        last_completed_kr_session,
-    )
 
-    # 장중 판단은 그 시장 기준이어야 한다. 미국 기준으로 고정하면 한국장이
-    # 열려 있는 동안 '마감'으로 보고 낡은 캐시를 계속 돌려준다.
-    market_open = is_kr_market_open() if market == "KR" else is_us_market_open()
-    # 장 마감 후 저녁과 다음 날 아침이 같은 키를 갖도록 '다음 개장일'로 묶는다.
-    # 캐시 키에도 시장을 넣는다 — 안 넣으면 미국 피드백이 한국 화면에 나온다.
-    if market == "KR":
-        cache_key = f"KR_after_{last_completed_kr_session().isoformat()}"
-    else:
-        cache_key = f"until_{next_session_open().isoformat()}"
-
-    if not market_open:
-        cached = get_analysis("analyst_feedback", cache_key, user_id=uid)
-        if cached:
-            return {**cached, "from_cache": True}
+    cache_key = _feedback_session_key(market)
+    cached = get_analysis("analyst_feedback", cache_key, user_id=uid)
+    if cached:
+        return {**cached, "from_cache": True}
     holdings  = _load_holdings(uid, market=market)
     trade_log = _load_trade_log(uid, market=market)
 
@@ -372,70 +383,18 @@ def analyst_feedback_auto(
         # "VIX" 라고 부르던 것을 고치면서 생긴 계약이다.
         market=market,
     )
-    result = {"feedback": text, "metrics_snapshot": metrics}
-    if not market_open:
-        # TTL 은 넉넉히 잡되, 실제 만료는 cache_key 가 바뀌는 시점에 일어난다.
-        save_analysis("analyst_feedback", cache_key, result, ttl_hours=96, user_id=uid)
+    result = {"feedback": text, "metrics_snapshot": metrics,
+              "generated_at": _dt.now().astimezone().isoformat(timespec="minutes"),
+              "session": cache_key.rsplit("_", 1)[-1]}
+    # TTL 은 넉넉히(긴 연휴 포함) 잡되, 실제 만료는 새 장이 열려 cache_key 가 바뀌는 시점이다.
+    save_analysis("analyst_feedback", cache_key, result, ttl_hours=24 * 12, user_id=uid)
     return {**result, "from_cache": False}
 
 
-# ── 데일리 브리프 ─────────────────────────────────────────────────────────────
-
-@router.post("/daily-brief")
-def daily_brief(
-    portfolio: Optional[dict] = None,
-    _auth: dict = Depends(ai_feature_user),
-    market: str = Depends(market_param),
-):
-    """오늘의 포트폴리오 브리프 마크다운 생성 (Claude Sonnet)."""
-    uid      = _auth["uid"]
-    holdings = portfolio or _load_holdings(uid, market=market)
-    # 매매 이력은 읽지 않는다. 이 브리프는 자산곡선을 만들지 않고, 취득원가는
-    # holdings 의 avg 에서 온다. (예전에는 여기서 _load_trade_log 를 부른 뒤
-    # 결과를 쓰지 않고 버렸다 — 요청마다 도는 빈 조회였다.)
-
-    if not holdings:
-        raise HTTPException(status_code=400, detail="보유 종목 없음")
-
-    tickers = [t for t in holdings if t != "CASH"]
-
-    # `fill=False` 로 받는다. ffill 된 프레임의 **마지막 두 행**을 빼면 안 된다 —
-    # 종가가 아직 확정되지 않은 날은 전일 종가가 그대로 복제돼 들어 있어서,
-    # 두 행의 차이가 정확히 0 이 된다. 실측으로 한국 브리프의 보유 세 종목이
-    # 전부 `+0.00%`, 오늘 손익 합계 `₩0` 으로 나갔고, 모델은 그걸 '보합'
-    # 으로 서술했다. 값이 없는 것이 '움직이지 않았다' 로 둔갑한다 (§1.3a·§1.6).
-    #
-    # 마지막 두 **실제 관측치**를 고르는 일은 `price_series.daily_change` 가
-    # 이미 한다 — 비거래일·중복 인덱스·장전 행까지 처리한다. 여기서 다시
-    # 구현하지 않는다.
-    raw_df = get_close_df(tickers, period="5d", ttl=60, fill=False)
-
-    # 금액은 전부 계산해서 넘긴다. 비율만 주면 모델이 수량을 곱해 금액을
-    # 지어내는데 그 산술이 틀린다 (실측: 1일 손익 +₩10,239 → +₩688,000).
-    price_data = {}
-    for t in tickers:
-        ch = daily_change(raw_df, t)
-        if ch is None:
-            # 관측치가 두 개 미만이면 이 종목은 빼고, 합계도 이 종목 없이
-            # 내지 않는다 — generate_daily_brief 가 '합산 불가'로 적는다.
-            continue
-        qty = float(holdings[t].get("q") or 0)
-        avg = float(holdings[t].get("avg") or 0)
-        price_data[t] = {
-            "price":   round(ch.price, 2),
-            "chg_pct": round(ch.chg_pct, 4),
-            "pnl_pct": round((ch.price / avg - 1) * 100, 4) if avg else None,
-            "pos_val": round(ch.price * qty, 2),
-            "day_pnl": round(ch.chg_val * qty, 2),
-            # 이 수치가 **어느 세션의 것인지**. 브리프가 "오늘" 이라고 쓰는데
-            # 실제로는 전 거래일 종가인 경우를 모델이 알아야 한다.
-            "as_of":   ch.as_of.strftime("%Y-%m-%d"),
-        }
-
-    # 거시지표는 여기서 고르지 않는다. 시장에 맞는 것을 고르는 분기가
-    # ai_analysis 에 이미 있고, 여기서 FRED 를 무조건 부르던 탓에 한국
-    # 브리프가 연준 금리를 근거로 쓰였다.
-    news_items = get_portfolio_news(tickers, max_per=2)
-
-    md = generate_daily_brief(holdings, price_data, news_items, market)
-    return {"markdown": md}
+# ── 제거된 엔드포인트 ─────────────────────────────────────────────────────────
+#
+#   POST /api/macro/daily-brief — 화면이 부르지 않는 두 번째 데일리 브리프라 지웠다.
+#        화면의 '전날 브리핑' 은 /api/reports/daily-brief (services/daily_report.py) 다.
+#
+# (AI 피드백 /analyst-feedback/auto 는 2026-10 에 '포트폴리오 상황' 으로 바꿨다가
+#  사용자 요청으로 되살렸다 — 위 블록.)

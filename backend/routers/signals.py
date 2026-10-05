@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 _REGIME_USER_REASONS = (re.compile(r"ER 계산에 필요한 데이터 부족"),)
 
 from backend.services.auth import optional_user
-from backend.db.portfolio_repo import get_holdings as db_get_holdings
 from backend.db.market_cache import get_common, save_common
 from backend.services.market_data import get_close_df, _cached
 from backend.services.markets import market_param
@@ -62,24 +61,23 @@ _scan_cache: dict = {}
 
 @router.post("/scan")
 def scan_universe(
-    top_n:             int  = Query(default=10, ge=1, le=30),
-    include_portfolio: bool = Query(default=True),
-    _auth: Optional[dict] = Depends(optional_user),
+    top_n:  int = Query(default=10, ge=1, le=30),
     market: str = Depends(market_param),
 ):
     """
-    S&P500 + 나스닥 전수 스캔 — 롱/숏 타점 반환.
+    표준 유니버스 전수 스캔 — 롱/숏 타점 반환.
     30~60초 소요. 결과는 인메모리 캐시.
+
+    **보유 종목을 섞지 않는다.** 예전에는 `include_portfolio`(기본 True)로
+    로그인 사용자의 보유 종목을 유니버스에 더했다. 그러면 같은 요청이
+    사용자마다 다른 결과를 내고, 그 순간 '불특정 다수에게 동질적인 조언'
+    이라는 전제가 깨진다(자본시장법 제101조 → 제6조 제7항). 스캔 대상은
+    이제 누구에게나 같다.
     """
     import yfinance as yf
     from backend.db.market_cache import _yf_sem
 
-    # 비로그인 사용자는 표준 유니버스만 스캔한다 (남의 보유 종목이 섞이면 안 된다).
-    extra    = []
-    if include_portfolio and _auth:
-        extra = [t for t in db_get_holdings(_auth["uid"], market=market) if t != "CASH"]
-
-    universe = sorted(set(SP500_NASDAQ_UNIVERSE + extra))
+    universe = sorted(set(SP500_NASDAQ_UNIVERSE))
 
     import logging as _logging
     _logger = _logging.getLogger(__name__)
@@ -461,42 +459,62 @@ def _universe_for(market: str) -> list[str]:
 _UNIVERSE_LABEL = {"US": "S&P500", "KR": "KOSPI200·KOSDAQ150"}
 
 
+# 스캔 결과 캐시 키. scheduler._update_signal_scan 과 **같은 키**여야 한다.
+# 버전은 저장 내용이 바뀔 때 올린다 — v3 는 `scores`(유니버스 전 종목의 매수·매도
+# 점수)를 함께 담는다. 키가 같으면 옛 캐시가 TTL 동안 계속 읽힌다.
+def _scan_cache_key(market: str) -> str:
+    return f"signal_scan:v3:{market}"
+
+
+def _load_or_compute_scan(market: str) -> dict:
+    """스캔 결과(캐시 우선). 캐시 미스면 DB 종가·거래량으로 즉석 계산해 저장한다."""
+    cache_key = _scan_cache_key(market)
+    cached = get_common(cache_key)
+    if cached:
+        return cached
+    from backend.db.market_cache import get_prices_from_db, get_volume_from_db
+
+    universe = _universe_for(market)
+    if not universe:
+        # 유니버스가 비어 있는 것과 시세가 아직 없는 것은 원인이 다르다.
+        # 뭉뚱그리면 무엇을 기다려야 하는지 알 수 없다.
+        raise HTTPException(
+            status_code=503,
+            detail="종목 목록을 준비하는 중입니다. 잠시 후 다시 시도하세요.",
+        )
+    close_df = get_prices_from_db(universe, "1y", fill=True)
+    if close_df is None or close_df.empty:
+        raise HTTPException(
+            status_code=503,
+            detail="가격 데이터가 아직 준비되지 않았습니다. 잠시 후 다시 시도하세요.",
+        )
+    volume_df = get_volume_from_db(universe, "1y")
+    valid = [c for c in universe if c in close_df.columns]
+    cached = sma_macd_rsi_scan(close_df[valid], volume_df, top_n=10, score_all=True)
+    save_common(cache_key, cached, ttl_seconds=21600)
+    return cached
+
+
 @router.get("/signal-scan")
 def signal_scan(top_n: int = Query(default=10, ge=1, le=30),
                 market: str = Depends(market_param)):
     """
     매매신호 스캔 (미국 S&P500 · 한국 KOSPI200·KOSDAQ150) — SMA 1차 필터 → 통과 종목만
-    MACD/RSI 스코어링 → 매수/매도 상위 N개. 응답의 `universe_label` 이 스캔 대상 이름이다.
+    MACD/RSI 스코어링 → 매수/매도 **점수 상위 N개(섹터 무관)**. 응답의
+    `universe_label` 이 스캔 대상 이름이다.
+
+    잠시 섹터별 상위 5개로 바꿨다가 되돌렸다(사용자 요청). 섹터 조회 의존도
+    함께 없앴다.
+
+    **개인 데이터를 읽지 않는다.** 같은 시장·같은 날이면 누가 부르든 같은 응답이다.
 
     스케줄러가 일별 가격·거래량 수집 직후 계산해 common_cache 에 저장한다.
     캐시 미스일 때만 DB(market_prices)의 종가·거래량으로 즉석 계산한다 — yfinance 호출 없음.
     """
-    cache_key = f"signal_scan:{market}"
-    cached = get_common(cache_key)
-    if not cached:
-        from backend.db.market_cache import get_prices_from_db, get_volume_from_db
+    cached = _load_or_compute_scan(market)
 
-        universe = _universe_for(market)
-        if not universe:
-            # 유니버스가 비어 있는 것과 시세가 아직 없는 것은 원인이 다르다.
-            # 뭉뚱그리면 무엇을 기다려야 하는지 알 수 없다.
-            raise HTTPException(
-                status_code=503,
-                detail="종목 목록을 준비하는 중입니다. 잠시 후 다시 시도하세요.",
-            )
-        close_df = get_prices_from_db(universe, "1y", fill=True)
-        if close_df is None or close_df.empty:
-            raise HTTPException(
-                status_code=503,
-                detail="가격 데이터가 아직 준비되지 않았습니다. 잠시 후 다시 시도하세요.",
-            )
-        volume_df = get_volume_from_db(universe, "1y")
-        valid = [c for c in universe if c in close_df.columns]
-        cached = sma_macd_rsi_scan(close_df[valid], volume_df, top_n=10)
-        save_common(cache_key, cached, ttl_seconds=21600)
-
-    long_picks  = cached.get("long_picks", [])[:top_n]
-    short_picks = cached.get("short_picks", [])[:top_n]
+    long_picks  = (cached.get("long_picks")  or [])[:top_n]
+    short_picks = (cached.get("short_picks") or [])[:top_n]
 
     # 한국 종목은 코드만 보여 주면 무슨 회사인지 알 수 없다. 미국은 티커가
     # 곧 이름 역할을 하지만 '044490.KQ' 는 아무것도 알려 주지 않는다.
@@ -506,19 +524,31 @@ def signal_scan(top_n: int = Query(default=10, ge=1, le=30),
         long_picks  = [{**p, "name": names.get(p.get("ticker"), "")} for p in long_picks]
         short_picks = [{**p, "name": names.get(p.get("ticker"), "")} for p in short_picks]
 
-    return {**cached, "long_picks": long_picks, "short_picks": short_picks,
+    # `scores` 는 응답에 싣지 않는다 — 유니버스 전 종목이라 수백 KB 다. 상세 점수는
+    # /signal-score 가 종목 하나씩 꺼내 준다.
+    body = {k: v for k, v in cached.items() if k != "scores"}
+    return {**body, "long_picks": long_picks, "short_picks": short_picks,
             "universe_label": _UNIVERSE_LABEL.get(market)}
 
 
 @router.get("/signal-score")
-def signal_score(ticker: str = Query(..., description="점수를 조회할 티커. 예: AAPL")):
+def signal_score(ticker: str = Query(..., description="점수를 조회할 티커. 예: AAPL"),
+                 market: str = Depends(market_param)):
     """
-    단일 종목의 매수/매도 통합 점수 — Signal Scan 상위 N개 리스트에 없어도(순위 밖,
-    또는 S&P500 유니버스 밖 종목이어도) 검색하면 참고 점수를 볼 수 있게 한다.
-    `sma_macd_rsi_scan` 과 완전히 동일한 스코어링 공식을 쓴다.
+    단일 종목의 매수/매도 점수. 응답의 `as_of` 가 점수의 기준일, `basis` 가 출처다.
 
-    종가는 DB 우선(없으면 즉석 수집)이고, 거래량은 DB(S&P500 백필분)에 없으면
-    이 요청 한정으로만 짧게 온디맨드 조회한다 — 결과를 DB에 저장하지 않는다.
+    · basis="scan"      — 스캔 유니버스 종목. 스캔이 **같은 프레임에서** 미리 계산해 둔
+                          값을 그대로 돌려준다. 그래서 목록에 오른 종목은 목록 점수와
+                          상세 점수가 정확히 같다.
+    · basis="on_demand" — 유니버스 밖(검색한 임의 종목). 같은 공식으로 즉석 계산하되,
+                          **종가가 확정된 마지막 세션까지만**, 가격·거래량을 **같은
+                          마지막 날짜로 맞춰** 쓴다.
+    · basis="scan_unavailable" — 스캔을 만들 수 없는 상태(유니버스·시세 준비 중)라
+                          즉석 계산했다. 이 종목이 스캔 대상인지 아닌지는 모른다.
+
+    예전에는 모든 종목을 즉석 계산했고, 가격은 `get_close_df`(장중 실시간 봉 포함,
+    오늘까지)·거래량은 DB(스캔 기준일까지)였다. 목록과 상세가 다른 날짜의 데이터로
+    점수를 냈다 — 실측 HPE 목록 80 / 상세 50, FICO 79 / 39 (sma_macd_rsi_scan docstring).
     """
     from backend.db.market_cache import get_volume_from_db
     from backend.services.trading_signals import score_ticker_both_sides
@@ -527,7 +557,26 @@ def signal_score(ticker: str = Query(..., description="점수를 조회할 티�
     if not sym:
         raise HTTPException(status_code=400, detail="티커를 입력하세요")
 
-    close_df = get_close_df([sym], period="1y", ttl=300)
+    # ── 1) 스캔 유니버스 종목: 스캔이 계산해 둔 값 ──────────────────────
+    try:
+        scan = _load_or_compute_scan(market)
+    except HTTPException:
+        # 스캔을 못 만드는 상황(유니버스·시세 준비 중)이어도 단일 종목 조회는
+        # 아래 즉석 계산으로 할 수 있다. 503 을 그대로 올리지 않는다.
+        scan = None
+    scored = ((scan or {}).get("scores") or {}).get(sym)
+    if scored:
+        return {**scored, "as_of": scan.get("as_of"), "basis": "scan"}
+    # 스캔이 없어서 즉석 계산하는 것과, 스캔 대상 밖이라 즉석 계산하는 것은 다르다.
+    # 앞의 경우를 '스캔 대상 밖' 이라고 말하면 사실이 아니다.
+    basis = "on_demand" if scan is not None else "scan_unavailable"
+
+    # ── 2) 유니버스 밖: 같은 공식, 같은 날짜의 가격·거래량으로 즉석 계산 ──
+    # include_market=False · fill=False — 이 종목이 실제로 거래된 날만 쓴다. 기본값
+    # (시장 지수·환율·암호화폐를 같이 받아 ffill)으로 받으면 이 종목이 쉬던 날
+    # (다른 시장 개장일·주말 암호화폐 행)에 전날 종가가 복사돼 들어가 SMA·RSI 가
+    # 가짜 봉으로 계산된다.
+    close_df = get_close_df([sym], period="1y", ttl=300, include_market=False, fill=False)
     if sym not in close_df.columns:
         raise HTTPException(status_code=404, detail=f"{sym} 데이터를 찾을 수 없습니다")
 
@@ -540,7 +589,7 @@ def signal_score(ticker: str = Query(..., description="점수를 조회할 티�
             import yfinance as yf
             from backend.db.market_cache import _yf_sem
             with _yf_sem:
-                hist = yf.Ticker(sym).history(period="6mo")
+                hist = yf.Ticker(sym).history(period="1y")
             if hist.empty or "Volume" not in hist.columns:
                 return None
             vol = hist["Volume"]
@@ -552,10 +601,47 @@ def signal_score(ticker: str = Query(..., description="점수를 조회할 티�
             return None
 
     volume = _cached(f"signal_score_volume::{sym}", 900, _volume_series)
-    result = score_ticker_both_sides(sym, close_df[sym], volume)
+    close = close_df[sym].dropna()
+    if getattr(close.index, "tz", None) is not None:
+        close.index = close.index.tz_localize(None)
+
+    # 종가가 확정된 마지막 세션까지만 쓴다. 가격 캐시는 장중 실시간 봉을, yfinance
+    # 거래량 폴백은 장중 부분 거래량을 오늘 행으로 준다 — 그대로 쓰면 '오늘 종가 기준'
+    # 이라고 표시하면서 실제로는 장중 값으로 점수를 낸다. 시장은 요청이 아니라 티커로
+    # 정한다 (한국 화면에서 미국 티커를 검색해도 미국 세션 기준이어야 한다).
+    from backend.services.market_calendar import last_completed_kr_session, last_completed_session
+    from backend.services.markets import market_of_ticker
+    cutoff = pd.Timestamp(last_completed_kr_session() if market_of_ticker(sym) == "KR"
+                          else last_completed_session())
+    close = close[close.index.normalize() <= cutoff]
+
+    vol = None
+    if volume is not None:
+        vol = volume.dropna()
+        if getattr(vol.index, "tz", None) is not None:
+            vol.index = vol.index.tz_localize(None)
+        vol = vol[vol.index.normalize() <= cutoff]
+        if not len(vol):
+            vol = None
+
+    # 가격과 거래량을 **같은 마지막 날짜**로 맞춘다. 한쪽만 늦게 끝나면 MACD·RSI 와
+    # 거래량 배율이 서로 다른 날의 값이 된다 — 어느 날의 점수도 아니다. 예전 이 경로가
+    # 가격은 오늘(장중), 거래량은 며칠 전이었다.
+    if len(close):
+        last_day = close.index.max().normalize()
+        if vol is not None:
+            last_day = min(last_day, vol.index.max().normalize())
+            vol = vol[vol.index.normalize() <= last_day]
+        close = close[close.index.normalize() <= last_day]
+        as_of = last_day.strftime("%Y-%m-%d")
+    else:
+        as_of = None
+
+    result = score_ticker_both_sides(sym, close, vol)
     if result.get("insufficient_history"):
         raise HTTPException(status_code=400, detail=f"{sym}의 가격 이력이 부족해 점수를 계산할 수 없습니다")
-    return result
+    return {**result, "as_of": as_of, "basis": basis}
+
 
 
 def _fetch_ohlc(ticker: str) -> "pd.DataFrame | None":

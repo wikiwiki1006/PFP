@@ -182,15 +182,34 @@ def test_one_markets_cached_answer_is_not_served_to_the_other(world):
     assert len(prompts) == 1 and "- VKOSPI 지수: 43.0 (위험)" in prompts[0]
 
 
-def test_while_the_market_is_open_every_call_makes_a_new_prompt(world):
+# 요구사항이 바뀌었다 (사용자 요청, 2026-10): 예전에는 장중이면 호출마다 새로 만들었다
+# (`test_while_the_market_is_open_every_call_makes_a_new_prompt`). 이제는 한 장에 한 번
+# 만들고 다음 장이 열리기 전까지 재사용한다 — routers/macro.py `_feedback_session_key`.
+
+def test_while_the_market_is_open_a_second_call_reuses_this_sessions_answer(world):
     world.open["KR"] = True
 
-    _, first = world.call("KR")
+    first, made = world.call("KR")
     second, again = world.call("KR")
 
-    assert len(first) == 1 and len(again) == 1
+    assert len(made) == 1 and first.json()["from_cache"] is False
+    assert again == [], "the same session made a second prompt"
+    assert second.json()["from_cache"] is True
+    assert second.json()["feedback"] == first.json()["feedback"]
+
+
+def test_a_new_session_makes_a_new_answer(world, monkeypatch):
+    first, made = world.call("US")
+    # 다음 거래일 장중으로 시계를 옮긴다 — 새 장이 열렸다.
+    later = _NOW_ET + timedelta(days=1)
+    while later.weekday() >= 5:
+        later += timedelta(days=1)
+    later = later.replace(hour=11, minute=0)
+    monkeypatch.setattr(market_calendar, "now_et", lambda: later)
+    second, again = world.call("US")
+
+    assert len(made) == 1 and len(again) == 1, "a new session reused the previous session's answer"
     assert second.json()["from_cache"] is False
-    assert world.cache_reads == [], "an open market read the closed-market cache"
 
 
 # ── 프롬프트 — 등급은 적힌 숫자로 ──────────────────────────────────────────────

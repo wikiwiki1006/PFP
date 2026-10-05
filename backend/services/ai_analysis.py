@@ -581,7 +581,7 @@ def call_claude(prompt: str, model: str, max_tokens: int, perplexity_ctx: str = 
 
 def _build_agents(
     ev: str,
-    portfolio_str: str,
+    watchlist_str: str,
     prev_results: list[str] | None = None,
     context_limit: int = CONTEXT_CHAR_LIMIT,
     market: str = "US",
@@ -797,28 +797,32 @@ AI와 반도체가 새로운 변수로 등장한 점이 어떻게 다른지
 최악의 상황에 대비해 1~2가지 구체적인 보험 수단을 명확하게 설명""",
         },
         {
-            "id": 8, "label": "포트폴리오 액션", "max_tokens": 1500, "inject_perplexity": False,
-            "prompt": f"""{stance}\n\n당신은 개인 투자 자문가입니다. 오늘: {_today()}
+            "id": 8, "label": "종목별 영향", "max_tokens": 1500, "inject_perplexity": False,
+            "prompt": f"""{stance}\n\n당신은 증권사 리서치센터의 애널리스트입니다. 오늘: {_today()}
 매크로 이벤트: {ev}
 전체 분석 내용: {prev}
 
-투자자의 현재 보유 종목:
-{portfolio_str}
+분석 대상 종목 (조회자가 직접 입력한 목록):
+{watchlist_str}
 
-위 이벤트가 각 보유 종목에 어떤 영향을 주는지 분석하고,
-각 종목마다 구체적인 행동 제안을 아래 JSON 배열로만 반환하세요.
-(마크다운, 설명 텍스트 없이 JSON만)
+위 이벤트가 각 종목의 펀더멘털에 어떤 영향을 주는지 분석해
+아래 JSON 배열로만 반환하세요. (마크다운, 설명 텍스트 없이 JSON만)
 
-action: "매수" / "매도" / "유지" / "일부 매도" 중 하나.
-urgency: "즉시" / "1개월 내" / "3개월 내" 중 하나.
+**특정인의 보유 수량·평가금액·손익을 전제하지 마세요.** 이 목록은 조회자가 입력한
+관심 종목일 뿐이고 보유 여부·비중·매입가는 주어지지 않았습니다.
+"비중을 줄이세요", "현 포지션을 유지하세요" 처럼 특정인의 포지션을 전제한 표현은
+쓰지 말고, 이벤트가 그 기업에 주는 영향만 서술하세요.
+
+impact: "긍정" / "부정" / "중립" 중 하나 — 이벤트가 그 기업 펀더멘털에 주는 방향.
+horizon: "단기(1개월)" / "중기(3개월)" / "장기(1년)" 중 하나 — 영향이 나타날 시계.
 reason: 한국어 1문장.
 
 [
   {{
     "ticker": "AAPL",
-    "action": "유지",
-    "reason": "이 이벤트의 영향이 제한적이므로 현 포지션 유지가 적절합니다.",
-    "urgency": "3개월 내"
+    "impact": "중립",
+    "reason": "이 이벤트가 해당 기업의 매출 구조에 주는 직접 영향은 제한적입니다.",
+    "horizon": "중기(3개월)"
   }}
 ]""",
         },
@@ -878,8 +882,33 @@ def _label(ticker: str, names: dict[str, str]) -> str:
     return f"{ticker} ({name})" if name else ticker
 
 
+def _format_watchlist(tickers: "list[str] | None", market: str) -> str:
+    """조회자가 입력한 티커 목록을 프롬프트용 텍스트로 적는다.
+
+    `_format_portfolio` 와 **일부러 다르다** — 수량·평균단가·섹터를 적지 않는다.
+    매크로 시나리오 에이전트에 넘어가던 것이 원래 `_format_portfolio` 의 결과였고,
+    거기에는 그 사람의 보유 수량과 매입 단가, 즉 재산상황이 들어 있었다. 여기에는
+    종목 코드와 공개된 회사명만 있다.
+
+    `market` 인자는 회사명 조회의 시장 맥락으로만 쓴다 — 통화가 등장하지 않으므로
+    §1.4 의 통화 혼입 문제는 이 경로에 없다.
+    """
+    syms = [str(t).strip().upper() for t in (tickers or []) if str(t).strip()]
+    # 중복은 접는다. 같은 종목이 두 줄로 들어가면 모델이 비중 신호로 읽는다.
+    seen: set[str] = set()
+    uniq = [t for t in syms if not (t in seen or seen.add(t))]
+    if not uniq:
+        return "지정된 종목 없음"
+    names = _company_names(uniq)
+    return "\n".join(_label(t, names) for t in uniq)
+
+
 def _format_portfolio(holdings: dict, market: str) -> str:
-    """보유 종목을 프롬프트용 텍스트로 적는다.
+    """보유 종목을 프롬프트용 텍스트로 적는다 — **데일리 브리프 전용**.
+
+    매크로 시나리오 에이전트는 더 이상 이것을 쓰지 않는다 (`_format_watchlist`).
+    데일리 브리프는 본인의 보유 현황을 본인에게 요약해 주는 화면이라 수량·단가가
+    필요하고, 그 출력은 투자판단이 아니라 사실 집계여야 한다.
 
     `market` 에 기본값을 두지 않는다. 통화를 빠뜨린 호출부가 조용히 달러가
     되는 것이 이 함수에서 실제로 일어난 일이다 — 원화 금액에 `$` 가 붙어
@@ -925,7 +954,7 @@ def _resolve_model(ag_id: int, user_model_key: str) -> str:
 def _run_parallel_agents(
     selected_ids: list[int],
     ev: str,
-    portfolio_str: str,
+    watchlist_str: str,
     model_key: str,
     market_ctx: str,
     news_ctx: str,
@@ -937,7 +966,7 @@ def _run_parallel_agents(
     취소되면 아직 시작하지 않은 에이전트는 건너뛰고, 진행 중인 것은
     스트리밍 도중 스스로 멈춘다.
     """
-    all_agents = _build_agents(ev, portfolio_str, prev_results=[], market=market)
+    all_agents = _build_agents(ev, watchlist_str, prev_results=[], market=market)
     agent_map = {a["id"]: a for a in all_agents if a["id"] in selected_ids}
 
     results: dict[int, tuple[str, float]] = {}
@@ -977,7 +1006,7 @@ def _run_parallel_agents(
 def _run_contextual_agents(
     selected_ids: list[int],
     ev: str,
-    portfolio_str: str,
+    watchlist_str: str,
     model_key: str,
     context_texts: list[str],
     market_ctx: str,
@@ -986,7 +1015,7 @@ def _run_contextual_agents(
     market: str = "US",
 ) -> dict[int, tuple[str, float]]:
     """Phase 2: Phase 1 결과를 컨텍스트로 받아 순차 실행 (agents 8, 9)."""
-    all_agents = _build_agents(ev, portfolio_str, prev_results=context_texts,
+    all_agents = _build_agents(ev, watchlist_str, prev_results=context_texts,
                                context_limit=PHASE2_CONTEXT_LIMIT, market=market)
     agent_map = {a["id"]: a for a in all_agents if a["id"] in selected_ids}
 
@@ -1022,7 +1051,7 @@ def _run_contextual_agents(
 
 def run_macro_agents(
     event: str,
-    portfolio: dict,
+    tickers: list[str],
     model_key: str = "sonnet",
     mode: str = "fast",
     should_cancel: Optional[Callable[[], bool]] = None,
@@ -1036,11 +1065,17 @@ def run_macro_agents(
 
     모델 제공자는 고를 수 없다. GPT 경로가 도달 불가여서 삭제했고, `provider`
     인자도 호출부와 함께 없앴다.
+
+    **두 번째 인자는 `portfolio: dict` 였다.** 호출자의 `holdings` 를 그대로 받아
+    수량·평균단가·섹터까지 프롬프트에 실었다. 그 순간 같은 이벤트를 물어도
+    사용자마다 다른 답이 나가고(개별성), 프롬프트에 그 사람의 재산상황이 담긴다.
+    지금은 **조회자가 직접 입력한 티커 목록**만 받는다 — 수량도 단가도 없다.
+    같은 목록이면 누가 넣어도 같은 결과가 나온다.
     """
     effective_model_key = model_key  # haiku → 전체 Haiku; sonnet → _AGENT_MODEL_TIER 분기
 
     selected_ids = ANALYSIS_MODES.get(mode, ANALYSIS_MODES["fast"])
-    portfolio_str = _format_portfolio(portfolio, market)
+    watchlist_str = _format_watchlist(tickers, market)
 
     def _check() -> None:
         if should_cancel is not None and should_cancel():
@@ -1061,7 +1096,7 @@ def run_macro_agents(
 
     if phase1_ids:
         all_results.update(
-            _run_parallel_agents(phase1_ids, event, portfolio_str, effective_model_key,
+            _run_parallel_agents(phase1_ids, event, watchlist_str, effective_model_key,
                                  market_ctx, news_ctx, should_cancel, market)
         )
     _check()
@@ -1072,12 +1107,12 @@ def run_macro_agents(
             if i in all_results and not all_results[i][0].startswith("[오류")
         ]
         all_results.update(
-            _run_contextual_agents(phase2_ids, event, portfolio_str, effective_model_key,
+            _run_contextual_agents(phase2_ids, event, watchlist_str, effective_model_key,
                                    p1_texts, market_ctx, news_ctx, should_cancel, market)
         )
     _check()
 
-    all_agents = _build_agents(event, portfolio_str, market=market)
+    all_agents = _build_agents(event, watchlist_str, market=market)
     return [
         {
             "id":      ag["id"],
@@ -1158,22 +1193,26 @@ def parse_verdict_cards(raw_text: str) -> list[dict] | None:
     return None
 
 
-def parse_portfolio_actions(raw_text: str) -> list[dict] | None:
-    """포트폴리오 액션 JSON 파싱. 실패하면 None.
+def parse_ticker_impacts(raw_text: str) -> list[dict] | None:
+    """종목별 이벤트 영향 JSON 파싱. 실패하면 None.
+
+    예전 이름은 `parse_portfolio_actions` 였다. 담기는 내용이 보유 종목별
+    매수/매도 지시에서 '입력된 종목별 영향 서술' 로 바뀌었고, 이름이 옛
+    뜻을 계속 주장하면 다음 사람이 그대로 되돌린다.
 
     카드 쪽과 달리 **복구 경로가 없다.** 한 번 실패하면 그걸로 끝이고,
-    사용자는 액션 제안이 없는 리포트를 받는다. 그래서 `debug` 가 아니라
+    사용자는 영향 표가 없는 리포트를 받는다. 그래서 `debug` 가 아니라
     `warning` 이다 — 여기가 유일한 신호다.
     """
     try:
         match = re.search(r"\[.*\]", raw_text, re.DOTALL)
         if match:
-            actions = json.loads(match.group())
-            if isinstance(actions, list):
-                return actions
-        logger.warning("포트폴리오 액션 JSON 배열을 찾지 못했다 (%d자)", len(raw_text or ""))
+            impacts = json.loads(match.group())
+            if isinstance(impacts, list):
+                return impacts
+        logger.warning("종목별 영향 JSON 배열을 찾지 못했다 (%d자)", len(raw_text or ""))
     except Exception:
-        logger.warning("포트폴리오 액션 파싱 실패 — 액션 섹션이 빈다 (%d자)",
+        logger.warning("종목별 영향 파싱 실패 — 영향 표가 빈다 (%d자)",
                        len(raw_text or ""), exc_info=True)
     return None
 

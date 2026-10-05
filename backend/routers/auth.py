@@ -32,7 +32,7 @@ from backend.db import users_repo
 from backend.routers._errors import hidden_http_error
 from backend.services.auth import (
     current_user, verified_user, init_firebase, is_registered, forget_registration,
-    _IS_MANAGED_RUNTIME, _LOCAL_MAY_DELETE_AUTH,
+    _IS_MANAGED_RUNTIME, _LOCAL_MAY_DELETE_AUTH, _USING_AUTH_EMULATOR,
 )
 from backend.services.credentials import (
     normalize_username, validate_username, validate_password, validate_email,
@@ -184,14 +184,20 @@ def delete_me(user: dict = Depends(current_user)):
 
     try:
         fb_auth.delete_user(uid)
-    except Exception as e:
+    except fb_auth.UserNotFoundError:
         # 이미 없는 계정이면 지울 것이 없으니 계속 진행한다.
-        if "USER_NOT_FOUND" not in str(e).upper() and "NOT_FOUND" not in str(e).upper():
-            logger.error(f"Firebase 계정 삭제 실패 {uid}: {e}")
-            raise HTTPException(
-                status_code=503,
-                detail="탈퇴 처리에 실패했습니다. 잠시 후 다시 시도해 주세요.",
-            )
+        pass
+    except Exception as e:
+        # 예외 **종류**로 판정한다. 예전에는 문자열에 "NOT_FOUND" 가 있으면 '이미
+        # 없음' 으로 봤는데, CONFIGURATION_NOT_FOUND(프로젝트·에뮬레이터 설정
+        # 오류)·PROJECT_NOT_FOUND 도 그 문자열을 품는다. 그 경우 인증 계정은 그대로
+        # 둔 채 아래에서 개인 데이터만 지웠다 — 이 함수 docstring 이 '가장 나쁜
+        # 결과' 라고 부르는 바로 그 상태다.
+        logger.error(f"Firebase 계정 삭제 실패 {uid}: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="탈퇴 처리에 실패했습니다. 잠시 후 다시 시도해 주세요.",
+        )
 
     result = users_repo.delete_user(uid)
     forget_registration(uid)
@@ -711,9 +717,58 @@ class LoginRequest(BaseModel):
 
 
 def _custom_token_for(uid: str, provider: str) -> str:
+    """로그인 세션용 Custom Token. 만들지 못하면 503 — 사실대로 알린다.
+
+    서명에는 서비스 계정 자격증명이 필요하다. 로컬에 그게 없으면(secrets/
+    firebase-admin.json · FIREBASE_CREDENTIALS · ADC 전부 없음) `init_firebase()`
+    는 지연 검증이라 True 를 돌려주고(CLAUDE.md §7.8) 여기서 처음 터진다.
+    예전에는 잡지 않아 평문 500 이 나갔고, 화면(AuthModal.apiError)은 detail 이
+    없는 응답을 "이메일 또는 비밀번호가 올바르지 않습니다" 로 보여 줬다 —
+    비밀번호가 **맞았는데** 틀렸다고 말한 것이다 (§1.3(a)).
+    """
     from firebase_admin import auth as fb_auth
-    token = fb_auth.create_custom_token(uid, {"provider": provider})
+    try:
+        token = fb_auth.create_custom_token(uid, {"provider": provider})
+    except Exception as e:
+        logger.error("로그인 토큰 발급 실패 uid=%s: %s", uid, e, exc_info=True)
+        if not _IS_MANAGED_RUNTIME and not _USING_AUTH_EMULATOR:
+            # 로컬에서 이 실패의 원인은 거의 항상 자격증명 부재다. 재시도로는
+            # 절대 풀리지 않으므로 "잠시 후 다시" 라고 쓰지 않는다.
+            raise HTTPException(
+                status_code=503,
+                detail="로컬 인증 설정이 없습니다 (Firebase Admin 자격증명 없음). "
+                       "./dev.sh --auth-emulator 로 실행하세요.",
+            )
+        raise HTTPException(
+            status_code=503,
+            detail="인증 서버를 사용할 수 없습니다. 잠시 후 다시 시도해 주세요.",
+        )
     return token.decode() if isinstance(token, bytes) else token
+
+
+def _may_delete_orphan_db_row(email: str) -> bool:
+    """'인증 계정 없는 DB 행' 을 지워도 되는 환경인가.
+
+    인증 저장소가 '그 계정 없다' 고 **제대로** 답했더라도, 그 답이 DB 행을 지울
+    근거가 되려면 두 저장소가 짝이어야 한다. 그건 운영(Cloud Run + 실제
+    Firebase)뿐이다. 로컬은 짝이 아니다:
+      · 인증 에뮬레이터는 재시작할 때마다 **비어서** 뜬다(§7.8). 그 사이 DB 는
+        그대로라, 재시작 직후의 '없음' 은 모든 계정에 대해 거짓이다.
+      · 에뮬레이터 없이 공유 Firebase 에 붙으면, 각 창 DB 는 개발 데이터 사본이라
+        운영 Firebase 와 계정 집합이 다르다.
+    행을 지우면 holdings · trade_log · reports 가 FK CASCADE 로 함께 사라진다.
+    되돌릴 방법이 없으므로 확실한 환경에서만 한다.
+
+    `_LOCAL_MAY_DELETE_AUTH` 와 방향이 **반대**인 점에 주의한다. 그 플래그는
+    에뮬레이터에서 True 다 — 에뮬레이터의 **인증 계정**은 일회용이라 지워도
+    되기 때문이다. DB 행은 그 반대로, 에뮬레이터에서 지우면 안 된다.
+
+    예약 주소(관리자·로컬 테스트 계정)는 어디서든 지우지 않는다. _is_reserved 에
+    올린 이유가 '정리 로직이 지우지 않게' 였는데, 로그인 정리는 그걸 보지 않았다.
+    """
+    if _is_reserved(email):
+        return False
+    return _IS_MANAGED_RUNTIME
 
 
 @router.get("/email-available")
@@ -736,15 +791,40 @@ def email_available(email: str):
     return {"available": True, "reason": ""}
 
 
+class _AuthLookupUnavailable(Exception):
+    """인증 저장소에 계정이 있는지 **확인하지 못했다.** '없다' 가 아니다."""
+
+
 def _fb_user_by_email(email: str):
-    """Firebase 에 그 이메일 계정이 있으면 반환, 없으면 None."""
+    """Firebase 에 그 이메일 계정이 있으면 반환, **확실히 없으면** None.
+
+    확인 자체를 못 했으면 `_AuthLookupUnavailable` 을 올린다. None 으로 돌려주지
+    않는다 — 그 값을 받은 호출부(로그인 · `_reconcile_account`)가 "계정이 없다"
+    로 읽고 **DB 사용자 행을 지우기** 때문이다. 행이 지워지면 holdings ·
+    trade_log 가 FK CASCADE 로 함께 사라진다.
+
+    실제로 그렇게 났다. 로컬에 Admin 자격증명이 하나도 없는 상태(secrets/
+    firebase-admin.json · FIREBASE_CREDENTIALS · ADC 전부 없음)에서
+    `init_firebase()` 는 지연 검증이라 True 를 돌려주고(CLAUDE.md §7.8),
+    `get_user_by_email` 은 DefaultCredentialsError 로 실패했다. 예전 코드는 그
+    실패를 `except Exception: return None` 으로 삼켰고, 로그인은 test@gmail.com
+    을 "인증 계정 없는 DB 행" 으로 판정해 지웠다 — 보유 8건이 함께 사라졌다.
+    사용자에게는 "가입되지 않은 계정입니다" 가 떴다 (§1.3(b)·(c)).
+
+    '없음' 으로 인정하는 것은 Firebase 가 **그 계정이 없다고 답한** 경우
+    (`UserNotFoundError`) 하나뿐이다. 나머지는 전부 '모름' 이다.
+    """
     if not init_firebase():
-        return None
+        raise _AuthLookupUnavailable("Firebase Admin 초기화 실패")
     from firebase_admin import auth as fb_auth
     try:
         return fb_auth.get_user_by_email(email)
-    except Exception:
+    except fb_auth.UserNotFoundError:
         return None
+    except Exception as e:
+        logger.error("인증 계정 조회 실패 (%s) — '없음' 으로 취급하지 않는다: %s",
+                     email, e, exc_info=True)
+        raise _AuthLookupUnavailable(str(e)) from e
 
 
 def _reconcile_account(email: str) -> Optional[dict]:
@@ -762,12 +842,31 @@ def _reconcile_account(email: str) -> Optional[dict]:
     양쪽 다 있으면 정상적으로 쓰이는 계정이므로 손대지 않고 그대로 알린다.
     """
     row = users_repo.find_by_email(email)
-    fb_user = _fb_user_by_email(email)
+    try:
+        fb_user = _fb_user_by_email(email)
+    except _AuthLookupUnavailable:
+        # 인증 쪽을 확인하지 못했다. 아래 분기는 전부 "한쪽에만 있다" 는 판단에
+        # 기대어 무언가를 **지운다** — 확인 못 한 채로 들어가면 정상 계정의 DB
+        # 행(과 CASCADE 로 그 사람의 보유·거래)을 지우게 된다. 닫는다 (§1.3(c)).
+        raise HTTPException(
+            status_code=503,
+            detail="인증 서버를 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.",
+        )
 
     if row and fb_user:
         return row                      # 정상 — 진짜 가입된 계정
 
     if row and not fb_user:
+        if not _may_delete_orphan_db_row(email):
+            # 로컬(에뮬레이터 포함)에서는 인증 저장소의 '없음' 이 DB 행을 지울
+            # 근거가 못 된다 — _may_delete_orphan_db_row 참고. 지우지 않고 막는다.
+            logger.warning(
+                "인증 저장소에 없는 DB 행이지만 지우지 않는다 (%s, 로컬이거나 예약 주소). "
+                "에뮬레이터를 다시 띄웠다면 ./seed-test-user.sh 를 실행하세요.", email)
+            raise HTTPException(
+                status_code=409,
+                detail="이미 가입된 이메일입니다. 기존 계정으로 로그인해 주세요.",
+            )
         logger.warning(f"인증 계정 없는 DB 행 정리: {email}")
         users_repo.delete_user(row["uid"])
         forget_registration(row["uid"])
@@ -898,7 +997,32 @@ def login(body: LoginRequest):
         # EMAIL_NOT_FOUND 로 판별할 수 없다 — 이 프로젝트는 이메일 열거 방지가
         # 켜져 있어 Firebase 가 일부러 뭉뚱그린 오류를 준다. 그래서 DB 행이 있는
         # 경우에 한해 인증 쪽에 실제로 계정이 있는지 직접 확인한다.
-        if _fb_user_by_email(email) is None:
+        try:
+            fb_user = _fb_user_by_email(email)
+        except _AuthLookupUnavailable:
+            # 확인하지 못했으면 지우지 않는다. 예전에는 여기서 조회 실패가 '없음'
+            # 으로 읽혀 정상 계정이 삭제됐다 (_fb_user_by_email docstring 참고).
+            # 사용자에게도 "가입되지 않은 계정" 이 아니라 사실대로 알린다 —
+            # 그 문구를 보면 사용자는 재가입을 시도하고, 그건 문제를 덮는다.
+            raise HTTPException(
+                status_code=503,
+                detail="인증 서버를 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.",
+            )
+        if fb_user is None and not _may_delete_orphan_db_row(email):
+            # 인증 저장소는 '없다' 고 답했지만 이 환경에서는 그 답으로 DB 행을
+            # 지우지 않는다 (_may_delete_orphan_db_row). 실제로 났던 경로다 —
+            # 에뮬레이터가 재시작돼 비어 있는 동안 로그인하면 행과 보유가 지워진다.
+            # 사용자에게는 '가입되지 않은 계정' 이 아니라 사실을 알린다.
+            logger.warning(
+                "인증 저장소에 계정이 없어 로그인 불가, DB 행은 보존 (%s). "
+                "로컬이라면 인증 에뮬레이터가 비어 있는지 확인하고 "
+                "./seed-test-user.sh 를 실행하세요.", email)
+            raise HTTPException(
+                status_code=503,
+                detail="인증 저장소에서 이 계정을 찾을 수 없습니다. "
+                       "로컬 개발 중이라면 ./seed-test-user.sh 로 계정을 다시 등록하세요.",
+            )
+        if fb_user is None:
             logger.warning(f"인증 계정 없는 DB 행 정리(로그인 시도): {email}")
             users_repo.delete_user(account["uid"])
             forget_registration(account["uid"])

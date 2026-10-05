@@ -499,8 +499,23 @@ def get_fred_macro(ttl: int = 3600) -> dict:
 
 # ── 뉴스 ────────────────────────────────────────────────────────────────────────
 
-def get_portfolio_news(tickers: list[str], max_per: int = 2, max_macro: int = 4, ttl: int = 600) -> list[dict]:
-    key = f"news_{','.join(sorted(tickers))}"
+# 시장 뉴스(MACRO) 검색어 — 시장별. 예전에는 시장과 무관하게 ^GSPC·^IXIC·^TNX 로
+# 고정이라 한국 화면에 미국 지수 뉴스만 나갔다 (§1.1).
+_MACRO_NEWS_QUERIES = {
+    "US": ["^GSPC", "^IXIC", "^TNX"],
+    "KR": ["^KS11", "^KQ11", "USDKRW=X"],
+}
+
+
+def get_portfolio_news(tickers: list[str], max_per: int = 2, max_macro: int = 4, ttl: int = 600,
+                       market: str = "US") -> list[dict]:
+    """보유 종목 뉴스 + 시장 뉴스.
+
+    `yf.Ticker(t).news` 를 쓰지 않는다 — 그 엔드포인트가 404 를 `[]` 로 돌려줘서
+    (2026-10) 이 탭이 늘 비어 있었다. 종목 뉴스는 데일리 브리프와 같은
+    `daily_report._fetch_yf_news`(야후 검색 + 이 종목 기사만 거르기)를 쓴다.
+    """
+    key = f"news_{market}_{','.join(sorted(tickers))}"
 
     def _fetch():
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -534,13 +549,20 @@ def get_portfolio_news(tickers: list[str], max_per: int = 2, max_macro: int = 4,
 
         def _fetch_one(symbol, tag, max_n):
             try:
-                news = yf.Ticker(symbol).news or []
-                return _extract(news, tag, max_n)
+                if tag == "MACRO":
+                    news = yf.Search(symbol, news_count=max_n * 2, max_results=0).news or []
+                    return _extract(news, tag, max_n)
+                from backend.services.daily_report import _fetch_yf_news
+                return [{"ticker": tag, "headline": n["title"].strip(), "url": n.get("link") or "",
+                         "datetime": int(n["_ts"]) if n.get("_ts") else int(datetime.now().timestamp())}
+                        for n in _fetch_yf_news(symbol, max_items=max_n)]
             except Exception:
+                # 빈 목록은 '뉴스 없음' 과 같아 보인다 — 실패는 로그로 남긴다 (§1.3).
+                _logger.warning("뉴스 조회 실패 (%s)", symbol, exc_info=True)
                 return []
 
         # 종목 뉴스 + 매크로 뉴스를 한 번에 병렬 조회
-        macro_sources = [("^GSPC", "MACRO", max_macro), ("^IXIC", "MACRO", max_macro), ("^TNX", "MACRO", max_macro)]
+        macro_sources = [(q, "MACRO", max_macro) for q in _MACRO_NEWS_QUERIES.get(market, _MACRO_NEWS_QUERIES["US"])]
         tasks = [(t, t, max_per) for t in tickers] + macro_sources
 
         items = []
@@ -550,7 +572,15 @@ def get_portfolio_news(tickers: list[str], max_per: int = 2, max_macro: int = 4,
                 items.extend(fut.result())
 
         items.sort(key=lambda x: x["datetime"], reverse=True)
-        return items[:18]
+        # 시장 뉴스 검색어(지수 셋)는 같은 기사를 겹쳐 돌려준다 — 같은 기사가 세 번 나왔다.
+        # 링크(없으면 제목)로 한 번만 남긴다. 최신순 정렬 뒤라 남는 것은 가장 앞의 것이다.
+        seen, uniq = set(), []
+        for it in items:
+            k = (it.get("url") or "").split("?")[0] or it["headline"].lower()
+            if k in seen:
+                continue
+            seen.add(k); uniq.append(it)
+        return uniq[:18]
 
     return _cached(key, ttl, _fetch)
 

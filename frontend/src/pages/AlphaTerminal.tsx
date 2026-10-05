@@ -15,7 +15,7 @@ import {
   getMarketSnapshot, getMarketNews, getMacroData, getEarnings,
   getAnalystFeedback, getMarketSectors,
   postTrade, addHolding, updateHolding, deleteHolding, getHoldings,
-  generateDailyBrief, getDailyBriefHistory, getDailyBriefFile,
+  startDailyBrief, getReportJob, cancelReportJob, getDailyBriefHistory, getDailyBriefFile,
   getIndexPrices, getTrades, updateTrade, deleteTrade, getTickerPrice, searchTickers,
   autoDetectSectors,
 } from '@/api'
@@ -45,8 +45,11 @@ import { formatPrice, formatCompact, formatMoney, marketSymbol,
 import { useMarket } from '@/lib/useMarket'
 import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
 import TickerLabel from '@/components/TickerLabel'
+import EquityLwcChart, { EQUITY_LWC_ENABLED } from '@/components/EquityLwcChart'
+import { useTheme } from '@/lib/ThemeContext'
 import SuggestionList from '@/components/SuggestionList'
 import { errorText } from '@/components/serverError'
+import { AiGeneratedNote, AI_LABEL_BRIEF, endsWithAiLabel } from '@/components/Disclaimer'
 import { pickOnEnter, moveHighlight, selectionLabel, type Suggestion } from '@/lib/suggestions'
 import { marketSession } from '@/lib/marketStorage'
 import type { EquityCurvePoint, PortfolioMetrics } from '@/types'
@@ -206,7 +209,7 @@ const SECTOR_COLORS = [
 ]
 
 // ── Marquee ───────────────────────────────────────────────────────────────────
-const MARQUEE_CONFIG: { ticker: string; label: string; fmt: 'usd' | 'krw' | 'plain' }[] = [
+const MARQUEE_CONFIG: { ticker: string; label: string; fmt: 'usd' | 'krw' | 'krw100' | 'plain' }[] = [
   { ticker: '^GSPC',    label: 'S&P500',   fmt: 'plain' },
   { ticker: '^IXIC',    label: 'NASDAQ',   fmt: 'plain' },
   { ticker: '^KS11',    label: 'KOSPI',    fmt: 'plain' },
@@ -214,22 +217,25 @@ const MARQUEE_CONFIG: { ticker: string; label: string; fmt: 'usd' | 'krw' | 'pla
   { ticker: '^N225',    label: 'NIKKEI',fmt: 'plain' },
   { ticker: 'BTC-USD',  label: 'BTC',      fmt: 'usd'   },
   { ticker: 'USDKRW=X', label: 'USD/KRW', fmt: 'krw'   },
-  { ticker: 'JPYKRW=X', label: 'YEN/KRW', fmt: 'krw'   },
+  // 시세는 1엔당 원(약 8.5)이다. 원 단위로 반올림하면 '₩8' 이 되어 정보가 사라졌다.
+  // 국내 표기 관행대로 100엔당(₩846.70)으로 보인다.
+  { ticker: 'JPYKRW=X', label: 'JPY/KRW(100엔)', fmt: 'krw100' },
   { ticker: 'CL=F',     label: 'WTI',      fmt: 'usd'   },
 ]
 
-function Marquee({ snapshot }: { snapshot: any }) {
+function Marquee({ snapshot, exclude = [] }: { snapshot: any; exclude?: string[] }) {
   if (!snapshot?.prices) return null
   const prices = snapshot.prices as Record<string, any>
 
-  const fmtPrice = (price: number, fmt: 'usd' | 'krw' | 'plain') => {
+  const fmtPrice = (price: number, fmt: 'usd' | 'krw' | 'krw100' | 'plain') => {
+    if (fmt === 'krw100') return `₩${(price * 100).toLocaleString('ko-KR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
     if (fmt === 'krw') return `₩${price.toLocaleString('ko-KR', { maximumFractionDigits: 0 })}`
     if (fmt === 'usd') return `$${fn(price)}`
     return price.toLocaleString('en-US', { maximumFractionDigits: 2 })
   }
 
   const renderItems = (suffix = '') =>
-    MARQUEE_CONFIG.map(({ ticker, label, fmt }) => {
+    MARQUEE_CONFIG.filter(c => !exclude.includes(c.ticker)).map(({ ticker, label, fmt }) => {
       const v = prices[ticker]
       if (!v) return null
       // 변동률이 없으면 0%로 위장하지 않고 '—' 로 표시 (마퀴는 한국식 색상: 상승 적색)
@@ -249,12 +255,64 @@ function Marquee({ snapshot }: { snapshot: any }) {
     })
 
   return (
-    <div className="overflow-hidden bg-[#070d18] border-b border-[#1e2d40] py-1.5 select-none">
+    <div className="overflow-hidden bg-[#070d18] py-1.5 select-none">
       <div className="whitespace-nowrap animate-marquee inline-block">
         {renderItems('')}
         <span className="text-[#1e2d40] mr-6">·</span>
         {renderItems('_2')}
         <span className="text-[#1e2d40] mr-6">·</span>
+      </div>
+    </div>
+  )
+}
+
+// ── 지수 바 (시장별 고정 2개 + 직접 만든 마퀴) ──────────────────────────────
+// 지금 보고 있는 시장의 대표 지수 둘은 왼쪽에 고정하고, 나머지는 마퀴로 흘린다.
+//
+// 2026-10 에 마퀴를 TradingView 티커 테이프로 바꿨다가 되돌렸다. 위젯 아래의
+// 'TradingView 제공' 줄을 없애고 싶었는데, TradingView 약관(Policies §4)이 위젯
+// 출처 표기를 "원래 설계대로 유지" 하라고 하고, 그 줄은 닫힌 섀도 DOM 안이라
+// 기술적으로도 숨길 수 없다(hide-logo·no-links 속성도 그 줄은 남긴다).
+// 위젯은 KOSPI·KOSDAQ·S&P500·NASDAQ 원 지수도 표시하지 못했다.
+const FIXED_INDICES: Record<Market, { ticker: string; label: string }[]> = {
+  KR: [{ ticker: '^KS11', label: 'KOSPI' }, { ticker: '^KQ11', label: 'KOSDAQ' }],
+  US: [{ ticker: '^GSPC', label: 'S&P500' }, { ticker: '^IXIC', label: 'NASDAQ' }],
+}
+
+function IndexBar({ snapshot }: { snapshot: any }) {
+  const market = useMarket()
+  const prices = (snapshot?.prices ?? {}) as Record<string, any>
+
+  const fixed = FIXED_INDICES[market].map(({ ticker, label }) => {
+    const v = prices[ticker]
+    const price = fv(v?.price)
+    // 값이 없으면 0 으로 위장하지 않고 '—' (§1.3a). 스냅샷이 아직 안 왔을 때도 같다.
+    const p: number | null =
+      v?.change_1d_pct == null || !Number.isFinite(v.change_1d_pct) ? null : Number(v.change_1d_pct)
+    // 마퀴와 같은 한국식 색 (상승 적색 · 하락 청색) — 한 줄 안에서 색의 뜻이 같아야 한다.
+    const col = p == null || p === 0 ? '#64748b' : p > 0 ? '#ef4444' : '#3b82f6'
+    return (
+      <div key={ticker} className="flex flex-col justify-center px-3 border-r border-[#1e2d40] font-mono min-w-0">
+        <span className="text-[11px] font-bold text-[#94a3b8] tracking-wider">{label}</span>
+        <span className="text-[13px] text-[#e2e8f0] tabular-nums whitespace-nowrap">
+          {price ? price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—'}
+          <span className="ml-1.5 text-[12px]" style={{ color: col }}>
+            {p == null ? '—' : `${p >= 0 ? '+' : ''}${p.toFixed(2)}%`}
+          </span>
+        </span>
+      </div>
+    )
+  })
+
+  return (
+    // 좁은 화면에서는 고정 지수 줄과 마퀴 줄을 나눈다 — 한 줄에 두면 고정 둘이 폭을
+    // 거의 다 써서 마퀴가 40px 남짓만 남았다.
+    <div className="bg-[#070d18] border-b border-[#1e2d40] select-none flex flex-col md:flex-row md:items-stretch">
+      <div className="flex-shrink-0 flex py-1 border-b border-[#1e2d40] md:border-b-0">
+        {fixed}
+      </div>
+      <div className="flex-1 min-w-0 flex items-center">
+        <Marquee snapshot={snapshot} exclude={FIXED_INDICES[market].map(f => f.ticker)} />
       </div>
     </div>
   )
@@ -371,6 +429,9 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
   // 잘라 버리면 "최초 입금일부터 보이지 않는" 문제가 그대로 남는다.
   const [range, setRange] = useState<'1M' | '3M' | '1Y' | 'ALL'>('ALL')
   const [bm,    setBm]    = useState<BenchmarkMode>('benchmark')
+  const { theme: themeName } = useTheme()
+  // 그래프 툴팁의 종목 이름 — 이름 사전이 바뀔 때만 새 함수 (그래프가 매 렌더 다시 만들어지지 않게)
+  const equityLabel = useCallback((t: string) => displayTicker(t, names), [names])
   // 벤치마크 표시 이름. 서버가 시장별로 정해 준다(US 'S&P 500' / KR '코스피').
   // 여기서 시장을 보고 직접 고르지 않는다 — 곡선을 그리는 지수와 라벨이
   // 갈라지면 화면이 다른 지수 이름으로 같은 선을 설명하게 된다.
@@ -871,7 +932,23 @@ function EquityCurve({ curveQ }: { curveQ: any }) {
         </div>
       )}
 
-      {!curveQ.isLoading && data.length > 0 && (
+      {/* lightweight-charts 판 (components/EquityLwcChart.tsx) — 같은 정보를 그린다.
+          VITE_EQUITY_CHART=legacy 면 아래 예전 recharts 그래프. */}
+      {!curveQ.isLoading && data.length > 0 && EQUITY_LWC_ENABLED && (
+        <div style={{ margin: '0 12px 8px', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 4 }}>
+          <EquityLwcChart
+            data={data}
+            showBenchmark={bm === 'benchmark' || bm === 'both'}
+            showNasdaq={bm === 'nasdaq' || bm === 'both'}
+            benchLabel={benchLabel}
+            secondaryLabel={secondary.label}
+            label={equityLabel}
+            bg={themeName === 'light' ? '#f6f8fb' : '#0b0f1a'}
+            grid={themeName === 'light' ? '#e3e9f2' : '#111827'}
+          />
+        </div>
+      )}
+      {!curveQ.isLoading && data.length > 0 && !EQUITY_LWC_ENABLED && (
       <div style={{ margin: '0 12px 8px', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 4 }}>
       <div
         ref={chartContainerRef}
@@ -1019,6 +1096,8 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
   // 알림·확인 팝업. 브라우저 기본 alert/confirm 은 앱과 생김새가 따로 놀고
   // 라이트 모드에서 특히 이질적이라 쓰지 않는다.
   const [cashAlert, setCashAlert] = useState('')
+  // 최초 입금보다 이른 매수를 넣어 최초 입금이 다시 계산됐을 때의 안내 (경고가 아니다)
+  const [depositNotice, setDepositNotice] = useState('')
   const [confirmDlg, setConfirmDlg] = useState<
     { title: string; message?: string; onOk: () => void } | null
   >(null)
@@ -1156,8 +1235,17 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
   })
   const tradeMut = useMutation({
     mutationFn: (f: typeof form) => postTrade({ ticker: f.ticker, type: f.type as any, q: f.q, price: f.price, date: f.date }),
-    onSuccess: (_data, vars) => {
+    onSuccess: (data, vars) => {
       _invalidateAll()
+      const adj = data?.initial_deposit_adjusted
+      if (adj) {
+        setDepositNotice(
+          `최초 입금일(${adj.previous_date})보다 이른 매수라 최초 입금을 다시 계산했습니다.
+` +
+          `${adj.previous_date} · ${formatMoney(adj.previous_q)} → ${adj.date} · ${formatMoney(adj.q)}
+` +
+          `현금 잔고는 그대로이고, 그래프와 수익률은 ${adj.date}부터 계산됩니다.`)
+      }
       setForm(f => ({ ...f, ticker: '', q: 0, price: 0, date: new Date().toISOString().slice(0, 10) }))
       setTickerText('')
       setCurrentPrice(null)
@@ -1441,6 +1529,16 @@ function HoldingsPanel({ holdQ, rawHoldings, onTickerClick }: { holdQ: any; rawH
         confirmText="삭제"
         onConfirm={() => { confirmDlg?.onOk(); setConfirmDlg(null) }}
         onCancel={() => setConfirmDlg(null)}
+      />
+
+      <ConfirmDialog
+        open={!!depositNotice}
+        alert
+        title="최초 입금을 다시 계산했습니다"
+        message={depositNotice}
+        confirmText="확인"
+        onConfirm={() => setDepositNotice('')}
+        onCancel={() => setDepositNotice('')}
       />
 
       <ConfirmDialog
@@ -2170,14 +2268,15 @@ const SK_FILE     = 'pfp_brief_file'
 const SK_LOGS     = 'pfp_brief_logs'
 const SK_PENDING  = 'pfp_brief_pending'
 const SK_START    = 'pfp_brief_start'
+const SK_JOB      = 'pfp_brief_job'
 
 // 이 시각을 넘기면 '진행 중' 표시를 스스로 접는다.
 //
-// 생성은 단일 HTTP 요청이라 탭을 새로고침하거나 네트워크가 끊기면 응답이
-// 영영 오지 않는다. 그때 SK_PENDING 이 남아 있으면 화면이 95%(진행률 상한)에
-// 붙박이로 멈추고, 취소할 방법이 없어 세션 저장소를 비우기 전에는 복구되지
-// 않는다. 실측 평균 48초라 3분이면 실패로 봐도 안전하다.
-const BRIEF_TIMEOUT_MS = 180_000
+// 생성은 서버 잡이라(시작 → 폴링) 새로고침해도 SK_JOB 으로 이어서 기다린다. 그래도
+// 상한은 둔다 — 서버 인스턴스가 도중에 내려가면 잡은 DB 에 pending 으로 영영 남고,
+// 화면은 그걸 기다리며 멈춘다. 보유 종목 전부의 뉴스를 찾으므로 종목이 많으면 몇 분
+// 걸린다(종목당 수 초, 동시 4개).
+const BRIEF_TIMEOUT_MS = 600_000
 
 // ── Daily Brief (right panel) ─────────────────────────────────────────────────
 function DailyBriefPanel() {
@@ -2188,6 +2287,8 @@ function DailyBriefPanel() {
     try { return JSON.parse(marketSession.get(SK_LOGS) || '[]') } catch { return [] }
   })
   const [wasPending,  setWasPending]  = useState(() => marketSession.get(SK_PENDING) === '1')
+  // 진행 중인 서버 잡. 새로고침 뒤에도 이어서 폴링한다.
+  const [jobId,       setJobId]       = useState<string | null>(() => marketSession.get(SK_JOB))
   const [generating,  setGenerating]  = useState(false)
   const [showHist,    setShowHist]    = useState(false)
   const [pdfBusy,     setPdfBusy]     = useState(false)
@@ -2223,7 +2324,7 @@ function DailyBriefPanel() {
     },
   })
   const genMut = useMutation({
-    mutationFn: generateDailyBrief,
+    mutationFn: startDailyBrief,
     onMutate: () => {
       setGenerating(true)
       setContent(null)
@@ -2237,38 +2338,89 @@ function DailyBriefPanel() {
       marketSession.set(SK_START, String(Date.now()))
       marketSession.set(SK_LOGS, JSON.stringify([]))
     },
-    onSuccess: d => {
-      const newLogs = d.logs?.length ? d.logs : ['완료']
-      setGenerating(false)
-      setWasPending(false)
-      setContent(d.report)
-      setLogs(newLogs)
-      setFailNote(null)
-      setProgress(100)
-      marketSession.set(SK_CONTENT, d.report)
-      marketSession.set(SK_LOGS, JSON.stringify(newLogs))
-      marketSession.remove(SK_PENDING)
-      marketSession.remove(SK_START)
-      histQ.refetch()
+    onSuccess: ({ job_id }) => {
+      // 결과는 폴링이 받는다 (아래 jobQ). 여기서는 잡 번호만 기억한다.
+      marketSession.set(SK_JOB, job_id)
+      setJobId(job_id)
     },
-    onError: (e: unknown) => {
-      setGenerating(false)
-      setWasPending(false)
-      setProgress(0)
-      // 서버가 준 사유(detail)를 먼저 쓴다. e.message 는 "Request failed with status
-      // code 500" 이라 무엇을 기다려야 하는지 알려 주지 않는다 — 브리핑은 기준일
-      // 종가가 아직 수집되지 않았으면 그 사실을 detail 로 말한다 (main e0545d3).
-      const line = `오류: ${errorText(e)}`
-      setFailNote(line)
-      setLogs(prev => {
-        const next = [...prev, line]
-        marketSession.set(SK_LOGS, JSON.stringify(next))
-        return next
-      })
-      marketSession.remove(SK_PENDING)
-      marketSession.remove(SK_START)
-    },
+    // 서버가 준 사유(detail)를 먼저 쓴다. e.message 는 "Request failed with status
+    // code 500" 이라 무엇을 기다려야 하는지 알려 주지 않는다 — 브리핑은 기준일
+    // 종가가 아직 수집되지 않았으면 그 사실을 detail 로 말한다 (main e0545d3).
+    onError: (e: unknown) => failBrief(`오류: ${errorText(e)}`),
   })
+
+  // 잡 폴링. 진행 중이면 서버가 pct·stage 를 싣는다.
+  const jobQ = useQuery({
+    queryKey: ['daily-brief-job', jobId],
+    queryFn:  () => getReportJob(jobId!),
+    // 로그인 복원이 끝난 뒤에만 묻는다. 새로고침 직후에는 Firebase 가 세션을 되살리기
+    // 전이라 토큰 없이 나가 401 을 받는다 — 그걸 '상태 확인 실패' 로 읽어 진행 중인
+    // 브리핑을 접어 버리면 안 된다.
+    enabled:  !!jobId && isAuthed,
+    refetchInterval: 2_000,
+    refetchIntervalInBackground: true,
+    staleTime: 0,
+    retry: 1,
+  })
+
+  function finishBrief(report: string, newLogs: string[], fileName: string | null) {
+    setGenerating(false)
+    setWasPending(false)
+    setJobId(null)
+    setContent(report)
+    setLogs(newLogs)
+    setFailNote(null)
+    setProgress(100)
+    if (fileName) { setFile(fileName); marketSession.set(SK_FILE, fileName) }
+    marketSession.set(SK_CONTENT, report)
+    marketSession.set(SK_LOGS, JSON.stringify(newLogs))
+    marketSession.remove(SK_PENDING)
+    marketSession.remove(SK_START)
+    marketSession.remove(SK_JOB)
+    histQ.refetch()
+  }
+
+  function failBrief(line: string) {
+    setGenerating(false)
+    setWasPending(false)
+    setJobId(null)
+    setProgress(0)
+    setFailNote(line)
+    setLogs(prev => {
+      const next = [...prev, line]
+      marketSession.set(SK_LOGS, JSON.stringify(next))
+      return next
+    })
+    marketSession.remove(SK_PENDING)
+    marketSession.remove(SK_START)
+    marketSession.remove(SK_JOB)
+  }
+
+  useEffect(() => {
+    const d = jobQ.data
+    if (!d) return
+    if (d.status === 'done' && d.result) {
+      const r = d.result as { report?: string; logs?: string[]; file_path?: string }
+      if (typeof r.report === 'string' && r.report) {
+        finishBrief(r.report, r.logs?.length ? r.logs : ['완료'], r.file_path ?? null)
+      } else {
+        // 완료라는데 본문이 없다 — 성공으로 보이게 두지 않는다 (§1.3).
+        failBrief('오류: 브리핑 결과를 받지 못했습니다. 다시 생성해 주세요.')
+      }
+    } else if (d.status === 'error') {
+      failBrief(`오류: ${d.message || '브리핑을 만들지 못했습니다.'}`)
+    } else if (d.status === 'cancelled') {
+      failBrief('사용자가 중단했습니다.')
+    }
+  }, [jobQ.data]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!jobQ.isError) return
+    // 잡을 못 찾음(404 — 서버 재시작 등)·네트워크 오류. 기다릴 대상이 없으니 접는다.
+    // 서버가 끝까지 만들었다면 기록(문서 아이콘)에 남아 있다.
+    failBrief(`오류: 생성 상태를 확인하지 못했습니다 — ${errorText(jobQ.error)}. ` +
+              '기록에서 확인하거나 다시 생성해 주세요.')
+  }, [jobQ.isError]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const downloadPDF = async () => {
     if (!content) return
@@ -2348,16 +2500,23 @@ function DailyBriefPanel() {
     }
   }
 
-  const isActivelyGenerating = generating || (wasPending && !content)
+  const isActivelyGenerating = generating || !!jobId || (wasPending && !content)
+  // 서버가 알려 준 실제 진행 — 없으면(잡 시작 전·옛 세션) 경과 시간 기반 표시.
+  const serverPct   = jobQ.data?.status === 'pending' ? jobQ.data.pct : undefined
+  const serverStage = jobQ.data?.status === 'pending' ? jobQ.data.stage : undefined
 
   /** 진행 표시를 접고 '생성 중' 상태를 완전히 푼다. */
   const clearPending = (note?: string) => {
+    // 서버 잡도 멈춘다 — 화면만 접으면 서버는 끝까지 만들어 기록에 저장한다.
+    if (jobId) cancelReportJob(jobId).catch(() => {})
     setGenerating(false)
     setWasPending(false)
+    setJobId(null)
     setProgress(0)
     setElapsedMs(0)
     marketSession.remove(SK_PENDING)
     marketSession.remove(SK_START)
+    marketSession.remove(SK_JOB)
     if (note) {
       // 시간 초과·사용자 중단도 결과 없이 끝난 이유다 — 같은 자리에 보여 준다.
       setFailNote(note)
@@ -2372,12 +2531,13 @@ function DailyBriefPanel() {
   useEffect(() => {
     if (!isActivelyGenerating) return
     const startMs = parseInt(marketSession.get(SK_START) || String(Date.now()), 10)
-    const MAX_MS  = 55_000   // 실측 평균 생성 시간 ~48s
+    // 서버 진행률이 오기 전(잡 시작 요청 중)에만 쓰는 대략값.
+    const MAX_MS  = 60_000
     const tick = () => {
       const ms = Date.now() - startMs
       // 상한을 넘겼으면 응답이 오지 않은 것이다. 95% 에 붙박이로 두지 않는다.
       if (ms > BRIEF_TIMEOUT_MS) {
-        clearPending('응답이 오지 않아 중단했습니다. 다시 시도해 주세요.')
+        clearPending('오래 걸려 중단했습니다. 기록에서 확인하거나 다시 시도해 주세요.')
         return
       }
       setElapsedMs(ms)
@@ -2388,15 +2548,12 @@ function DailyBriefPanel() {
     return () => clearInterval(id)
   }, [isActivelyGenerating])
 
-  // 경과 시간 기반 단계 표시 (백엔드 로그는 완료 시에만 도착하므로 프론트에서 시뮬레이션)
-  const STAGE_LABELS = [
-    '1/3  가격 데이터 수집 중...',
-    '2/3  뉴스 헤드라인 수집 중...',
-    '3/3  AI 브리프 생성 중 (약 30~60초)...',
-  ]
+  // 단계 표시는 서버가 알려 준 실제 단계다. 예전에는 경과 시간으로 흉내 냈는데
+  // (10초·30초에 다음 단계), 종목 수에 따라 걸리는 시간이 달라 맞지 않았다.
   const displayLogs = isActivelyGenerating
-    ? STAGE_LABELS.slice(0, elapsedMs < 10_000 ? 1 : elapsedMs < 30_000 ? 2 : 3)
+    ? [serverStage ?? (jobId ? '서버 응답 기다리는 중...' : '브리핑 생성 요청 중...')]
     : logs
+  const shownProgress = isActivelyGenerating && serverPct != null ? serverPct : progress
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -2472,7 +2629,9 @@ function DailyBriefPanel() {
           <div className="flex items-center gap-2 pt-0.5">
             <span className="w-2 h-2 rounded-full bg-[#10b981] animate-pulse flex-shrink-0" />
             <span className="text-[11px] text-[#94a3b8]">
-              {wasPending && !generating ? '백그라운드 생성 중… (잠시 후 자동 완료)' : 'AI 분석 중… (~1-2분)'}
+              {wasPending && !generating && !jobId
+                ? '백그라운드 생성 중… (잠시 후 자동 완료)'
+                : '보유 종목 수에 따라 1~3분 걸릴 수 있습니다'}
             </span>
           </div>
           {/* 진행률 막대 */}
@@ -2480,12 +2639,12 @@ function DailyBriefPanel() {
             <div className="h-1.5 bg-[#1e2d40] rounded-full overflow-hidden">
               <div
                 className="h-full bg-gradient-to-r from-[#10b981] to-[#34d399] rounded-full transition-all duration-500"
-                style={{ width: `${progress}%` }}
+                style={{ width: `${shownProgress}%` }}
               />
             </div>
             <div className="flex justify-between">
               <span className="text-[10px] text-[#94a3b8]">분석 진행 중</span>
-              <span className="text-[10px] text-[#10b981] font-mono tabular-nums">{Math.round(progress)}%</span>
+              <span className="text-[10px] text-[#10b981] font-mono tabular-nums">{Math.round(shownProgress)}%</span>
             </div>
           </div>
           {/* 금융 용어 캐러셀 */}
@@ -2511,7 +2670,19 @@ function DailyBriefPanel() {
         )}
         {shownContent && !isActivelyGenerating && (
           <div ref={contentRef} className="p-4 brief-md">
-            <ReactMarkdown>{shownContent}</ReactMarkdown>
+            {/* 뉴스 출처 링크는 새 탭으로 연다 — 같은 탭이면 브리핑을 잃는다. */}
+            <ReactMarkdown components={{
+              a: ({ href, children }) => (
+                <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
+              ),
+            }}>{shownContent}</ReactMarkdown>
+            {/* 2026-10 이전에 만든 브리핑에는 AI 생성물 표기가 없다. 기록에서 열어도
+                끝에 표기가 나오게 보충한다 (PDF 는 이 영역을 그대로 캡처한다).
+                판정은 **마지막 줄**로 한다 — 본문(LLM 이 쓴 시장 상황·뉴스 요약)에
+                같은 단어가 있다고 표기를 생략하면 안 된다. */}
+            {!endsWithAiLabel(shownContent) && (
+              <AiGeneratedNote text={AI_LABEL_BRIEF} className="mt-3" />
+            )}
           </div>
         )}
       </div>
@@ -2786,7 +2957,7 @@ export default function AlphaTerminal() {
       </div>
 
       {/* ── Marquee ── */}
-      <Marquee snapshot={snapQ.data} />
+      <IndexBar snapshot={snapQ.data} />
 
       {/* ── 종목 검색 바 (Marquee 아래) ── */}
       <div data-tour="search" className="flex-shrink-0 bg-[#060b14] border-b border-[#1e2d40] px-4 py-2" style={{ position: 'relative' }}>
@@ -3066,7 +3237,7 @@ export default function AlphaTerminal() {
                     disabled={feedbackQ.isFetching}
                     className="flex items-center gap-1.5 text-[11px] text-[#10b981] hover:text-[#34d399] disabled:opacity-40 transition-colors">
                     <RefreshCw className={cn('w-3 h-3', feedbackQ.isFetching && 'animate-spin')} />
-                    재분석
+                    다시 불러오기
                   </button>
                 </div>
                 <div className="flex-1 overflow-y-auto p-4">
@@ -3087,13 +3258,26 @@ export default function AlphaTerminal() {
                     </div>
                   )}
                   {feedbackQ.data && !feedbackQ.isFetching && (
-                    <p className="text-sm text-[#cbd5e1] leading-relaxed whitespace-pre-wrap">{feedbackQ.data.feedback}</p>
+                    <>
+                      <p className="text-sm text-[#cbd5e1] leading-relaxed whitespace-pre-wrap">{feedbackQ.data.feedback}</p>
+                      {/* 한 장에 한 번 만들고 다음 장이 열리기 전까지 재사용한다 — 같은 장에서
+                          '다시 불러오기' 는 저장본을 다시 보여 줄 뿐 새로 만들지 않는다. */}
+                      {feedbackQ.data.generated_at && (
+                        <p className="mt-3 text-[11px] text-[#64748b] leading-relaxed">
+                          {feedbackQ.data.session ? `${feedbackQ.data.session} 장 기준 · ` : ''}
+                          {new Date(feedbackQ.data.generated_at).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })} 생성.
+                          {' '}다음 장이 시작되면 새로 생성됩니다.
+                        </p>
+                      )}
+                    </>
                   )}
                 </div>
               </div>
               </LockedPreview>
             )}
 
+            {/* 뉴스 — 보유 종목 뉴스 목록. 2026-10 에 TradingView Top Stories 위젯으로
+                바꿨다가 되돌렸다(사용자 요청 — 영어 기사뿐이고 한국 종목 기사가 거의 없었다). */}
             {rightTab === 2 && !holdTickers && <EmptyHoldings label="보유 종목 없음" />}
             {rightTab === 2 && !!holdTickers && (
               <LockedPreview silent>

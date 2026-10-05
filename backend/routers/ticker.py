@@ -74,7 +74,7 @@ def _build_optimizer_block(sym: str, uid: str, closes=None, market: str = "US") 
     네트워크 호출은 get_close_df(대부분 캐시 적중) 뿐이라 매 요청 계산해도 가볍다.
     closes=None 이면(공용 본문이 캐시 적중한 경로) 가격 캐시에서 종가를 얻는다.
     """
-    optimizer = {"target_weight": None, "current_weight": None, "risk_contribution": None,
+    optimizer = {"current_weight": None, "risk_contribution": None,
                  "correlation": None, "correlation_label": None, "beta_exposure": None,
                  "in_portfolio": False, "note": None}
 
@@ -180,6 +180,306 @@ def _build_quant_block(sym: str, uid: str, closes, hist, info: dict) -> dict:
     }
 
 
+
+# ── 성과표 (긴 기간) ──────────────────────────────────────────────────────────
+#
+# 성과(1W~5Y·YTD·52주 고저)는 **차트 기간과 따로** 약 5년치 종가로 계산한다.
+# 예전에는 차트 기간(기본 1y = 약 250행)의 종가로 계산해서 1Y(252거래일 전)·
+# 5Y(1260거래일 전)가 언제나 N/A 였고, 1M 기간을 고르면 YTD·52주 저가가 1개월치로
+# 계산됐다. 기간 버튼은 차트를 바꾸는 것이지 '1년 수익률' 의 뜻을 바꾸면 안 된다.
+
+_PERF_SPAN_DAYS = 5 * 366 + 20     # 5년 + 여유 (5년 전 그날이 휴장일이어도 직전 거래일이 들어오게)
+_PERF_TTL = 6 * 3600               # 과거 종가는 거의 안 바뀐다. 최근 봉은 아래서 덮어쓴다.
+
+
+def _long_closes(sym: str) -> "pd.Series | None":
+    """약 5년치 종가 (날짜 인덱스, tz 없음). 실패하면 None — 화면은 N/A 로 남는다."""
+    from datetime import date, timedelta
+    from backend.services.market_data import _cache_get, _cache_put
+    from backend.db.market_cache import _yf_sem
+
+    key = f"ticker_long_closes_{sym}"
+    hit = _cache_get(key, _PERF_TTL)
+    if hit is not None:
+        return hit
+    try:
+        with _yf_sem:
+            h = yf.Ticker(sym).history(start=date.today() - timedelta(days=_PERF_SPAN_DAYS),
+                                       auto_adjust=True)
+        c = h["Close"].dropna() if h is not None and not h.empty else None
+    except Exception:
+        logger.warning("성과표용 장기 종가 조회 실패 (%s) — 차트 기간 종가로 계산한다", sym, exc_info=True)
+        return None
+    if c is None or c.empty:
+        logger.warning("성과표용 장기 종가가 비어 있다 (%s) — 차트 기간 종가로 계산한다", sym)
+        return None
+    c.index = pd.to_datetime(c.index.strftime("%Y-%m-%d"))
+    _cache_put(key, c)
+    return c
+
+
+def _performance(period_closes: "pd.Series", long: "pd.Series | None") -> dict:
+    """성과표. 장기 종가(`_long_closes`)에 차트 기간 종가(최근 봉 포함)를 덮어 계산한다.
+
+    장기 종가가 없으면(None) 차트 기간 종가만으로 계산한다 — 그 기간이 덮지 못하는
+    항목은 **전부** None(화면 N/A)이다. YTD·52주도 같다: 1개월치로 낸 'YTD' 와
+    '52주 저가' 는 그럴듯한 오답이다 (§1.3b).
+    """
+    pc = period_closes.astype(float).copy()
+    pc.index = pd.to_datetime(pd.Index(pc.index).strftime("%Y-%m-%d"))
+    if long is not None:
+        # 장기 종가는 6시간 메모다. 차트 마지막 날보다 뒤의 행은 그 시점의 장중가일 수
+        # 있으므로 섞지 않는다 — 섞으면 낡은 장중가가 '현재가' 가 되어 같은 응답의
+        # risk.current_price 와 어긋난다.
+        long = long[long.index <= pc.index[-1]]
+    closes = pc.combine_first(long) if long is not None else pc
+    closes = closes[~closes.index.duplicated(keep="last")].sort_index().dropna()
+
+    current = float(closes.iloc[-1])
+    last = closes.index[-1]
+
+    # **달력 기준**으로 잰다 — N거래일 전이 아니라 'N개월 전 그날(없으면 직전 거래일)'.
+    # 거래일로 세면 시장마다 뜻이 달라진다: 한국은 연 거래일이 약 245일이라 252거래일
+    # 전이 1년보다 길고, 5년치(1260거래일)를 채우지 못해 5Y 가 비었다.
+    def _perf(offset: "pd.DateOffset") -> Optional[float]:
+        target = last - offset
+        if closes.index[0] > target:
+            return None          # 그만큼 오래된 시세가 없다 — 지어내지 않는다
+        base = float(closes[closes.index <= target].iloc[-1])
+        return round((current / base - 1) * 100, 2)
+
+    # YTD: 올해 첫 거래일 대비 (예전 정의 그대로). 데이터가 연초를 덮지 못하면 None —
+    # 첫 거래일이 1월 첫 주 안에 있어야 한다 (신년 연휴를 넘는 여유 7일).
+    first = closes.index[0]
+    covers_year_start = first < pd.Timestamp(year=last.year, month=1, day=8)
+    ytd_c = closes[closes.index.year == last.year]
+    ytd = (round((current / float(ytd_c.iloc[0]) - 1) * 100, 2)
+           if covers_year_start and len(ytd_c) > 1 else None)
+    # 52주 고저도 1년을 덮을 때만 (여유 7일)
+    covers_52w = first <= last - pd.DateOffset(years=1) + pd.Timedelta(days=7)
+    s52 = closes[closes.index > last - pd.DateOffset(years=1)]
+    return {
+        "1w": _perf(pd.DateOffset(weeks=1)), "1m": _perf(pd.DateOffset(months=1)),
+        "6m": _perf(pd.DateOffset(months=6)),
+        "ytd": ytd,
+        "1y": _perf(pd.DateOffset(years=1)), "5y": _perf(pd.DateOffset(years=5)),
+        "s52w_high": round(float(s52.max()), 2) if covers_52w else None,
+        "s52w_low": round(float(s52.min()), 2) if covers_52w else None,
+    }
+
+
+# ── 최근 일봉 덧씌우기 ────────────────────────────────────────────────────────
+#
+# 상세 본문은 ticker_analytics 에 24시간 캐시되고 장중에 다시 계산하는 경로가
+# 없다. 그래서 차트의 마지막 봉이 '처음 계산한 시점' 에 하루 동안 멈춰 있었다
+# — 오늘 봉은 물론, 계산 시점에 아직 없던 어제 봉까지 빠졌다 (2026-10-02
+# 00:26 KST 에 계산된 005930.KS 가 09-30 에서 끝났고 market_prices 에는 10-01
+# 종가가 있었다).
+#
+# 본문 전체를 다시 계산하지 않고 **최근 5일 일봉만** 따로 받아 덮어쓴다.
+# 야후 일봉은 장중에도 오늘 행의 Close 를 현재가로 채워 준다 (CLAUDE.md §1.5)
+# — 분봉 없이 '오늘 봉' 하나를 얻는 가장 싼 방법이다.
+#
+# 이 값은 응답에만 싣고 캐시·market_prices 에는 쓰지 않는다. 장중 부분 봉을
+# 저장하면 위조 종가가 남는다 (§1.6 — 저장 가드는 save_prices_to_db 에 있다).
+
+_RECENT_TTL_OPEN   = 60       # 가격이 움직일 수 있는 시간대
+_RECENT_TTL_CLOSED = 1800     # 장외 — 어제 봉이 늦게 확정되는 경우만 잡으면 된다
+
+
+def _session_open_now(sym: str) -> bool:
+    """정규장이 지금 열려 있는가 — 마지막 봉이 '장중 부분 봉' 인지 가르는 기준.
+
+    price_can_move 가 아니다. 그건 시간외(한국 18:00 까지)를 포함해 '재조회할
+    가치가 있는가' 를 묻는다. 15:30 이후의 한국 봉은 확정이므로 '장중' 이 아니다.
+    """
+    from backend.services.market_calendar import (
+        uses_kr_session_calendar, uses_us_session_calendar,
+        is_kr_market_open, is_us_market_open,
+    )
+    if uses_kr_session_calendar(sym):
+        return is_kr_market_open()
+    if uses_us_session_calendar(sym):
+        return is_us_market_open()
+    return False
+
+
+def _exchange_today(sym: str) -> str:
+    from backend.services.market_calendar import uses_kr_session_calendar, now_kst, now_et
+    return (now_kst() if uses_kr_session_calendar(sym) else now_et()).strftime("%Y-%m-%d")
+
+
+def _bar_from_meta(sym: str, t: "yf.Ticker", meta: dict) -> "dict | None":
+    """야후 시세 메타데이터로 마지막 세션의 일봉을 만든다. 못 만들면 None.
+
+    한국 종목은 일봉의 마지막 날이 비어 있다 — 2026-10-02 01:12 KST 에
+    005930.KS 의 10-01 행이 Open/High/Low/Close 전부 NaN 이고 Volume 만 있었다
+    (장 마감 9시간 뒤). 5분봉에는 그날이 있지만 14:55 에서 끝나 종가 단일가
+    (15:20~15:30)가 빠진다 — 마지막 5분봉 275,500 vs 확정 종가 276,000.
+    메타데이터(regularMarket*)는 같은 시각에 276,000 · 고 276,000 · 저 264,500 ·
+    거래량 · 체결시각 15:30:02 를 정확히 줬다. 시가만 없어서 5분봉 첫 봉에서 읽는다.
+
+    시가를 못 구하면 봉을 만들지 않는다. 전일 종가나 현재가로 채우면 그럴듯한
+    가짜 캔들이 그려진다 (CLAUDE.md §1.3(b)).
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    price, hi, lo = (_safe(meta.get(k)) for k in
+                     ("regularMarketPrice", "regularMarketDayHigh", "regularMarketDayLow"))
+    ts = meta.get("regularMarketTime")
+    if price is None or hi is None or lo is None or not ts:
+        logger.warning("시세 메타데이터에 당일 값이 없다 (%s) — 오늘 봉을 붙이지 않는다", sym)
+        return None
+    try:
+        tz = ZoneInfo(meta.get("exchangeTimezoneName") or "UTC")
+    except Exception:
+        tz = ZoneInfo("UTC")
+    day = datetime.fromtimestamp(int(ts), tz).strftime("%Y-%m-%d")
+
+    try:
+        from backend.db.market_cache import _yf_sem
+        with _yf_sem:
+            intra = t.history(period="1d", interval="5m", auto_adjust=True)
+        intra = intra[[ix.strftime("%Y-%m-%d") == day for ix in intra.index]]
+        opens = intra["Open"].dropna()
+        open_ = float(opens.iloc[0]) if not opens.empty else None
+    except Exception:
+        logger.warning("당일 시가 조회 실패 (%s)", sym, exc_info=True)
+        open_ = None
+    if open_ is None:
+        logger.warning("당일 시가를 구하지 못했다 (%s, %s) — 오늘 봉을 붙이지 않는다", sym, day)
+        return None
+
+    vol = _safe(meta.get("regularMarketVolume"))
+    return {
+        "date": day, "open": round(open_, 4),
+        # 시가·종가가 메타의 고저 밖에 있으면 고저를 넓힌다 (출처가 둘이라 어긋날 수 있다).
+        "high": round(max(hi, open_, price), 4), "low": round(min(lo, open_, price), 4),
+        "close": round(price, 4), "volume": int(vol) if vol is not None else 0,
+    }
+
+
+def _recent_bars(sym: str) -> "list[dict] | None":
+    """최근 며칠의 일봉 [{date, open, high, low, close, volume}]. 실패하면 None.
+
+    빈 목록과 실패를 구별한다 (§1.3) — 실패하면 화면이 '최신 시세를 받지 못함' 을 적는다.
+    """
+    from backend.services.market_calendar import price_can_move
+    from backend.services.market_data import _cache_get, _cache_put
+    from backend.db.market_cache import _yf_sem
+
+    key = f"ticker_recent_bars_{sym}"
+    ttl = _RECENT_TTL_OPEN if price_can_move(sym) else _RECENT_TTL_CLOSED
+    hit = _cache_get(key, ttl)
+    if hit is not None:
+        return hit
+    try:
+        t = yf.Ticker(sym)
+        with _yf_sem:
+            df = t.history(period="5d", interval="1d", auto_adjust=True)
+        meta = dict(t.history_metadata or {})
+    except Exception:
+        logger.warning("최근 일봉 조회 실패 (%s) — 캐시된 차트를 그대로 준다", sym, exc_info=True)
+        return None
+
+    bars: dict[str, dict] = {}
+    for dt, r in (df.iterrows() if df is not None else []):
+        if any(pd.isna(r[c]) for c in ("Open", "High", "Low", "Close")):
+            continue          # 한국의 마지막 날처럼 OHLC 가 빈 행 — 아래 메타로 채운다
+        d = dt.strftime("%Y-%m-%d")
+        bars[d] = {"date": d,
+                   "open": round(float(r["Open"]), 4), "high": round(float(r["High"]), 4),
+                   "low": round(float(r["Low"]), 4), "close": round(float(r["Close"]), 4),
+                   "volume": int(r["Volume"]) if pd.notna(r["Volume"]) else 0}
+
+    # 일봉에 마지막 세션이 없을 때만 메타로 만든다 (요청이 하나 더 나가므로).
+    ts = meta.get("regularMarketTime")
+    if ts:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        try:
+            tz = ZoneInfo(meta.get("exchangeTimezoneName") or "UTC")
+        except Exception:
+            tz = ZoneInfo("UTC")
+        if datetime.fromtimestamp(int(ts), tz).strftime("%Y-%m-%d") not in bars:
+            b = _bar_from_meta(sym, t, meta)
+            if b is not None:
+                bars[b["date"]] = b
+
+    if not bars:
+        # yfinance 는 실패해도 예외 대신 빈 프레임을 주는 일이 잦다. 캐시하지 않는다.
+        logger.warning("최근 일봉이 비어 있다 (%s) — 캐시된 차트를 그대로 준다", sym)
+        return None
+    out = [bars[d] for d in sorted(bars)]
+    _cache_put(key, out)
+    return out
+
+
+def _overlay_recent_bars(body: dict, sym: str) -> dict:
+    """캐시된 상세 본문에 최근 일봉을 덮어쓴 **새** dict 를 돌려준다.
+
+    받은 dict 는 메모리 캐시가 들고 있는 객체라 고치면 안 된다 — 다음 요청이
+    덧씌운 값을 원본으로 읽는다. 바꾸는 부분(ohlcv·performance·risk)만 새로 만든다.
+
+    덧씌운 뒤 지표(이평선·BB·스토캐스틱)와 수익률을 **같은 공식으로 다시
+    계산한다.** 봉만 바꾸면 오늘 봉 위에 어제 기준 이평선이 그려진다.
+
+    응답의 `bars_refresh` 가 결과를 말한다:
+      ok=False  → 최근 일봉을 받지 못해 캐시 그대로다 (화면이 그 사실을 적는다)
+      live=True → 마지막 봉이 정규장 진행 중인 부분 봉이다
+    """
+    rows = list(body.get("ohlcv") or [])
+    recent = _recent_bars(sym)
+    last = rows[-1]["date"] if rows else None
+    if recent is None or not rows:
+        return {**body, "bars_refresh": {"ok": False, "last_date": last, "live": False}}
+
+    by_date = {r["date"]: dict(r) for r in rows}
+    for b in recent:
+        # 캐시 범위보다 앞선 날은 붙이지 않는다 — 기간(1m/3m…)의 앞쪽을 늘리지 않는다.
+        if b["date"] < rows[0]["date"]:
+            continue
+        by_date[b["date"]] = {**by_date.get(b["date"], {}), **b}
+    merged = [by_date[d] for d in sorted(by_date)]
+
+    hist = pd.DataFrame(merged).set_index(pd.to_datetime([m["date"] for m in merged]))
+    hist = hist.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close"})
+    closes = hist["Close"].astype(float)
+    ind = pd.DataFrame({
+        "ma20": closes.rolling(20).mean(), "ma50": closes.rolling(50).mean(),
+        "ma200": closes.rolling(200).mean(),
+    })
+    ind = ind.join(_calc_bb(closes)).join(_calc_stoch(hist))
+
+    def _fv(v) -> Optional[float]:
+        return None if (pd.isna(v) or math.isinf(float(v))) else round(float(v), 4)
+
+    out_rows = []
+    for i, m in enumerate(merged):
+        row = ind.iloc[i]
+        out_rows.append({**m, **{k: _fv(row[k]) for k in (
+            "ma20", "ma50", "ma200", "bb_upper", "bb_mid", "bb_lower", "stoch_k", "stoch_d")}})
+
+    current = float(closes.iloc[-1])
+    prev = float(closes.iloc[-2]) if len(closes) > 1 else current
+
+    long = _long_closes(sym)
+    if long is not None:
+        perf = {**(body.get("performance") or {}), **_performance(closes, long)}
+    else:
+        # 장기 종가를 못 받았으면 캐시된 성과표를 그대로 둔다. 짧은 기간으로 다시 계산해
+        # 덮으면 한 번의 조회 실패가 멀쩡한 1Y·5Y 를 N/A 로, YTD 를 오답으로 바꾼다.
+        perf = body.get("performance") or {}
+    risk = {**(body.get("risk") or {}),
+            "current_price": round(current, 2),
+            "change_pct": round((current / prev - 1) * 100, 2)}
+
+    last = out_rows[-1]["date"]
+    live = last == _exchange_today(sym) and _session_open_now(sym)
+    return {**body, "ohlcv": out_rows, "performance": perf, "risk": risk,
+            "bars_refresh": {"ok": True, "last_date": last, "live": live}}
+
 @router.get("/{ticker}/detail")
 def get_ticker_detail(
     ticker: str,
@@ -216,7 +516,7 @@ def get_ticker_detail(
             _cache_put(mem_key, shared)
 
     if shared is not None:
-        out = dict(shared)
+        out = _overlay_recent_bars(shared, sym)
         out["quant"] = {**out.get("quant", {}),
                         "optimizer": _build_optimizer_block(sym, uid, None, market)}
         return out
@@ -305,19 +605,8 @@ def get_ticker_detail(
                     or "USD")
         return _fmt_amount(v, currency)
 
-    # ── 수익률 ──────────────────────────────────────────────────────────────
-    def _perf(n: int) -> Optional[float]:
-        if len(closes) <= n:
-            return None
-        return round((current / float(closes.iloc[-n - 1]) - 1) * 100, 2)
-
-    # YTD: 올해 첫 거래일 대비
-    this_year = hist.index[-1].year
-    ytd_hist  = hist[hist.index.year == this_year]["Close"]
-    ytd = round((current / float(ytd_hist.iloc[0]) - 1) * 100, 2) if len(ytd_hist) > 1 else None
-
-    # 52주 고/저가 (1y 이상 데이터가 없으면 수집된 전체 범위)
-    s52 = hist["Close"].tail(252) if len(hist) >= 252 else hist["Close"]
+    # ── 수익률 — 차트 기간과 따로 장기 종가로 (_performance 주석) ─────────────
+    performance = _performance(closes, _long_closes(sym))
 
     # ── 리스크 지표 ─────────────────────────────────────────────────────────
     returns = closes.pct_change().dropna()
@@ -364,16 +653,7 @@ def get_ticker_detail(
             "pe":         _safe(info.get("trailingPE"),   None),
             "div_yield":  div_yield,
         },
-        "performance": {
-            "1w":        _perf(5),
-            "1m":        _perf(21),
-            "6m":        _perf(126),
-            "ytd":       ytd,
-            "1y":        _perf(252),
-            "5y":        _perf(1260),
-            "s52w_high": round(float(s52.max()), 2),
-            "s52w_low":  round(float(s52.min()), 2),
-        },
+        "performance": performance,
         "risk": {
             "beta":         beta,
             "volatility":   vol_ann,
@@ -394,8 +674,12 @@ def get_ticker_detail(
     _cache_put(mem_key, result)
     ta_repo.save(sym, period, result)
 
-    # 사용자별 optimizer 는 캐시에 넣지 않고 응답에만 덧붙인다
-    out = dict(result)
+    # 사용자별 optimizer 는 캐시에 넣지 않고 응답에만 덧붙인다.
+    # 방금 받은 시세라 덧씌울 것이 없다 — 마지막 봉의 성격만 적는다.
+    last_date = ohlcv[-1]["date"]
+    out = {**result, "bars_refresh": {
+        "ok": True, "last_date": last_date,
+        "live": last_date == _exchange_today(sym) and _session_open_now(sym)}}
     out["quant"] = {**out.get("quant", {}),
                     "optimizer": _build_optimizer_block(sym, uid, closes, market)}
     return out

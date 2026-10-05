@@ -276,19 +276,23 @@ def test_background_refresh_skips_tickers_already_running():
 
 def test_news_for_one_broken_ticker_does_not_lose_the_others(caplog):
     """한 티커의 뉴스 조회가 실패해도 나머지 결과는 유지된다."""
-    good = [{"content": {"title": "정상 헤드라인", "canonicalUrl": {"url": "http://x"},
-                         "pubDate": "2026-09-11T00:00:00Z"}}]
+    # 뉴스 출처가 `yf.Ticker(t).news`(404 를 [] 로 삼키던 엔드포인트)에서 `yf.Search`
+    # 로 바뀌었다 (2026-10). 가짜도 그쪽에 끼운다 — 검색 결과는 이 종목이 관련 종목에
+    # 있고 제목에 종목 키워드가 있는 최근 기사만 남기므로 그 모양으로 만든다.
+    import time as _time
 
-    def fake_ticker(sym):
-        tk = mock.Mock()
+    def fake_search(sym, *a, **kw):
         if sym == "__BROKEN__":
-            type(tk).news = mock.PropertyMock(side_effect=RuntimeError("news down"))
-        else:
-            tk.news = good
-        return tk
+            raise RuntimeError("news down")
+        res = mock.Mock()
+        res.news = ([{"title": "OK 정상 헤드라인", "link": "http://x", "relatedTickers": [sym],
+                      "providerPublishTime": int(_time.time())}]
+                    if sym == "__OK__" else [])
+        res.quotes = []
+        return res
 
     with mock.patch.object(md, "_cached", lambda key, ttl, f: f()), \
-         mock.patch("yfinance.Ticker", fake_ticker), \
+         mock.patch("yfinance.Search", fake_search), \
          caplog.at_level(logging.WARNING):
         out = md.get_portfolio_news(["__BROKEN__", "__OK__"], max_per=1)
 

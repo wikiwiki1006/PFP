@@ -24,6 +24,10 @@ import { useTickerNames } from '@/lib/useTickerNames'
 import { pickOnEnter, moveHighlight, selectionLabel, type Suggestion } from '@/lib/suggestions'
 import SuggestionList from './SuggestionList'
 import { zoomAround, plotRatio } from './chartZoom'
+import TradingViewChart from './TradingViewChart'
+import { tradingViewSymbol, lightweightChartFor, priceMarketOf,
+         MA_PERIODS, NO_OVERLAYS, type ChartOverlays, type MaPeriod } from '@/lib/chartProvider'
+import LightweightDailyChart, { type DailyChartPalette } from './LightweightDailyChart'
 
 // 캔들 차트 JSX 에 준 margin/축 크기와 반드시 같아야 한다(아래 렌더 부분 참조).
 // 확대 기준점(커서 x → 플롯 비율)과 볼린저밴드 안/밖 판정이 이 값으로 플롯
@@ -388,6 +392,7 @@ interface Props {
 
 export default function TickerDetailModal({ initialTicker, onClose }: Props) {
   const C = usePalette()
+  const { theme } = useTheme()
   const isMobile = useIsMobile()
   const market = useMarket()
   const names = useTickerNames()
@@ -398,8 +403,11 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
   // 오므로, 값으로 복사해 두지 않고 그릴 때마다 사전에서 읽는다.
   const [query,    setQuery]    = useState<string | null>(null)
   const [period,   setPeriod]   = useState<Period>('1y')
-  const [showMA,   setShowMA]   = useState(true)
-  const [showBB,   setShowBB]   = useState(true)
+  // 기본 화면은 캔들·거래량·스토캐스틱뿐이다. 이평선(기간별)·볼린저는 사용자가 골라 더한다.
+  const [overlays, setOverlays] = useState<ChartOverlays>(NO_OVERLAYS)
+  const showBB = overlays.bb
+  const toggleMa = (n: MaPeriod) =>
+    setOverlays(o => ({ ...o, ma: { ...o.ma, [n]: !o.ma[n] } }))
   const [data,     setData]     = useState<TickerDetail | null>(null)
   const [loading,  setLoading]  = useState(false)
   const [error,    setError]    = useState<string | null>(null)
@@ -408,6 +416,22 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
   const [sugIdx,   setSugIdx]   = useState(-1)
   const searchRef = useRef<HTMLInputElement>(null)
   const shownQuery = query ?? selectionLabel(market, ticker, names[ticker])
+  // null 이면 기존 자체 차트 (한국 종목·지수 등, 또는 VITE_TICKER_CHART=legacy).
+  const tvSymbol = data ? tradingViewSymbol(data.ticker) : null
+  // 위젯이 못 그리는 종목(한국 등)은 lightweight-charts 로. false 면 기존 recharts 차트.
+  const lwc = data ? lightweightChartFor(data.ticker) : false
+  // 차트가 매 렌더마다 새로 만들어지지 않게 팔레트 객체를 고정한다.
+  const lwcPalette = useMemo<DailyChartPalette>(() => ({
+    bg: C.bg, grid: C.grid, text: C.text, muted: C.muted, border: C.border,
+    up: C.up, down: C.down, volUp: C.volUp, volDn: C.volDn,
+    ma20: C.ma20, ma50: C.ma50, ma200: C.ma200, bb: C.bbUpper,
+    stochK: C.stochK, stochD: C.stochD,
+  }), [C])
+  // 하단 분석 바의 칸 구분선 — 넓은 화면은 세로선, 좁은 화면(세로 쌓기)은 가로선.
+  const cellBorder = isMobile ? { borderBottom: `1px solid ${C.border}` } : { borderRight: `1px solid ${C.border}` }
+  // 넓은 화면: 칸마다 최소 320px 폭(모자라면 줄바꿈). 좁은 화면은 세로로 쌓이므로
+  // flex-basis 가 **높이**로 읽힌다 — 320px 을 그대로 두면 칸마다 아래가 텅 비었다.
+  const cellFlex = isMobile ? '0 0 auto' : '1 1 320px'
 
   // ── zoom/pan state ─────────────────────────────────────────────────────
   const [viewStart, setViewStart] = useState(0)
@@ -470,7 +494,12 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
     }
   }, [commitView])
 
-  useEffect(() => { if (ticker) load(ticker, period) }, [ticker, period, load])
+  // TradingView 위젯 종목은 기간 버튼을 숨긴다(위젯에 자체 기간 막대가 있다). 그런데
+  // 기간은 차트 범위만이 아니라 오른쪽 성과·VaR·변동성·퀀트 계산의 데이터 범위이기도
+  // 해서, 한국 종목에서 고른 1M 이 남아 있으면 미국 종목의 YTD·52주 저가가 1개월치로
+  // 계산된 그럴듯한 오답이 됐다(§1.3b). 위젯 종목은 항상 기본 기간(1Y)으로 받는다.
+  const reqPeriod: Period = tradingViewSymbol(ticker) ? '1y' : period
+  useEffect(() => { if (ticker) load(ticker, reqPeriod) }, [ticker, reqPeriod, load])
 
   // ── 줌 · 팬 ────────────────────────────────────────────────────────────
   // 예전에는 mousedown/mousemove 만 붙어 있어 휴대폰에서는 차트가 아예
@@ -510,7 +539,10 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
 
   useEffect(() => {
     const el = chartRef.current
-    if (!el || !data) return
+    // 위젯(iframe)·lightweight-charts 는 확대/이동을 스스로 처리한다. 여기서
+    // 휠·포인터를 가로채면 같은 조작이 두 번 먹는다 (캔버스는 같은 DOM 이라
+    // 이벤트가 이 컬럼까지 올라온다).
+    if (!el || !data || tvSymbol || lwc) return
     const total = data.ohlcv.length
 
     const onWheel = (e: WheelEvent) => {
@@ -619,7 +651,7 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
     // viewStart/viewEnd 를 의도적으로 뺐다 — 팬 중 매 프레임 좌표는 viewRef 로
     // 읽으므로, 이 리스너들을 매번 떼었다 다시 달 필요가 없다(그 자체도 비용이다).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, zoomBy, scheduleView, ratioAtX])
+  }, [data, zoomBy, scheduleView, ratioAtX, tvSymbol, lwc])
 
   // ── 자동완성 ─────────────────────────────────────────────────────────────
   const onQueryChange = (v: string) => {
@@ -660,17 +692,16 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
     if (!visData.length) return [0, 100]
     let lo = Infinity, hi = -Infinity
     visData.forEach(d => {
-      lo = Math.min(lo, d.low, d.bb_lower ?? d.low)
-      hi = Math.max(hi, d.high, d.bb_upper ?? d.high)
-      if (showMA) {
-        if (d.ma20)  { lo = Math.min(lo, d.ma20);  hi = Math.max(hi, d.ma20) }
-        if (d.ma50)  { lo = Math.min(lo, d.ma50);  hi = Math.max(hi, d.ma50) }
-        if (d.ma200) { lo = Math.min(lo, d.ma200); hi = Math.max(hi, d.ma200) }
-      }
+      // 그리지 않는 선으로 축을 넓히지 않는다 — BB 는 기본이 꺼짐이다.
+      lo = Math.min(lo, d.low,  overlays.bb ? (d.bb_lower ?? d.low)  : d.low)
+      hi = Math.max(hi, d.high, overlays.bb ? (d.bb_upper ?? d.high) : d.high)
+      if (overlays.ma[20]  && d.ma20)  { lo = Math.min(lo, d.ma20);  hi = Math.max(hi, d.ma20) }
+      if (overlays.ma[50]  && d.ma50)  { lo = Math.min(lo, d.ma50);  hi = Math.max(hi, d.ma50) }
+      if (overlays.ma[200] && d.ma200) { lo = Math.min(lo, d.ma200); hi = Math.max(hi, d.ma200) }
     })
     const pad = (hi - lo) * 0.05
     return [Math.max(0, lo - pad), hi + pad]
-  }, [visData, showMA])
+  }, [visData, overlays])
 
   /** 터치 시작 지점이 캔들 차트의 볼린저밴드 채널(상단~하단) 안인지 판정.
       팬/핀치 리스너가 매 프레임 다시 붙지 않도록, 이 함수 자체가 아니라
@@ -797,8 +828,8 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
             />
           </div>
 
-          {/* 기간 버튼 */}
-          <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+          {/* 기간 버튼 — TradingView 위젯은 자체 기간 막대(1D~전체)가 있어 숨긴다 */}
+          {!tvSymbol && <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
             {PERIODS.map(p => (
               <button key={p} onClick={() => setPeriod(p)}
                 style={{
@@ -811,23 +842,32 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                 {p.toUpperCase()}
               </button>
             ))}
-          </div>
+          </div>}
 
-          {/* MA/BB 토글 */}
-          <div style={{ display: 'flex', gap: 6 }}>
-            <button onClick={() => setShowMA(v => !v)}
+          {/* 지표 토글 — 기본은 스토캐스틱만. 이평선은 기간마다, 볼린저는 따로 더한다.
+              버튼 색은 선 색과 같다. TradingView 위젯은 선 색을 바꿀 수 없어(세 이평선이
+              같은 색) 위젯일 때는 버튼을 중립색으로 두고 툴팁으로 알린다. */}
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            {MA_PERIODS.map(n => {
+              const on = overlays.ma[n]
+              const col = tvSymbol ? C.accent : ({ 20: C.ma20, 50: C.ma50, 200: C.ma200 } as const)[n]
+              return (
+                <button key={n} onClick={() => toggleMa(n)} aria-pressed={on}
+                  title={tvSymbol ? '이 차트(TradingView 위젯)는 이평선 색을 바꿀 수 없어 같은 색으로 그려집니다. 차트 범례의 이름으로 구분하세요.' : undefined}
+                  style={{
+                    padding: '3px 9px', borderRadius: 4, fontSize: 11,
+                    border: `1px solid ${on ? col : C.border}`,
+                    background: on ? C.chipBg : 'transparent',
+                    color: on ? col : C.muted, cursor: 'pointer', fontWeight: on ? 700 : 400,
+                  }}>MA{n}</button>
+              )
+            })}
+            <button onClick={() => setOverlays(o => ({ ...o, bb: !o.bb }))} aria-pressed={showBB}
               style={{
-                padding: '3px 10px', borderRadius: 4, fontSize: 11,
-                border: `1px solid ${showMA ? C.ma20 : C.border}`,
-                background: showMA ? 'rgba(245,158,11,0.15)' : 'transparent',
-                color: showMA ? C.ma20 : C.muted, cursor: 'pointer',
-              }}>MA</button>
-            <button onClick={() => setShowBB(v => !v)}
-              style={{
-                padding: '3px 10px', borderRadius: 4, fontSize: 11,
+                padding: '3px 9px', borderRadius: 4, fontSize: 11,
                 border: `1px solid ${showBB ? C.dim : C.border}`,
                 background: showBB ? 'rgba(100,116,139,0.15)' : 'transparent',
-                color: C.muted, cursor: 'pointer',
+                color: showBB ? C.text : C.muted, cursor: 'pointer', fontWeight: showBB ? 700 : 400,
               }}>BB</button>
           </div>
 
@@ -917,6 +957,32 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                 touchAction: 'pan-y',
               }}>
 
+                {tvSymbol ? (
+                  // TradingView 위젯 (미국 종목). 기존 차트는 아래 분기에 그대로 있다 —
+                  // 되돌리려면 lib/chartProvider.ts 참고.
+                  <div style={{ flex: isMobile ? '0 0 auto' : 1, height: isMobile ? 460 : undefined, minHeight: 0 }}>
+                    <TradingViewChart
+                      symbol={tvSymbol}
+                      theme={theme === 'light' ? 'light' : 'dark'}
+                      background={C.bg}
+                      grid={C.grid}
+                      overlays={overlays}
+                    />
+                  </div>
+                ) : lwc ? (
+                  // 한국 종목 등 — 같은 일봉 데이터를 lightweight-charts 로.
+                  // 기존 recharts 차트는 아래 분기에 그대로 있다 (lib/chartProvider.ts).
+                  <div style={{ flex: isMobile ? '0 0 auto' : 1, height: isMobile ? 460 : undefined, minHeight: 0 }}>
+                    <LightweightDailyChart
+                      ohlcv={data.ohlcv}
+                      market={priceMarketOf(data.ticker)}
+                      palette={lwcPalette}
+                      overlays={overlays}
+                      liveDate={data.bars_refresh?.live ? data.bars_refresh.last_date : null}
+                      stale={data.bars_refresh?.ok === false}
+                    />
+                  </div>
+                ) : (<>
                 {/* 메인 캔들 차트 */}
                 <div ref={candleWrapRef} style={{ flex: isMobile ? '0 0 auto' : '0 0 55%', height: isMobile ? 300 : undefined, borderBottom: `1px solid ${C.border}` }}>
                   <ResponsiveContainer width="100%" height="100%">
@@ -949,16 +1015,12 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                       )}
 
                       {/* 이평선 */}
-                      {showMA && (
-                        <>
-                          <Line dataKey="ma20"  stroke={C.ma20}  strokeWidth={1.5}
-                            dot={false} activeDot={false} isAnimationActive={false} connectNulls />
-                          <Line dataKey="ma50"  stroke={C.ma50}  strokeWidth={1.5}
-                            dot={false} activeDot={false} isAnimationActive={false} connectNulls />
-                          <Line dataKey="ma200" stroke={C.ma200} strokeWidth={1.5}
-                            dot={false} activeDot={false} isAnimationActive={false} connectNulls />
-                        </>
-                      )}
+                      {overlays.ma[20] && <Line dataKey="ma20"  stroke={C.ma20}  strokeWidth={1.5}
+                        dot={false} activeDot={false} isAnimationActive={false} connectNulls />}
+                      {overlays.ma[50] && <Line dataKey="ma50"  stroke={C.ma50}  strokeWidth={1.5}
+                        dot={false} activeDot={false} isAnimationActive={false} connectNulls />}
+                      {overlays.ma[200] && <Line dataKey="ma200" stroke={C.ma200} strokeWidth={1.5}
+                        dot={false} activeDot={false} isAnimationActive={false} connectNulls />}
 
                       {/* dummy bar to set X scale; Customized layer draws real candles */}
                       <Bar dataKey="close" fill="transparent" isAnimationActive={false} />
@@ -967,8 +1029,9 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                   </ResponsiveContainer>
                 </div>
 
-                {/* MA 범례 */}
-                {showMA && (
+                {/* MA 범례 — 줄 자체는 항상 둔다. 모바일 확대/축소 버튼이 이 줄에 있어서,
+                    이평선을 모두 끈 기본 화면에서 줄을 숨기면 버튼도 같이 사라진다. */}
+                {(
                   <div style={{
                     padding: '2px 12px', display: 'flex', gap: 14,
                     // MA 범례 넷 + 확대 버튼 셋이 390px 에 한 줄로 안 들어간다.
@@ -976,7 +1039,7 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                     flexWrap: 'wrap', rowGap: 6, alignItems: 'center',
                     borderBottom: `1px solid ${C.border}`,
                   }}>
-                    {[['MA20', C.ma20], ['MA50', C.ma50], ['MA200', C.ma200]].map(([l, c]) => (
+                    {([[20, C.ma20], [50, C.ma50], [200, C.ma200]] as const).filter(([n]) => overlays.ma[n]).map(([n, c]) => ['MA' + n, c]).map(([l, c]) => (
                       <div key={l} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10 }}>
                         <div style={{ width: 20, height: 2, background: c as string, borderRadius: 1 }} />
                         <span style={{ color: C.muted }}>{l}</span>
@@ -1055,253 +1118,252 @@ export default function TickerDetailModal({ initialTicker, onClose }: Props) {
                     ))}
                   </div>
                 </div>
+                </>)}
               </div>
 
-              {/* ─── 우측 패널 (30%) ──────────────────────────────────────── */}
+              {/* ─── 우측 패널 (30%) — 펀드 정보 · 성과 · 리스크/기술적 지표 ─────
+                  예전에는 이 자리에 퀀트·시장 국면·패닉·VaR 가 있었고 이 셋이
+                  아래 바에 있었다. 사용자 요청으로 자리를 맞바꿨다 (2026-10). */}
               <div style={{
                 flex: isMobile ? '0 0 auto' : '0 0 30%',
                 width: isMobile ? '100%' : undefined,
                 display: 'flex', flexDirection: 'column',
-                overflow: isMobile ? 'visible' : 'hidden',
+                overflowY: isMobile ? 'visible' : 'auto',
               }}>
 
-                {/* 퀀트 스코어보드 */}
+                {/* 펀드 정보 */}
                 <div style={{ padding: '10px 14px', borderBottom: `1px solid ${C.border}` }}>
-                  <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 4 }}>
-                    퀀트 스코어보드
+                  <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span>ℹ</span> 펀드 정보
                   </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <QuantGauge score={data.quant.score ?? null} />
-                    <div style={{ flex: 1 }}>
-                      {/* 점수가 없으면 라벨도 '계산 불가' 다. 그걸 초록으로 칠하면
-                          긍정 판단처럼 읽힌다 — 값과 색이 같은 말을 해야 한다. */}
-                      <div style={{ fontSize: 10, color: C.muted }}>퀀트 점수: <span style={{ color: data.quant.score == null ? C.muted : C.up, fontWeight: 700 }}>{data.quant.score ?? '—'}/100</span></div>
-                      {(() => {
-                        const q = quantBasis(data.quant)
-                        return (
-                          <div style={{ fontSize: 11, color: data.quant.score == null ? C.muted : C.up, fontWeight: 700, marginTop: 2 }}
-                               title={q.title}>
-                            {q.label}
-                            {q.partial && (
-                              <span style={{ color: C.muted, fontWeight: 400, marginLeft: 5 }}>{q.note}</span>
-                            )}
-                          </div>
-                        )
-                      })()}
-                      {/* 합성 점수만 보여주면 실제보다 정밀해 보인다 — 팩터별 근거를 함께 표시 */}
-                      {data.quant.factors && (
-                        <div style={{ display: 'flex', gap: 8, marginTop: 5 }}>
-                          {([['모멘텀','momentum'],['추세','trend'],['퀄리티','quality'],['밸류','value']] as const).map(([ko,k]) => {
-                            const v = (data.quant.factors as any)?.[k]
-                            if (v == null) return null
-                            const col = v >= 67 ? C.up : v >= 34 ? C.warn : C.down
-                            return (
-                              <div key={k} style={{ textAlign: 'center' }}>
-                                <div style={{ fontSize: 9, color: C.muted }}>{ko}</div>
-                                <div style={{ fontSize: 11, fontWeight: 700, color: col, fontFamily: 'monospace' }}>{v}</div>
-                              </div>
-                            )
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                {/* 시장 국면 + 옵티마이저 */}
-                <div style={{ padding: '10px 14px', borderBottom: `1px solid ${C.border}` }}>
-                  <div style={{ fontSize: 10, color: C.warn, fontWeight: 700, marginBottom: 6 }}>
-                    시장 국면: <span style={{ color: C.text }}>{data.quant.regime}</span>
-                    {data.quant.regime_er != null && (
-                      <span style={{ color: C.muted, fontWeight: 400, marginLeft: 6 }}>
-                        (효율성비율 {data.quant.regime_er.toFixed(2)})
-                      </span>
-                    )}
-                  </div>
-                  <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 6 }}>
-                    옵티마이저 인사이트
-                  </div>
-                  {(() => {
-                    const o = data.quant.optimizer
-                    const n = (v: number | null | undefined, suffix = '%') =>
-                      v == null ? '—' : `${v}${suffix}`
-                    const over = o.target_weight != null && o.current_weight != null
-                      && o.current_weight > o.target_weight * 1.3 && o.current_weight > 1
-                    return (
-                      <>
-                        <div style={{ fontSize: 10, color: C.muted, marginBottom: 3 }}>
-                          목표 최적 비중(HRP): <span style={{ color: C.text }}>{n(o.target_weight)}</span>
-                          {' · 현재 '}<span style={{ color: over ? C.down : C.text }}>{n(o.current_weight)}</span>
-                          {over && <span style={{ color: C.down, marginLeft: 4 }}>과다 편중</span>}
-                        </div>
-                        <div style={{ fontSize: 10, color: C.muted, marginBottom: 3 }}>
-                          리스크 기여도: <span style={{ color: C.text }}>{n(o.risk_contribution)}</span>
-                        </div>
-                        <div style={{ fontSize: 10, color: C.muted, marginBottom: 3 }}>
-                          포트 상관관계: <span style={{ color: C.text }}>{o.correlation ?? '—'}</span>
-                          {o.correlation_label && ` (${o.correlation_label})`}
-                        </div>
-                        <div style={{ fontSize: 10, color: C.muted, marginBottom: 3 }}>
-                          Beta 익스포저: <span style={{ color: C.text }}>{n(o.beta_exposure, 'x')}</span>
-                        </div>
-                        {o.note && (
-                          <div style={{ fontSize: 9, color: C.warn, marginTop: 4 }}>{o.note}</div>
-                        )}
-                      </>
-                    )
-                  })()}
-                  <div style={{ fontSize: 9, color: C.dim, marginTop: 4, fontStyle: 'italic' }}>
-                    (주) 수학적 기반 참고 추천으로, 강제 포지션이 아닙니다.
-                  </div>
-                </div>
-
-                {/* 패닉 헌팅 점수 */}
-                <div style={{ padding: '10px 14px', borderBottom: `1px solid ${C.border}`, background: 'rgba(239,68,68,0.05)', border: `1px solid rgba(239,68,68,0.2)`, margin: '8px', borderRadius: 6 }}>
-                  <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 6 }}>
-                    패닉 헌팅 점수
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, marginBottom: 8 }}>
-                    <span style={{ fontSize: 10, color: C.muted }}>패닉 상태 점수:</span>
-                    <span style={{ fontSize: 22, fontWeight: 700, color: C.down, fontFamily: 'monospace' }}>
-                      {data.quant.panic_score ?? '—'}
-                    </span>
-                    <span style={{ fontSize: 11, color: C.muted }}>/100</span>
-                  </div>
-                  <PanicBar score={data.quant.panic_score ?? null} />
-                  {data.quant.panic_components && (
-                    <div style={{ display: 'flex', gap: 8, marginTop: 6, flexWrap: 'wrap' }}>
-                      {([['RSI','rsi'],['낙폭','drawdown'],['고점대비','vs_52w_high'],['거래량','volume'],['변동성','volatility']] as const).map(([ko,k]) => {
-                        const v = (data.quant.panic_components as any)?.[k]
-                        if (v == null) return null
-                        return (
-                          <span key={k} style={{ fontSize: 9, color: C.muted }}>
-                            {ko} <span style={{ color: C.text, fontFamily: 'monospace' }}>{v}</span>
-                          </span>
-                        )
-                      })}
-                    </div>
-                  )}
-                  <div style={{ fontSize: 10, color: C.down, marginTop: 6, fontWeight: 600 }}>
-                    시그널 상태: {data.quant.panic_status}
-                  </div>
-                </div>
-
-                {/* VaR */}
-                <div style={{ flex: 1, padding: '0 14px 10px', minHeight: 0 }}>
-                  <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 4 }}>
-                    95% VaR (Historical)
-                  </div>
-                  <VarChart dist={data.var.return_dist} var95={data.var.var95} />
-                  {data.var.var95 != null && (
-                    <div style={{ fontSize: 10, color: C.down, marginTop: 4 }}>
-                      Warning: 95% VaR = {data.var.var95.toFixed(2)}% daily
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            {/* ─── 하단 정보 바 ──────────────────────────────────────────────── */}
-            <div style={{
-              flexShrink: 0, display: 'flex',
-              // 세 칸을 나란히 두면 390px 에서 한 칸이 120px 남짓이라
-              // '산업 Consumer Electronics' 같은 값이 글자마다 접힌다.
-              flexDirection: isMobile ? 'column' : 'row',
-              borderTop: `1px solid ${C.border}`, background: C.panel,
-            }}>
-
-              {/* 펀드 정보 */}
-              <div style={{
-                flex: 1, padding: '10px 14px',
-                borderRight: isMobile ? 'none' : `1px solid ${C.border}`,
-                borderBottom: isMobile ? `1px solid ${C.border}` : 'none',
-              }}>
-                <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <span>ℹ</span> 펀드 정보
-                </div>
-                {[
-                  // 한국은 코드 줄을 빼고 이름만 둔다 (제목과 같은 사전 이름).
-                  ...(market === 'KR' ? [] : [['티커', data.ticker]]),
-                  ['종목명',      market === 'KR' ? (names[data.ticker] || data.info.name) : data.info.name],
-                  ['섹터',        data.info.sector],
-                  ['산업',        data.info.industry],
-                  ['시가총액',    data.info.market_cap],
-                  ['P/E',         data.info.pe != null ? fn(data.info.pe, 1) : 'N/A'],
-                  ['배당수익률',  data.info.div_yield == null ? 'N/A' : `${fn(data.info.div_yield, 2)}%`],
-                ].map(([k, v]) => (
-                  <div key={k} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 3, fontSize: 11 }}>
-                    {/* 라벨은 짧다. 줄바꿈을 허용하면 '산업'이 '산/업'으로 쪼개진다. */}
-                    <span style={{ color: C.muted, whiteSpace: 'nowrap', flexShrink: 0 }}>{k}</span>
-                    <span style={{ color: C.text, textAlign: 'right', minWidth: 0,
-                                   fontWeight: k === '티커' ? 700 : 400,
-                                   fontFamily: k === '티커' ? 'monospace' : undefined }}>
-                      {v}
-                    </span>
-                  </div>
-                ))}
-              </div>
-
-              {/* 성과 */}
-              <div style={{
-                flex: 1, padding: '10px 14px',
-                borderRight: isMobile ? 'none' : `1px solid ${C.border}`,
-                borderBottom: isMobile ? `1px solid ${C.border}` : 'none',
-              }}>
-                <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <TrendingUp size={11} /> 성과
-                </div>
-                {[
-                  ['1W',   data.performance['1w']],
-                  ['1M',   data.performance['1m']],
-                  ['6M',   data.performance['6m']],
-                  ['YTD',  data.performance.ytd],
-                  ['1Y',   data.performance['1y']],
-                  ['5Y',   data.performance['5y']],
-                ].map(([k, v]) => (
-                  <div key={k as string} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3, fontSize: 11 }}>
-                    <span style={{ color: C.muted }}>{k}</span>
-                    <span style={{ color: perfColor(v as number | null, C), fontFamily: 'monospace', fontWeight: 600 }}>
-                      {fp(v as number | null)}
-                    </span>
-                  </div>
-                ))}
-                <div style={{ borderTop: `1px solid ${C.border}`, marginTop: 4, paddingTop: 4 }}>
                   {[
-                    ['52W 고가', formatPrice(data.performance.s52w_high)],
-                    ['52W 저가', formatPrice(data.performance.s52w_low)],
+                    // 한국은 코드 줄을 빼고 이름만 둔다 (제목과 같은 사전 이름).
+                    ...(market === 'KR' ? [] : [['티커', data.ticker]]),
+                    ['종목명',      market === 'KR' ? (names[data.ticker] || data.info.name) : data.info.name],
+                    ['섹터',        data.info.sector],
+                    ['산업',        data.info.industry],
+                    ['시가총액',    data.info.market_cap],
+                    ['P/E',         data.info.pe != null ? fn(data.info.pe, 1) : 'N/A'],
+                    ['배당수익률',  data.info.div_yield == null ? 'N/A' : `${fn(data.info.div_yield, 2)}%`],
                   ].map(([k, v]) => (
-                    <div key={k} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2, fontSize: 11 }}>
+                    <div key={k} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 3, fontSize: 11 }}>
+                      {/* 라벨은 짧다. 줄바꿈을 허용하면 '산업'이 '산/업'으로 쪼개진다. */}
+                      <span style={{ color: C.muted, whiteSpace: 'nowrap', flexShrink: 0 }}>{k}</span>
+                      <span style={{ color: C.text, textAlign: 'right', minWidth: 0,
+                                     fontWeight: k === '티커' ? 700 : 400,
+                                     fontFamily: k === '티커' ? 'monospace' : undefined }}>
+                        {v}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* 성과 */}
+                <div style={{ padding: '10px 14px', borderBottom: `1px solid ${C.border}` }}>
+                  <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <TrendingUp size={11} /> 성과
+                  </div>
+                  {[
+                    ['1W',   data.performance['1w']],
+                    ['1M',   data.performance['1m']],
+                    ['6M',   data.performance['6m']],
+                    ['YTD',  data.performance.ytd],
+                    ['1Y',   data.performance['1y']],
+                    ['5Y',   data.performance['5y']],
+                  ].map(([k, v]) => (
+                    <div key={k as string} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3, fontSize: 11 }}>
                       <span style={{ color: C.muted }}>{k}</span>
-                      <span style={{ color: C.text }}>{v}</span>
+                      <span style={{ color: perfColor(v as number | null, C), fontFamily: 'monospace', fontWeight: 600 }}>
+                        {fp(v as number | null)}
+                      </span>
+                    </div>
+                  ))}
+                  <div style={{ borderTop: `1px solid ${C.border}`, marginTop: 4, paddingTop: 4 }}>
+                    {[
+                      ['52W 고가', formatPrice(data.performance.s52w_high)],
+                      ['52W 저가', formatPrice(data.performance.s52w_low)],
+                    ].map(([k, v]) => (
+                      <div key={k} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2, fontSize: 11 }}>
+                        <span style={{ color: C.muted }}>{k}</span>
+                        <span style={{ color: C.text }}>{v}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* 리스크/기술적 지표 */}
+                <div style={{ padding: '10px 14px' }}>
+                  <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <TrendingDown size={11} /> 리스크/기술적 지표
+                  </div>
+                  {[
+                    ['Beta',          fn(data.risk.beta)],
+                    ['변동성',        data.risk.volatility != null ? `${fn(data.risk.volatility, 1)}%` : 'N/A'],
+                    ['평균 거래량',   fvol(data.risk.avg_volume)],
+                    ['RSI(14)',       data.risk.rsi14 != null ? fn(data.risk.rsi14, 1) : 'N/A'],
+                    ['현재가',        formatPrice(data.risk.current_price)],
+                    ['등락률',        null],
+                  ].map(([k, v]) => (
+                    <div key={k as string} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3, fontSize: 11 }}>
+                      <span style={{ color: C.muted }}>{k}</span>
+                      {k === '등락률' ? (
+                        <span style={{ color: perfColor(data.risk.change_pct, C), fontFamily: 'monospace', fontWeight: 600 }}>
+                          {fp(data.risk.change_pct)}
+                        </span>
+                      ) : (
+                        <span style={{ color: C.text }}>{v as string}</span>
+                      )}
                     </div>
                   ))}
                 </div>
               </div>
+            </div>
 
-              {/* 리스크/기술적 지표 */}
-              <div style={{ flex: 1, padding: '10px 14px' }}>
-                <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <TrendingDown size={11} /> 리스크/기술적 지표
+            {/* ─── 하단 분석 바 — 퀀트 · 시장 국면 · 패닉 헌팅 · VaR ───────────────
+                좁은 화면에서는 세로로 쌓는다 — 네 칸을 390px 에 나란히 두면
+                칸마다 100px 남짓이라 글자가 접힌다. */}
+            <div style={{
+              flexShrink: 0, display: 'flex',
+              flexDirection: isMobile ? 'column' : 'row',
+              // 칸마다 최소 320px — 768~1000px 에서 네 칸을 억지로 나란히 두면
+              // 게이지(140px) 옆 글자가 '모/멘/텀' 처럼 한 자씩 접혔다. 모자라면 두 줄로.
+              flexWrap: isMobile ? 'nowrap' : 'wrap',
+              alignItems: isMobile ? 'stretch' : 'flex-start',
+              borderTop: `1px solid ${C.border}`, background: C.panel,
+            }}>
+
+              {/* 퀀트 스코어보드 */}
+              <div style={{ flex: cellFlex, minWidth: 0, padding: '10px 14px', ...cellBorder }}>
+                <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 4 }}>
+                  퀀트 스코어보드
                 </div>
-                {[
-                  ['Beta',          fn(data.risk.beta)],
-                  ['변동성',        data.risk.volatility != null ? `${fn(data.risk.volatility, 1)}%` : 'N/A'],
-                  ['평균 거래량',   fvol(data.risk.avg_volume)],
-                  ['RSI(14)',       data.risk.rsi14 != null ? fn(data.risk.rsi14, 1) : 'N/A'],
-                  ['현재가',        formatPrice(data.risk.current_price)],
-                  ['등락률',        null],
-                ].map(([k, v]) => (
-                  <div key={k as string} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3, fontSize: 11 }}>
-                    <span style={{ color: C.muted }}>{k}</span>
-                    {k === '등락률' ? (
-                      <span style={{ color: perfColor(data.risk.change_pct, C), fontFamily: 'monospace', fontWeight: 600 }}>
-                        {fp(data.risk.change_pct)}
-                      </span>
-                    ) : (
-                      <span style={{ color: C.text }}>{v as string}</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <QuantGauge score={data.quant.score ?? null} />
+                  <div style={{ flex: 1 }}>
+                    {/* 점수가 없으면 라벨도 '계산 불가' 다. 그걸 초록으로 칠하면
+                        긍정 판단처럼 읽힌다 — 값과 색이 같은 말을 해야 한다. */}
+                    <div style={{ fontSize: 10, color: C.muted }}>퀀트 점수: <span style={{ color: data.quant.score == null ? C.muted : C.up, fontWeight: 700 }}>{data.quant.score ?? '—'}/100</span></div>
+                    {(() => {
+                      const q = quantBasis(data.quant)
+                      return (
+                        <div style={{ fontSize: 11, color: data.quant.score == null ? C.muted : C.up, fontWeight: 700, marginTop: 2 }}
+                             title={q.title}>
+                          {q.label}
+                          {q.partial && (
+                            <span style={{ color: C.muted, fontWeight: 400, marginLeft: 5 }}>{q.note}</span>
+                          )}
+                        </div>
+                      )
+                    })()}
+                    {/* 합성 점수만 보여주면 실제보다 정밀해 보인다 — 팩터별 근거를 함께 표시 */}
+                    {data.quant.factors && (
+                      <div style={{ display: 'flex', gap: 8, marginTop: 5 }}>
+                        {([['모멘텀','momentum'],['추세','trend'],['퀄리티','quality'],['밸류','value']] as const).map(([ko,k]) => {
+                          const v = (data.quant.factors as any)?.[k]
+                          if (v == null) return null
+                          const col = v >= 67 ? C.up : v >= 34 ? C.warn : C.down
+                          return (
+                            <div key={k} style={{ textAlign: 'center' }}>
+                              <div style={{ fontSize: 9, color: C.muted, whiteSpace: 'nowrap' }}>{ko}</div>
+                              <div style={{ fontSize: 11, fontWeight: 700, color: col, fontFamily: 'monospace' }}>{v}</div>
+                            </div>
+                          )
+                        })}
+                      </div>
                     )}
                   </div>
-                ))}
+                </div>
+              </div>
+
+              {/* 시장 국면 + 옵티마이저 */}
+              <div style={{ flex: cellFlex, minWidth: 0, padding: '10px 14px', ...cellBorder }}>
+                <div style={{ fontSize: 10, color: C.warn, fontWeight: 700, marginBottom: 6 }}>
+                  시장 국면: <span style={{ color: C.text }}>{data.quant.regime}</span>
+                  {data.quant.regime_er != null && (
+                    <span style={{ color: C.muted, fontWeight: 400, marginLeft: 6 }}>
+                      (효율성비율 {data.quant.regime_er.toFixed(2)})
+                    </span>
+                  )}
+                </div>
+                {/* 예전 제목은 '옵티마이저 인사이트' 였고, 첫 줄이
+                    '목표 최적 비중(HRP) · 현재 N% · 과다 편중' 이었다.
+                    그건 이 사람의 보유 비중에 대한 권고라 투자자문 쪽이다.
+                    지금은 계산된 사실만 적는다 — 무엇이어야 하는지는 말하지 않는다. */}
+                <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 6 }}>
+                  내 포트폴리오 내 위치
+                </div>
+                {(() => {
+                  const o = data.quant.optimizer
+                  const n = (v: number | null | undefined, suffix = '%') =>
+                    v == null ? '—' : `${v}${suffix}`
+                  return (
+                    <>
+                      <div style={{ fontSize: 10, color: C.muted, marginBottom: 3 }}>
+                        현재 비중: <span style={{ color: C.text }}>{n(o.current_weight)}</span>
+                      </div>
+                      <div style={{ fontSize: 10, color: C.muted, marginBottom: 3 }}>
+                        리스크 기여도: <span style={{ color: C.text }}>{n(o.risk_contribution)}</span>
+                      </div>
+                      <div style={{ fontSize: 10, color: C.muted, marginBottom: 3 }}>
+                        포트 상관관계: <span style={{ color: C.text }}>{o.correlation ?? '—'}</span>
+                        {o.correlation_label && ` (${o.correlation_label})`}
+                      </div>
+                      <div style={{ fontSize: 10, color: C.muted, marginBottom: 3 }}>
+                        Beta 익스포저: <span style={{ color: C.text }}>{n(o.beta_exposure, 'x')}</span>
+                      </div>
+                      {o.note && (
+                        <div style={{ fontSize: 9, color: C.warn, marginTop: 4 }}>{o.note}</div>
+                      )}
+                    </>
+                  )
+                })()}
+                <div style={{ fontSize: 9, color: C.dim, marginTop: 4, fontStyle: 'italic' }}>
+                  (주) 보유 내역으로 계산한 통계 지표입니다. 매매 권유가 아닙니다.
+                </div>
+              </div>
+
+              {/* 패닉 헌팅 점수 */}
+              <div style={{ flex: cellFlex, minWidth: 0, padding: '10px 14px', background: 'rgba(239,68,68,0.05)', border: `1px solid rgba(239,68,68,0.2)`, margin: '8px', borderRadius: 6 }}>
+                <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 6 }}>
+                  패닉 헌팅 점수
+                </div>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, marginBottom: 8 }}>
+                  <span style={{ fontSize: 10, color: C.muted }}>패닉 상태 점수:</span>
+                  <span style={{ fontSize: 22, fontWeight: 700, color: C.down, fontFamily: 'monospace' }}>
+                    {data.quant.panic_score ?? '—'}
+                  </span>
+                  <span style={{ fontSize: 11, color: C.muted }}>/100</span>
+                </div>
+                <PanicBar score={data.quant.panic_score ?? null} />
+                {data.quant.panic_components && (
+                  <div style={{ display: 'flex', gap: 8, marginTop: 6, flexWrap: 'wrap' }}>
+                    {([['RSI','rsi'],['낙폭','drawdown'],['고점대비','vs_52w_high'],['거래량','volume'],['변동성','volatility']] as const).map(([ko,k]) => {
+                      const v = (data.quant.panic_components as any)?.[k]
+                      if (v == null) return null
+                      return (
+                        <span key={k} style={{ fontSize: 9, color: C.muted }}>
+                          {ko} <span style={{ color: C.text, fontFamily: 'monospace' }}>{v}</span>
+                        </span>
+                      )
+                    })}
+                  </div>
+                )}
+                <div style={{ fontSize: 10, color: C.down, marginTop: 6, fontWeight: 600 }}>
+                  시그널 상태: {data.quant.panic_status}
+                </div>
+              </div>
+
+              {/* VaR */}
+              <div style={{ flex: cellFlex, minWidth: 0, padding: '10px 14px' }}>
+                <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 4 }}>
+                  95% VaR (Historical)
+                </div>
+                <VarChart dist={data.var.return_dist} var95={data.var.var95} />
+                {data.var.var95 != null && (
+                  <div style={{ fontSize: 10, color: C.down, marginTop: 4 }}>
+                    Warning: 95% VaR = {data.var.var95.toFixed(2)}% daily
+                  </div>
+                )}
               </div>
             </div>
           </div>

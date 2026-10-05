@@ -186,7 +186,7 @@ def test_the_scan_universe_is_not_widened(holder):
     seen: list[list[str]] = []
     idx = pd.bdate_range("2026-01-01", periods=300)
 
-    def _fake_scan(close_df, volume_df, top_n=10):
+    def _fake_scan(close_df, volume_df, top_n=10, score_all=False):
         seen.append(list(close_df.columns))
         return {"long_picks": [], "short_picks": []}
 

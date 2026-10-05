@@ -8,6 +8,7 @@ import { Brain, Plus, X, Download, ChevronRight, TrendingUp, TrendingDown, Minus
 import { useLoginPrompt } from '@/components/auth/LockedPreview'
 import LoadingSpinner from '@/components/LoadingSpinner'
 import { startAIOptimizeJob, getAIOptimizeJob, cancelAIOptimizeJob, getHoldings, checkTickerExists } from '@/api'
+import { AiGeneratedNote, AI_LABEL_OPTIMIZER_VIEW } from '@/components/Disclaimer'
 import type { AIOptimizationResult, OptimizationMode } from '@/types'
 import { cn, colorForValue } from '@/lib/utils'
 import { formatPrice, type Market } from '@/lib/market'
@@ -41,11 +42,11 @@ const TOOLTIP_STYLE = {
 const OPT_CARDS = [
   {
     key: 'black_litterman' as const,
-    title: 'AI 추천 비중',
+    title: 'AI 뷰 반영 비중',
     subtitle: 'Black-Litterman + AI 뷰',
     color: '#8b5cf6',
     basis: 'BL 사후',
-    desc: 'AI가 생성한 전망을 Black-Litterman 모델에 베이즈 방식으로 반영한 최적 비중',
+    desc: 'AI가 생성한 전망을 Black-Litterman 모델에 베이즈 방식으로 반영해 계산한 비중',
   },
   {
     key: 'max_sharpe_hist' as const,
@@ -69,7 +70,7 @@ const OPT_CARDS = [
     subtitle: 'Efficient Return (최소 위험)',
     color: '#f59e0b',
     basis: 'BL 사후',
-    desc: '목표 수익률을 달성하는 최소 위험 포트폴리오. 아래 비중으로 투자 시 예상 변동성·샤프비율을 확인하세요.',
+    desc: '목표 수익률에 대응하는 최소 위험 비중. 해당 비중일 때의 예상 변동성·샤프비율입니다.',
   },
 ]
 
@@ -400,7 +401,7 @@ function FrontierChart({
     }))
 
   const strategies = ([
-    { key: 'black_litterman', label: 'AI 추천',                                     color: '#8b5cf6' },
+    { key: 'black_litterman', label: 'AI 뷰 반영',                                  color: '#8b5cf6' },
     { key: 'max_sharpe_hist', label: 'Max Sharpe',                                  color: '#3b82f6' },
     { key: 'hrp',             label: 'HRP 헤지',                                    color: '#10b981' },
     { key: 'target_return',   label: `목표 ${(userTargetReturn * 100).toFixed(0)}%`, color: '#f59e0b' },
@@ -751,6 +752,9 @@ function AIViewsTable({ result }: { result: AIOptimizationResult }) {
           </tbody>
         </table>
       </div>
+      {/* AI 뷰(기대수익률·신뢰도·근거)는 LLM 이 쓴다 — 산출물 끝에 표기한다
+          (인공지능기본법 제31조 제2항). */}
+      <AiGeneratedNote text={AI_LABEL_OPTIMIZER_VIEW} className="px-3 py-2 border-t border-[#1e2d40]" />
     </div>
   )
 }
@@ -928,16 +932,22 @@ export default function Optimizer() {
     if (e.key === 'Backspace' && !tickerInput && tickers.length) setTickers(prev => prev.slice(0, -1))
   }
   // 이 화면은 로그인 없이도 쓸 수 있다 — 종목을 직접 입력하면 공개 시세만으로
-  // 최적화가 돌아간다. "내 포트폴리오 불러오기"만 개인 데이터가 필요하므로
-  // 그 버튼에서만 로그인을 요구한다.
+  // 최적화가 돌아간다. "포트폴리오에서 불러오기"만 개인 데이터가 필요하므로
+  // 그 버튼에서만 로그인을 요구한다. (2026-10 에 없앴다가 사용자 요청으로 되살렸다.)
   const loadFromPortfolio = () => {
     if (!requireLogin()) return
     void (async () => {
       setLoadingPortfolio(true)
       try {
         const holdings = await getHoldings()
-        setTickers(Object.keys(holdings).filter(t => t !== 'CASH'))
-      } catch {}
+        const list = Object.keys(holdings).filter(t => t !== 'CASH')
+        // 보유가 없으면 입력해 둔 종목을 지우지 않고 알린다.
+        if (list.length) { setTickers(list); setJobError(null) }
+        else setJobError('불러올 보유 종목이 없습니다.')
+      } catch (e: any) {
+        // 실패를 삼키면 '보유 없음' 과 구별되지 않는다 (§1.3).
+        setJobError(`보유 종목을 불러오지 못했습니다: ${e?.response?.data?.detail || e?.message || '알 수 없는 오류'}`)
+      }
       finally { setLoadingPortfolio(false) }
     })()
   }
@@ -957,7 +967,8 @@ export default function Optimizer() {
         <div>
           <h1 className="text-xl font-bold text-[#e2e8f0]">포트폴리오 최적화</h1>
           <p className="text-xs text-[#64748b] mt-0.5">
-            종목들을 입력하면(2개 이상) 선호도에 따른 최적화 포트폴리오를 추천합니다. AI 분석 뷰를 통해 종목별 기대수익과 신뢰도를 확인할 수 있습니다.
+            분석할 종목을 2개 이상 직접 입력하면 과거 수익률·변동성으로 모델별 비중을 계산해 보여 줍니다.
+            계산 결과이며 투자 권유가 아닙니다.
           </p>
         </div>
       </div>

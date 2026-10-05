@@ -13,17 +13,7 @@ import { cn } from '@/lib/utils'
 import type { HoldingsMap } from '@/types'
 import { formatAxisPrice, formatPrice, getMarket } from '@/lib/market'
 
-// yfinance 가 주는 영문 섹터를 한글로. 한국 화면에 'Healthcare' 가 그대로 뜨면
-// 다른 화면(섹터 변동율)의 '헬스케어' 와 같은 것인지 알 수 없다.
-const SECTOR_KO: Record<string, string> = {
-  'Technology': '기술', 'Healthcare': '헬스케어', 'Financial Services': '금융',
-  'Financial': '금융', 'Consumer Cyclical': '경기소비재', 'Consumer Defensive': '필수소비재',
-  'Consumer': '소비재', 'Energy': '에너지', 'Industrials': '산업재',
-  'Basic Materials': '소재', 'Real Estate': '부동산', 'Utilities': '유틸리티',
-  'Communication Services': '커뮤니케이션',
-}
-const toKoSector = (s?: string | null) =>
-  !s ? '' : (getMarket() === 'KR' ? (SECTOR_KO[s] ?? s) : s)
+import { toKoSector } from '@/lib/sectors'
 import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
 import { tickerByExactName } from '@/lib/suggestions'
 

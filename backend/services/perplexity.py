@@ -60,33 +60,23 @@ def _api_key() -> str:
     return os.getenv("PERPLEXITY_API_KEY", "")
 
 
-def search(
+def _post(
     prompt: str,
     *,
-    market: str = "US",
-    max_tokens: int = 1500,
-    label: str = "",
-    model: str = DEFAULT_MODEL,
-    temperature: float = DEFAULT_TEMPERATURE,
-    system: Optional[str] = None,
-    timeout: int = 30,
-    scope_by_market: bool = True,
-) -> str:
-    """Perplexity 검색 결과 텍스트. 실패하면 `""` 이고, 이유는 로그에 남는다.
-
-    `label` 은 로그에만 쓴다 — 어느 리포트의 뉴스가 빠졌는지 알아야
-    나중에 그 리포트가 왜 얇은지 설명할 수 있다.
-
-    `scope_by_market` 은 검색 출처를 그 시장 쪽으로 좁힌다(한국이면 국내
-    경제지). 프롬프트로 관점만 바꾸고 출처가 미국 매체뿐이면 한국 이야기가
-    나오지 않는다. 끌 이유가 있는 호출부만 끈다.
-    """
-    who = f"[{label}] " if label else ""
-
+    market: str,
+    max_tokens: int,
+    who: str,
+    model: str,
+    temperature: float,
+    system: Optional[str],
+    timeout: int,
+    scope_by_market: bool,
+) -> Optional[dict]:
+    """요청 한 번. 성공하면 응답 JSON, 실패하면 None — 이유는 로그에 남긴다."""
     key = _api_key()
     if not key:
         logger.warning("%sPerplexity 검색 건너뜀 — PERPLEXITY_API_KEY 미설정", who)
-        return ""
+        return None
 
     body: dict = {
         "model": model,
@@ -114,8 +104,95 @@ def search(
         # raise_for_status 를 쓴다. `if resp.ok:` 로 두고 else 를 안 쓰면
         # 4xx·5xx 가 아무 흔적 없이 "" 가 된다 — 실제로 그런 사본이 있었다.
         resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
+        return resp.json()
     except Exception:
         logger.warning("%sPerplexity 검색 실패 (market=%s) — 뉴스 없이 진행",
                        who, market, exc_info=True)
+        return None
+
+
+def search(
+    prompt: str,
+    *,
+    market: str = "US",
+    max_tokens: int = 1500,
+    label: str = "",
+    model: str = DEFAULT_MODEL,
+    temperature: float = DEFAULT_TEMPERATURE,
+    system: Optional[str] = None,
+    timeout: int = 30,
+    scope_by_market: bool = True,
+) -> str:
+    """Perplexity 검색 결과 텍스트. 실패하면 `""` 이고, 이유는 로그에 남는다.
+
+    `label` 은 로그에만 쓴다 — 어느 리포트의 뉴스가 빠졌는지 알아야
+    나중에 그 리포트가 왜 얇은지 설명할 수 있다.
+
+    `scope_by_market` 은 검색 출처를 그 시장 쪽으로 좁힌다(한국이면 국내
+    경제지). 프롬프트로 관점만 바꾸고 출처가 미국 매체뿐이면 한국 이야기가
+    나오지 않는다. 끌 이유가 있는 호출부만 끈다.
+    """
+    who = f"[{label}] " if label else ""
+    data = _post(prompt, market=market, max_tokens=max_tokens, who=who, model=model,
+                 temperature=temperature, system=system, timeout=timeout,
+                 scope_by_market=scope_by_market)
+    if data is None:
         return ""
+    try:
+        return data["choices"][0]["message"]["content"]
+    except Exception:
+        logger.warning("%sPerplexity 응답 형식이 예상과 다르다 — 뉴스 없이 진행 (keys=%s)",
+                       who, list(data)[:6])
+        return ""
+
+
+def search_with_sources(
+    prompt: str,
+    *,
+    market: str = "US",
+    max_tokens: int = 800,
+    label: str = "",
+    model: str = DEFAULT_MODEL,
+    temperature: float = DEFAULT_TEMPERATURE,
+    system: Optional[str] = None,
+    timeout: int = 30,
+    scope_by_market: bool = True,
+) -> tuple[str, list[dict]]:
+    """`search` 와 같고, **출처**를 함께 돌려준다: (본문, [{url, title, date}]).
+
+    `search` 는 응답의 본문만 남기고 출처 URL 을 버린다. 근거 링크를 화면에
+    보여 줘야 하는 호출부(전날 브리핑의 종목별 뉴스)는 이 함수를 쓴다.
+    링크는 **응답이 준 것만** 쓴다 — 본문에서 URL 을 긁거나 지어내지 않는다.
+
+    응답 형식은 두 가지를 받는다: `search_results`([{title, url, date}]) 와
+    예전 형식 `citations`([url]). 둘 다 없으면 출처는 빈 목록이다 — 그 사실은
+    호출자가 '링크 없음' 으로 다룬다.
+    """
+    who = f"[{label}] " if label else ""
+    data = _post(prompt, market=market, max_tokens=max_tokens, who=who, model=model,
+                 temperature=temperature, system=system, timeout=timeout,
+                 scope_by_market=scope_by_market)
+    if data is None:
+        return "", []
+    try:
+        text = data["choices"][0]["message"]["content"]
+    except Exception:
+        logger.warning("%sPerplexity 응답 형식이 예상과 다르다 (keys=%s)", who, list(data)[:6])
+        return "", []
+
+    sources: list[dict] = []
+    seen: set[str] = set()
+    for r in data.get("search_results") or []:
+        url = (r or {}).get("url") or ""
+        if url.startswith("http") and url not in seen:
+            seen.add(url)
+            sources.append({"url": url, "title": (r.get("title") or "").strip(),
+                            # 게시일만 쓴다. `last_updated` 는 페이지 수정·크롤 시각이라
+                            # 몇 주 전 기사도 어제 날짜를 달고 온다 — 기간 필터를 뚫는다.
+                            "date": (r.get("date") or "").strip(),
+                            "snippet": (r.get("snippet") or "").strip()})
+    for url in data.get("citations") or []:
+        if isinstance(url, str) and url.startswith("http") and url not in seen:
+            seen.add(url)
+            sources.append({"url": url, "title": "", "date": "", "snippet": ""})
+    return text, sources

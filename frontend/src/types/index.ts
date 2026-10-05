@@ -49,9 +49,7 @@ export interface PortfolioMetrics {
   /** null = 전일 종가를 못 구해 계산 불가. 0%(보합)와 구분해야 한다. */
   today_change_pct: number | null
   /** null = 베타를 계산하지 못함. 서버는 원래부터 null 을 줄 수 있었는데
-   *  (portfolio_calculator:812 `_round_keep_none`) 선언만 `number` 였다.
-   *  이 값은 그대로 `getAnalystFeedback` 으로 흘러가는데 그쪽 파라미터는
-   *  이미 `number | null` 이다 — 같은 값이 경로 중간에서만 non-null 이었다. */
+   *  (portfolio_calculator:812 `_round_keep_none`) 선언만 `number` 였다. */
   portfolio_beta: number | null
   /** 보유도 거래 이력도 없는 사용자 (§1.3 "빈 값을 실패로 취급하지 마라").
    *
@@ -334,8 +332,10 @@ export interface SignalScanPick {
 }
 
 export interface SignalScanResult {
+  /** 점수 상위 N개 (섹터 무관). */
   long_picks: SignalScanPick[]
   short_picks: SignalScanPick[]
+  universe_label?: string | null
   scanned: number
   as_of?: string | null
   /** 완화 사다리 적용 단계. 0 = 원래 기준 그대로 통과. */
@@ -354,6 +354,11 @@ export interface SignalScoreResult {
   long_filter_pass: boolean
   short: SignalScanPick | null
   short_filter_pass: boolean
+  /** 점수의 기준일 (YYYY-MM-DD). */
+  as_of?: string | null
+  /** scan = 스캔 스냅샷(목록 점수와 같은 값) · on_demand = 유니버스 밖 종목 즉석 계산 ·
+   *  scan_unavailable = 스캔을 아직 만들 수 없어 즉석 계산 (스캔 대상인지 모른다) */
+  basis?: 'scan' | 'on_demand' | 'scan_unavailable'
 }
 
 export interface TechnicalChartPoint {
@@ -536,10 +541,11 @@ export interface MacroAnalysisResult {
   event: string
   agents: MacroAgent[]
   verdict_cards: VerdictCard[]
-  portfolio_actions: Array<{
-    action: string
+  ticker_impacts: Array<{
+    impact: string
     ticker?: string
     reason?: string
+    horizon?: string
     [key: string]: unknown
   }>
 }
@@ -547,21 +553,15 @@ export interface MacroAnalysisResult {
 export interface AnalystFeedback {
   feedback: string
   metrics_snapshot: Partial<PortfolioMetrics>
+  /** 저장본이면 true — 한 장에 한 번 만들고 다음 장 전까지 재사용한다 (routers/macro.py). */
+  from_cache?: boolean
+  /** 만든 시각 (ISO) · 기준 장 날짜 (YYYY-MM-DD) */
+  generated_at?: string
+  session?: string
 }
 
 // Reports Types
-export interface DailyBriefResult {
-  report: string
-  price_data: { [ticker: string]: {
-    close: number
-    chg_pct: number
-    day_pnl: number
-    total_pnl: number
-    sector: string
-  }}
-  file_path: string
-  logs: string[]
-}
+// 전날 브리핑 결과는 잡 결과(getReportJob 의 result: {report, file_path, logs})로 온다.
 
 export interface ReportFile {
   name: string
@@ -672,7 +672,6 @@ export interface TickerDetailQuant {
   /** 효율성 비율 (0~1) */
   regime_er?: number | null
   optimizer: {
-    target_weight: number | null
     risk_contribution: number | null
     current_weight: number | null
     correlation: number | null
@@ -699,4 +698,8 @@ export interface TickerDetail {
   risk: TickerDetailRisk
   var: TickerDetailVar
   quant: TickerDetailQuant
+  /** 캐시된 본문에 최근 일봉을 덧씌운 결과 (routers/ticker.py `_overlay_recent_bars`).
+   *  ok=false 면 최신 시세를 받지 못해 last_date 까지만 있다.
+   *  live=true 면 마지막 봉이 정규장 진행 중인 부분 봉이다. */
+  bars_refresh?: { ok: boolean; last_date: string | null; live: boolean }
 }

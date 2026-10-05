@@ -224,7 +224,7 @@ def compute_panic_score(close: pd.Series, volume: Optional[pd.Series] = None) ->
              + 0.10 * comps["volume"] + 0.10 * comps["volatility"])
 
     if   score <= 20: status = "Extreme Fear — 역발상 매수 구간"
-    elif score <= 40: status = "Fear — 과매도 진입"
+    elif score <= 40: status = "Fear — 과매도 구간"
     elif score <= 60: status = "Neutral — 중립"
     elif score <= 80: status = "Greed — 과열 주의"
     else:             status = "Extreme Greed — 조정 위험"
@@ -245,13 +245,18 @@ def compute_optimizer_context(
     ticker_close: pd.Series,
     market: str = "US",
 ) -> dict:
-    """포트폴리오 맥락에서의 최적 비중·리스크 기여도·상관관계·베타.
+    """포트폴리오 맥락에서의 현재 비중·리스크 기여도·상관관계·베타.
 
     종목 하나만으로는 구할 수 없는 값들이다 — 보유 종목 전체와 함께 계산한다.
-    목표 비중은 포트폴리오 최적화 화면과 같은 HRP 를 쓴다(공분산 역행렬을 쓰지
-    않아 종목 수가 적어도 안정적이고, 상관 높은 자산에 쏠리지 않는다).
+    **전부 관측된 사실이다.** 어떤 비중이어야 하는지는 계산하지 않는다.
 
-    보유 종목이 없으면 최적화가 성립하지 않으므로 None 필드로 반환한다.
+    예전에는 HRP 로 '목표 최적 비중' 을 함께 내고, 화면이 현재 비중과 비교해
+    '과다 편중' 이라고 적었다. 그것은 특정인의 보유 구성에 대한 권고이고
+    (자본시장법 제6조 제7항의 '투자판단에 관한 자문'), 개별성이 뚜렷해
+    유사투자자문업의 범위를 벗어난다. 산출 자체를 없앴다 — 화면에서만 숨기면
+    응답에는 남아서 다음 사람이 다시 그린다.
+
+    보유 종목이 없으면 맥락이 성립하지 않으므로 None 필드로 반환한다.
 
     `market` — 베타의 비교 대상을 그 시장의 기준 지수로 고른다
     (`markets.benchmark_for`). **이 인자만으로는 아직 안 바뀐다**:
@@ -260,7 +265,7 @@ def compute_optimizer_context(
     대비가 된다. 기본값 `"US"` 는 지금 동작을 그대로 유지한다.
     """
     empty = {
-        "target_weight": None, "current_weight": None, "risk_contribution": None,
+        "current_weight": None, "risk_contribution": None,
         "correlation": None, "correlation_label": None, "beta_exposure": None,
         # 정상 응답과 키를 맞춘다 — 소비자가 경로마다 다른 모양을 받지 않게.
         "beta_benchmark": None,
@@ -285,31 +290,10 @@ def compute_optimizer_context(
         return {**empty, "note": "수익률 계산 불가"}
 
     cov = rets.cov() * 252
-    corr = rets.corr()
 
-    # ── 목표 비중 (HRP) ───────────────────────────────────────────────────
-    target = None
-    try:
-        from backend.services.portfolio_optimizer import hrp_weights
-        w = hrp_weights(cov, corr)
-        target = round(float(w.get(ticker, 0.0)) * 100, 2)
-    except Exception:
-        # 개별 로그로 남긴다 — 실제 DB 표본 120회에서 예외가 0건이라 소음이
-        # 되지 않고, 드문 만큼 났을 때 이유가 필요하다.
-        #
-        # 도달 경로가 있다: 보유 종목 중 하나가 상수 가격이면(거래정지·상장폐지
-        # 대기) 그 열의 분산이 0 이라 `rets.corr()` 에 NaN 이 생기고, scipy 가
-        # "condensed distance matrix must contain only finite values" 로 거부한다.
-        # 그러면 **목표 비중만** 조용히 사라진다 — 나머지 필드는 다 계산되고
-        # note 도 None 이라 화면에는 이유 없이 '—' 만 뜬다.
-        # NaN 이 있는 열을 나열하면 전부 나온다 — 한 종목의 NaN 상관이 모든
-        # 행으로 퍼지기 때문이다. 원인은 **분산이 0 인 열**이라 그것만 짚는다.
-        flat = [c for c in rets.columns if not (float(rets[c].var()) > 0)]
-        logger.warning(
-            "HRP 목표 비중 계산 실패 (%s, 유니버스 %d종목) — 목표 비중만 빠진다. "
-            "가격이 상수인 종목: %s",
-            ticker, len(cols), flat or "없음", exc_info=True,
-        )
+    # 목표 비중(HRP) 산출은 없앴다 — 이 함수 docstring 참고.
+    # '이 종목의 목표 비중' 은 특정인의 보유 구성에 대한 권고라,
+    # 화면에서 숨기는 것으로는 부족하고 산출 자체를 두지 않는다.
 
     # ── 현재 비중 (평가금액 기준) ─────────────────────────────────────────
     last = px.iloc[-1]
@@ -343,9 +327,9 @@ def compute_optimizer_context(
         correlation = round(float(rets[ticker].corr(port_ret)), 3)
     if correlation is None:
         label = None
-    elif correlation >= 0.7:  label = "High — 분산효과 낮음"
-    elif correlation >= 0.4:  label = "Moderate"
-    else:                     label = "Low — 분산효과 큼"
+    elif correlation >= 0.7:  label = "높음 (0.7 이상)"
+    elif correlation >= 0.4:  label = "보통 (0.4~0.7)"
+    else:                     label = "낮음 (0.4 미만)"
 
     # ── 베타 (그 시장의 기준 지수 대비) ────────────────────────────────────
     # 주석이 "SPY 대비" 라고 적혀 있었는데 코드는 `^GSPC` 를 봤고, 시장과
@@ -375,7 +359,6 @@ def compute_optimizer_context(
         logger.warning("베타 계산 실패 (%s) — 베타만 빠진다", ticker, exc_info=True)
 
     return {
-        "target_weight":     target,
         "current_weight":    current,
         "risk_contribution": risk_contrib,
         "correlation":       correlation,

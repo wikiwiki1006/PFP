@@ -296,6 +296,86 @@ def add_trade_endpoint(
         return _add_trade_locked(body, uid, market)
 
 
+# ── 최초 입금(시드 입금) 재계산 ──────────────────────────────────────────────
+#
+# 포트폴리오 등록(/setup)은 '최초 입금 = 매수금 전액 + 현금' 을 가장 이른 매수일에
+# 메모 '포트폴리오 등록' 으로 기록한다. 그 뒤 원래 입금일보다 **이른 매수**를 넣으면
+# 그 매수도 최초 입금이 충당한 것으로 본다 — 최초 입금을 그 날짜로 당기고 금액을
+# 매수금만큼 늘린다(등록 때와 같은 규칙). 현금 잔고는 그대로다.
+#
+# 되돌릴 수 있어야 한다. 날짜를 잘못 넣은 매수를 지우면 최초 입금도 원래대로 돌아가야
+# 하고, 안 그러면 없던 현금이 생긴다. 그래서 상태를 원장 안에 적어 둔다:
+#   · 포함된 매수의 메모에 _EARLY_TAG
+#   · 시드 입금 메모 끝에 '(원래 입금 날짜 · 금액)'
+# 매수를 추가·수정·삭제할 때마다 `_resync_seed_deposit` 이 표시된 매수들로 시드 입금을
+# 다시 계산한다 (원래 금액 + 포함 매수금, 날짜는 원래 입금일과 포함 매수일 중 가장 이른 날).
+#
+# 대상은 등록 시드 입금뿐이다. 실제 입금(add_holding CASH)이나 '○○ 보유 등록' 입금을
+# 고치면 그 돈이 실제로 들어온 날이 장부에서 사라진다.
+import re as _re
+
+_SEED_MEMO = "포트폴리오 등록"
+_EARLY_TAG = "최초 입금에 포함"
+_ORIG_RE = _re.compile(r"\s*\(원래 입금 (\d{4}-\d{2}-\d{2}) · (-?[\d.]+)\)\s*$")
+
+
+def _seed_deposit(trades: list) -> "dict | None":
+    seeds = [t for t in trades
+             if str(t.get("ticker", "")).upper() == "CASH"
+             and str(t.get("type", "")).upper() == "DEPOSIT"
+             and str(t.get("memo") or "").startswith(_SEED_MEMO)]
+    return min(seeds, key=lambda t: (str(t["date"])[:10], t.get("id") or 0)) if seeds else None
+
+
+def _seed_origin(seed: dict) -> "tuple[str, float, str]":
+    """(원래 입금일, 원래 금액, 꼬리표를 뗀 메모)."""
+    memo = str(seed.get("memo") or "")
+    m = _ORIG_RE.search(memo)
+    if m:
+        return m.group(1), float(m.group(2)), memo[:m.start()]
+    return str(seed["date"])[:10], float(seed.get("q") or 0), memo
+
+
+def _is_early_buy(t: dict) -> bool:
+    return (str(t.get("type", "")).upper() == "ADD"
+            and str(t.get("ticker", "")).upper() != "CASH"
+            and _EARLY_TAG in str(t.get("memo") or ""))
+
+
+def _resync_seed_deposit(uid: str, market: str) -> "dict | None":
+    """표시된 이른 매수로 시드 입금을 다시 계산하고 현금에 그 차이를 반영한다.
+
+    바뀐 것이 없으면 None, 바뀌었으면 {date, q, previous_date, previous_q}.
+    """
+    trades = get_trade_log(uid, market=market)
+    seed = _seed_deposit(trades)
+    if seed is None:
+        return None
+    orig_date, base_q, base_memo = _seed_origin(seed)
+    early = [t for t in trades if _is_early_buy(t)]
+    if early:
+        new_date = min([orig_date] + [str(t["date"])[:10] for t in early])
+        new_q = round(base_q + sum(float(t["q"] or 0) * float(t.get("price") or 0) for t in early), 2)
+        new_memo = f"{base_memo} (원래 입금 {orig_date} · {base_q:g})"
+    else:
+        new_date, new_q, new_memo = orig_date, round(base_q, 2), base_memo
+    old_date, old_q = str(seed["date"])[:10], float(seed.get("q") or 0)
+    if new_date == old_date and abs(new_q - old_q) < 0.005 and new_memo == (seed.get("memo") or ""):
+        return None
+    ok = update_trade_by_id(int(seed["id"]), {
+        "date": new_date, "ticker": "CASH", "type": "DEPOSIT",
+        "q": new_q, "price": 1.0, "memo": new_memo,
+    }, uid, market=market)
+    if not ok:
+        # 방금 읽은 입금 행이 사라졌다 (동시 삭제). 성공처럼 넘기지 않는다 (§1.3).
+        logger.error("최초 입금 재계산 실패 — 입금 행(id=%s)을 찾지 못함 (uid=%s, market=%s)",
+                     seed["id"], uid, market)
+        raise HTTPException(status_code=409,
+                            detail="최초 입금 기록을 갱신하지 못했습니다. 거래 내역을 새로고침해 확인해 주세요.")
+    _adjust_cash(uid, new_q - old_q, market=market)   # 입금이 는(준) 만큼 현금도
+    return {"date": new_date, "q": new_q, "previous_date": old_date, "previous_q": old_q}
+
+
 def _add_trade_locked(body: AddTradeRequest, uid: str, market: str):
     import threading
     holdings = get_holdings(uid, market=market)
@@ -330,6 +410,21 @@ def _add_trade_locked(body: AddTradeRequest, uid: str, market: str):
                 detail=f"보유 수량({held:g})보다 많이 매도할 수 없습니다",
             )
 
+    # ── 최초 입금보다 이른 매수 ─────────────────────────────────────────────
+    # 포트폴리오 등록(/setup)은 '최초 입금 = 매수금 전액 + 현금' 을 가장 이른 매수일에
+    # 기록한다. 그 뒤 그보다 **이른 날짜의 매수**를 추가하면, 예전에는 매수금이 지금
+    # 현금에서 빠졌다 — 그 시점에는 아직 입금이 없었는데도. 현금이 줄거나 '현금
+    # 부족' 으로 막혔고, 자산곡선은 입금 전에 산 주식을 그린다.
+    # 이제는 최초 입금을 그 매수일로 당기고 금액을 매수금만큼 늘린다(등록 때와 같은
+    # 규칙). 늘어난 입금과 매수 차감이 상쇄돼 현금 잔고는 그대로다.
+    # 자세한 규칙은 위 `_resync_seed_deposit` 주석.
+    initial_deposit = None
+    if ticker != "CASH" and trade_type == "ADD":
+        trade_day = ((body.date or "").strip() or datetime.now().strftime("%Y-%m-%d"))[:10]
+        seed = _seed_deposit(get_trade_log(uid, market=market))
+        if seed is not None and trade_day < _seed_origin(seed)[0]:
+            initial_deposit = seed
+
     # ── 현금 잔고 검사 ───────────────────────────────────────────────────────
     # 매수·출금이 잔고를 넘으면 막는다. 예전에는 음수 잔고를 그대로 두었는데,
     # 사용자는 그 상태를 오류로 인식하지 못하고 계속 거래해 장부가 어긋났다.
@@ -338,7 +433,8 @@ def _add_trade_locked(body: AddTradeRequest, uid: str, market: str):
     need = 0.0
     if ticker == "CASH" and trade_type == "WITHDRAW":
         need = abs(qty_in)
-    elif ticker != "CASH" and trade_type == "ADD":
+    elif ticker != "CASH" and trade_type == "ADD" and initial_deposit is None:
+        # 최초 입금보다 이른 매수는 최초 입금을 늘려 충당하므로 지금 현금과 무관하다.
         need = qty_in * price_in
 
     if need > 0 and need > cash_now + 1e-6:
@@ -373,13 +469,17 @@ def _add_trade_locked(body: AddTradeRequest, uid: str, market: str):
         threading.Thread(target=_bg_sector, daemon=True).start()
 
     trade_date = (body.date or "").strip() or datetime.now().strftime("%Y-%m-%d")
+    memo = body.memo
+    if initial_deposit is not None:
+        # 이 매수가 최초 입금에 포함됐다는 표시 — 나중에 지우거나 고치면 되돌리는 근거다.
+        memo = f"{memo} · {_EARLY_TAG}" if (memo or "").strip() else _EARLY_TAG
     record = {
         "date":   trade_date,
         "ticker": ticker,
         "type":   trade_type,
         "q":      body.q,
         "price":  body.price,
-        "memo":   body.memo,
+        "memo":   memo,
     }
     add_trade(record, uid, market=market)
 
@@ -415,7 +515,8 @@ def _add_trade_locked(body: AddTradeRequest, uid: str, market: str):
         _adjust_cash(uid, _cash_delta(trade_type, float(body.q), float(body.price or 0)),
                      market=market)
 
-    return {"ok": True, "record": record}
+    adjusted = _resync_seed_deposit(uid, market) if initial_deposit is not None else None
+    return {"ok": True, "record": record, "initial_deposit_adjusted": adjusted}
 
 
 class UpdateTradeRequest(BaseModel):
@@ -453,6 +554,28 @@ def _update_trade_locked(trade_id: int, body: "UpdateTradeRequest", uid: str, ma
     payload["type"] = {"BUY": "ADD", "SELL": "SOLD"}.get(
         str(body.type).upper(), str(body.type).upper()
     )
+    # 시드 입금 자체를 고쳤으면 그 금액이 '포함 매수까지 더한 총액' 이라고 보고 원래 금액을
+    # 다시 적는다 — 안 그러면 아래 재계산이 사용자가 고친 금액을 옛 기준으로 덮어쓴다.
+    if (old_trade and str(old_trade.get("ticker", "")).upper() == "CASH"
+            and str(old_trade.get("memo") or "").startswith(_SEED_MEMO)
+            and _ORIG_RE.search(str(old_trade.get("memo") or ""))):
+        early_sum = sum(float(t["q"] or 0) * float(t.get("price") or 0)
+                        for t in all_trades if _is_early_buy(t))
+        orig_date = _seed_origin(old_trade)[0]
+        memo_in = _ORIG_RE.sub("", str(payload.get("memo") or old_trade.get("memo") or "")).rstrip()
+        payload["memo"] = f"{memo_in} (원래 입금 {orig_date} · {float(payload['q']) - early_sum:g})"
+
+    # 최초 입금에 포함된 매수였는데 더는 '원래 입금일보다 이른 매수' 가 아니게 고쳤으면
+    # 표시를 뗀다 — 그러면 아래 재계산이 최초 입금에서 그 금액을 뺀다.
+    _seed = _seed_deposit(all_trades)
+    if old_trade and _is_early_buy(old_trade):
+        still_early = (payload["type"] == "ADD" and payload["ticker"] != "CASH" and _seed is not None
+                       and str(payload.get("date") or "")[:10] < _seed_origin(_seed)[0])
+        memo_now = str(payload.get("memo") or "")
+        if still_early and _EARLY_TAG not in memo_now:
+            payload["memo"] = f"{memo_now} · {_EARLY_TAG}" if memo_now.strip() else _EARLY_TAG
+        elif not still_early and _EARLY_TAG in memo_now:
+            payload["memo"] = memo_now.replace(f" · {_EARLY_TAG}", "").replace(_EARLY_TAG, "").strip() or None
 
     ok = update_trade_by_id(trade_id, payload, uid, market=market)
     if not ok:
@@ -477,7 +600,8 @@ def _update_trade_locked(trade_id: int, body: "UpdateTradeRequest", uid: str, ma
         old_delta = _cash_event_delta(old_trade.get("type", ""), float(old_trade.get("q", 0)))
         new_delta = _cash_event_delta(body.type, float(body.q))
         _adjust_cash(uid, new_delta - old_delta, market=market)
-    return {"ok": True}
+    adjusted = _resync_seed_deposit(uid, market)
+    return {"ok": True, "initial_deposit_adjusted": adjusted}
 
 
 @router.delete("/trades/{trade_id}")
@@ -552,7 +676,9 @@ def _delete_trade_locked(trade_id: int, uid: str, market: str):
     else:
         # CASH DEPOSIT/WITHDRAW 삭제 시 잔고를 되돌린다 (_cash_delta 는 0 을 반환)
         _revert_cash_event(uid, ttype, float(trade.get("q", 0)), market=market)
-    return {"ok": True}
+    # 최초 입금에 포함됐던 매수를 지웠으면 최초 입금도 그만큼 되돌린다.
+    adjusted = _resync_seed_deposit(uid, market) if _is_early_buy(trade) else None
+    return {"ok": True, "initial_deposit_adjusted": adjusted}
 
 
 # 시총 순 미국 상장 주요 티커 (rank 낮을수록 대형주)

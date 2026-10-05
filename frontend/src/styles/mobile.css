@@ -121,7 +121,7 @@
   main .mobile-flatten { display: contents; }
   main .m-order-1 { order: 1; }   /* 자산 그래프 */
   main .m-order-2 { order: 2; }   /* 보유 종목 */
-  main .m-order-3 { order: 3; }   /* 전날 브리핑 · AI 피드백 · 뉴스 */
+  main .m-order-3 { order: 3; }   /* 전날 브리핑 · 뉴스 */
   main .m-order-4 { order: 4; }   /* 섹터 비중 → 섹터 변동율 */
   main .m-order-6 { order: 6; }   /* 실적/배당 · 시장지표 */
 

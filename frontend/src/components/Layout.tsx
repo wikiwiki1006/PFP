@@ -2,6 +2,7 @@ import { Link, NavLink, Outlet } from 'react-router-dom'
 import { Monitor, Globe, TrendingUp, Zap, BookOpen } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import UserMenu from './auth/UserMenu'
+import Disclaimer from './Disclaimer'
 import ThemeToggle from './ThemeToggle'
 import MarketSwitch from './MarketSwitch'
 import logo from '@/assets/image_logo.png'
@@ -104,6 +105,18 @@ export default function Layout() {
 
         <main className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden pb-[env(safe-area-inset-bottom)] md:pb-0">
           <Outlet />
+
+          {/* 면책 고지 — 라우팅되는 다섯 화면 전부가 이 레이아웃 안에 있으므로
+              여기 한 번만 두면 모든 화면에 나온다. 화면마다 따로 적으면 하나가
+              빠지고, 빠진 사실은 아무 데도 안 남는다.
+              화면 하단에 고정하지 않고 **본문 스크롤의 맨 끝**에 둔다 (사용자 요청,
+              2026-10) — 고정 줄이 휴대폰에서 화면을 80px 넘게 가렸다. 화면 높이를
+              꽉 채우는 페이지(h-full)도 그 아래에 이어 붙으므로 끝까지 내리면 보인다.
+              모바일도 같은 문구다 — 예전 모바일용 한 문장에는 법정 사항이 빠져 있었다
+              (Disclaimer.tsx 참고). */}
+          <div className="border-t border-[#1e2d40] bg-[#060b14] px-3 py-3">
+            <Disclaimer />
+          </div>
         </main>
 
         {/* 모바일 하단 탭 바.

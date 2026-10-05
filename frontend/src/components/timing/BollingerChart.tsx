@@ -12,6 +12,8 @@ import { useTouchDismissTooltip } from '@/lib/useTouchDismissTooltip'
 import { useIsMobile } from '@/lib/useIsMobile'
 import { formatAxisPrice, formatPrice } from '@/lib/market'
 import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
+import { priceMarketOf } from '@/lib/chartProvider'
+import TechLwcChart, { type TechOverlays } from './TechLwcChart'
 
 // ── debounce hook ─────────────────────────────────────────────────────────────
 function useDebounced<T>(value: T, ms = 700): T {
@@ -273,6 +275,18 @@ export default function BollingerChart({ ticker, height = 420 }: BollingerChartP
     return addPadding(real, rightPad, false)
   }, [visible, isWeekly, rightPad])
 
+  // ── lightweight-charts 입력 ───────────────────────────────────────────────
+  // 빈 미래 날짜 행(addPadding)은 넘기지 않는다 — 여백은 rightOffset(봉 수)로 준다.
+  const chartData = useMemo(() => displayData.filter(p => p.price != null), [displayData])
+  const rightOffset = isWeekly ? Math.max(1, Math.ceil(rightPad / 5)) : rightPad
+  const lwcOverlays = useMemo<TechOverlays>(() => ({
+    bands: showBands, mid: showMid, resist: showResist, mas: activeMAs,
+  }), [showBands, showMid, showResist, activeMAs])
+  const lwcColors = useMemo(() => ({
+    bg: panelBg, text: '#64748b', grid: theme === 'light' ? '#e3e9f2' : '#1e2d40',
+    border: theme === 'light' ? '#dfe5ee' : '#1e2d40', up: COLOR_UP, down: COLOR_DOWN,
+  }), [panelBg, theme])
+
   // ── y-axis domain: include high/low/bands ────────────────────────────────
   const yDomain = useMemo<[number, number] | ['auto', 'auto']>(() => {
     const vals: number[] = []
@@ -451,80 +465,22 @@ export default function BollingerChart({ ticker, height = 420 }: BollingerChartP
           없다. 좁은 화면에서는 차트를 화면보다 넓게 그리고 좌우로 밀어 보게 한다
           (chart-hscroll — 실제 폭 지정은 styles/mobile.css). */}
       {/* 터치로 짚어 값을 보다가 손을 떼면 팝업이 안 사라지는 문제 — onPointerDown/Up 으로 강제 정리 */}
-      {q.data && (
-        <div className="chart-hscroll" onPointerDown={onTooltipPointerDown} onPointerUp={onTooltipPointerUp}>
-        <ResponsiveContainer width="100%" height={height}>
-          <ComposedChart
-            data={displayData}
-            margin={{ top: 6, right: 20, left: 0, bottom: 0 }}
-          >
-            <CartesianGrid strokeDasharray="3 3" stroke="#1e2d40" vertical={false} />
-            <XAxis dataKey="date"
-              tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false}
-              minTickGap={50} />
-            <YAxis domain={yDomain}
-              tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false}
-              width={60} tickFormatter={v => formatAxisPrice(Number(v))} />
-            <Tooltip active={tooltipActive} content={<ChartTooltip />} />
-
-            {/* BB filled channel: upper area fills down, lower area erases with background */}
-            {showBands && (
-              <Area type="monotone" dataKey="upper"
-                stroke="#334155" strokeWidth={1}
-                fill="#3b82f6" fillOpacity={0.07}
-                dot={false} isAnimationActive={false} legendType="none" />
-            )}
-            {showBands && (
-              <Area type="monotone" dataKey="lower"
-                stroke="#334155" strokeWidth={1}
-                fill={panelBg} fillOpacity={1}
-                dot={false} isAnimationActive={false} legendType="none" />
-            )}
-
-            {/* BB middle line */}
-            {showMid && (
-              <Line type="monotone" dataKey="mid"
-                stroke="#4b5563" strokeWidth={1} strokeDasharray="4 2"
-                dot={false} isAnimationActive={false} />
-            )}
-
-            {/* resistance line */}
-            {showResist && (
-              <Line type="monotone" dataKey="resistance"
-                stroke="#ef4444" strokeWidth={1} strokeDasharray="3 3"
-                dot={false} isAnimationActive={false} connectNulls={false} />
-            )}
-
-            {/* MA lines */}
-            {MA_ORDER.map(k => activeMAs[k] ? (
-              <Line key={k} type="monotone" dataKey={k}
-                stroke={MA_COLORS[k]} strokeWidth={1.5}
-                dot={false} isAnimationActive={false} connectNulls />
-            ) : null)}
-
-            {/* candlestick — always visible, shape is a function ref */}
-            <Bar dataKey="price" shape={CandleShape} isAnimationActive={false} maxBarSize={20} />
-
-            {/* MA cross markers */}
-            {maCrosses.map((cp, i) => (
-              <ReferenceDot key={`cross-${i}`} x={cp.date} y={cp.price}
-                r={5} fill={cp.type === 'golden' ? '#fbbf24' : '#a855f7'}
-                stroke={panelBg} strokeWidth={1.5} />
-            ))}
-
-            {/* TP line */}
-            {tpEnabled && tpPrice > 0 && (
-              <ReferenceLine y={tpPrice} stroke={COLOR_UP} strokeDasharray="6 3" strokeWidth={1.5}
-                label={{ value: `TP  ${formatPrice(tpPrice)}`, fill: COLOR_UP, fontSize: 10, position: 'insideTopRight' }} />
-            )}
-            {/* SL line */}
-            {slEnabled && slPrice > 0 && (
-              <ReferenceLine y={slPrice} stroke={COLOR_DOWN} strokeDasharray="6 3" strokeWidth={1.5}
-                label={{ value: `SL  ${formatPrice(slPrice)}`, fill: COLOR_DOWN, fontSize: 10, position: 'insideBottomRight' }} />
-            )}
-          </ComposedChart>
-        </ResponsiveContainer>
-        </div>
+      {/* 그리기는 lightweight-charts (TechLwcChart.tsx). 2026-10 에 recharts 에서 바꿨다 —
+          확대·이동은 차트가 스스로 하므로 예전 모바일 가로 스크롤 래퍼는 없다. */}
+      {q.data && chartData.length > 0 && (
+        <TechLwcChart
+          data={chartData}
+          market={priceMarketOf(ticker)}
+          height={height}
+          rightOffset={rightOffset}
+          overlays={lwcOverlays}
+          maColors={MA_COLORS}
+          maLabels={MA_LABELS}
+          crosses={maCrosses}
+          tp={tpEnabled && tpPrice > 0 ? tpPrice : null}
+          sl={slEnabled && slPrice > 0 ? slPrice : null}
+          colors={lwcColors}
+        />
       )}
 
       {/* ── bottom legend ───────────────────────────────────────────────── */}

@@ -93,7 +93,7 @@ def test_an_unknown_colour_is_normalised_not_dropped():
 def test_unparsable_portfolio_actions_return_none(raw, why, caplog):
     """액션 파싱 실패도 `None` + 로그다."""
     with caplog.at_level(logging.WARNING):
-        out = ai_analysis.parse_portfolio_actions(raw)
+        out = ai_analysis.parse_ticker_impacts(raw)
 
     assert out is None, f"{why}: got {out!r}, expected None"
     assert caplog.records, f"{why}: 로그가 없다 — 액션이 왜 비었는지 알 수 없다"
@@ -101,7 +101,7 @@ def test_unparsable_portfolio_actions_return_none(raw, why, caplog):
 
 def test_valid_portfolio_actions_survive():
     """대조군 — 정상 배열은 통과한다."""
-    out = ai_analysis.parse_portfolio_actions('[{"action": "BUY"}]')
+    out = ai_analysis.parse_ticker_impacts('[{"action": "BUY"}]')
 
     assert out and out[0]["action"] == "BUY", f"정상 입력이 {out!r} 로 나왔다"
 

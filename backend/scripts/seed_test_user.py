@@ -53,30 +53,53 @@ def main() -> int:
         return 1
     from firebase_admin import auth as fb_auth
 
+    # 0) DB 에 이미 이 계정이 있으면 **그 uid 를 그대로 쓴다.**
+    #
+    # 예전에는 인증 계정을 uid 없이 만들어(무작위 uid) 그 uid 로 DB 행을 upsert 했다.
+    # 그런데 각 창 DB 는 개발 데이터 사본이라 test@gmail.com 행이 이미 있고,
+    # users.email 에 UNIQUE 인덱스(idx_users_email)가 걸려 있어 새 uid 의 행은
+    # 들어가지 못한다 → "✗ DB 행을 만들지 못했습니다" 로 끝났다. 에뮬레이터를
+    # 재시작할 때마다 시드가 실패하는 셈이었다.
+    # 기존 uid 를 쓰면 그 계정의 보유·거래가 그대로 이어진다 (로그인 세션의 uid 는
+    # DB 행의 uid 다 — routers/auth.py login 의 _custom_token_for(account["uid"])).
+    existing = users_repo.find_by_email(LOCAL_TEST_EMAIL)
+    want_uid = existing["uid"] if existing else None
+
     # 1) 인증 계정 — 있으면 비밀번호만 맞춘다
     try:
         rec = fb_auth.get_user_by_email(LOCAL_TEST_EMAIL)
         fb_auth.update_user(rec.uid, password=password)
         created = False
+        if want_uid and rec.uid != want_uid:
+            # 로그인은 DB uid 로 세션을 만들므로 동작은 한다. 다만 두 저장소가
+            # 다른 uid 를 들고 있다는 사실은 남긴다 — 나중에 헷갈리는 원인이 된다.
+            print(f"! 인증 계정 uid({rec.uid})가 DB uid({want_uid})와 다릅니다. "
+                  f"로그인은 DB uid 로 됩니다.", file=sys.stderr)
     except fb_auth.UserNotFoundError:
-        rec = fb_auth.create_user(email=LOCAL_TEST_EMAIL, password=password,
-                                  display_name="테스트")
+        kwargs = dict(email=LOCAL_TEST_EMAIL, password=password,
+                      display_name="테스트", email_verified=True)
+        if want_uid:
+            kwargs["uid"] = want_uid
+        rec = fb_auth.create_user(**kwargs)
         created = True
 
-    # 2) users 행 — 이게 있어야 '가입한 계정'으로 인정된다
-    users_repo.upsert_user(
-        uid=rec.uid, email=LOCAL_TEST_EMAIL, name="테스트",
-        provider="password", email_verified=True, photo_url=None,
-        username="테스트",
-    )
-    if not users_repo.get_user(rec.uid):
+    # 2) users 행 — 이게 있어야 '가입한 계정'으로 인정된다.
+    #    이미 있으면 새로 만들지 않는다 (uid 가 다르면 UNIQUE(email) 에 걸린다).
+    row_uid = want_uid or rec.uid
+    if not existing:
+        users_repo.upsert_user(
+            uid=row_uid, email=LOCAL_TEST_EMAIL, name="테스트",
+            provider="password", email_verified=True, photo_url=None,
+            username="테스트",
+        )
+    if not users_repo.get_user(row_uid):
         print("✗ DB 행을 만들지 못했습니다.", file=sys.stderr)
         return 1
 
     print(f"✓ 로컬 테스트 계정 {'생성' if created else '갱신'} 완료")
     print(f"  이메일   : {LOCAL_TEST_EMAIL}")
     print(f"  비밀번호 : {password}")
-    print(f"  UID      : {rec.uid}")
+    print(f"  UID      : {row_uid}" + ("  (DB 기존 행 재사용)" if existing else ""))
     return 0
 
 

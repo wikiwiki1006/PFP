@@ -16,7 +16,11 @@ class MacroAnalysisRequest(BaseModel):
     # 옛 클라이언트 호환은 확인했다. 이 모델은 extra 를 지정하지 않아
     # pydantic v2 기본값(`ignore`)을 따르므로, `provider` 를 보내던 요청은
     # 422 가 아니라 **조용히 무시되고 통과**한다.
-    portfolio: Optional[dict] = None
+    # 분석 대상 종목. **보유 종목이 아니라 조회자가 직접 입력한 목록이다.**
+    # 예전에는 `portfolio: Optional[dict]` 였고 화면이 holdings 를 통째로
+    # 보내 수량·평균단가까지 프롬프트에 실렸다 — 재산상황이 담긴 개별
+    # 자문이 되는 경로라 티커 목록으로 좁혔다.
+    tickers: Optional[list[str]] = None
 
 
 class AgentResult(BaseModel):
@@ -39,14 +43,14 @@ class MacroAnalysisResponse(BaseModel):
     event: str
     agents: list[AgentResult]
     verdict_cards: Optional[list[VerdictCard]] = None
-    portfolio_actions: Optional[list[dict]] = None
+    ticker_impacts: Optional[list[dict]] = None
 
 
-class PortfolioAction(BaseModel):
+class TickerImpact(BaseModel):
     ticker: str
-    action: str
+    impact: str      # 긍정 | 부정 | 중립 — 이벤트가 그 기업에 주는 방향
     reason: str
-    urgency: str
+    horizon: str     # 단기(1개월) | 중기(3개월) | 장기(1년)
 
 
 class SignalItem(BaseModel):

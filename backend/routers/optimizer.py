@@ -21,7 +21,6 @@ from fastapi import Depends, APIRouter, Header, HTTPException
 from backend.services.markets import market_param
 from pydantic import BaseModel
 
-from backend.db.portfolio_repo import get_holdings as db_get_holdings
 from backend.services.market_data import get_close_df
 from backend.services.portfolio_optimizer import run_ai_optimization
 from backend.services.optimizer import (
@@ -77,27 +76,26 @@ def _job_owner(auth: Optional[dict]) -> Owner:
 
 
 
-def _resolve_tickers(explicit: Optional[list[str]], auth: Optional[dict],
-                     market: str = "US") -> list[str]:
-    """최적화 대상 종목 결정.
+def _resolve_tickers(explicit: Optional[list[str]]) -> list[str]:
+    """최적화 대상 종목 결정 — **입력한 티커만 쓴다.**
 
-    티커를 직접 넘겼다면 개인 데이터가 필요 없으므로 로그인 없이도 계산해 준다
-    (공개된 시세만 쓴다). 티커가 없을 때만 "내 포트폴리오"를 뜻하므로 로그인을
-    요구한다.
+    예전에는 티커를 비우면 로그인 사용자의 `holdings` 를 읽어 "내 포트폴리오"를
+    최적화했다. 그 경로를 없앴다. 이유는 성능이나 취향이 아니라 업태다 —
+    보유 종목을 입력으로 받는 순간 같은 요청이 사용자마다 다른 답을 내고,
+    그것이 자본시장법이 말하는 '개별성' 이다. 개별성이 붙은 투자판단 제공은
+    유사투자자문업(제101조)이 아니라 투자자문업(제6조 제7항)이라 금융위 등록
+    대상이 된다.
+
+    이제 이 함수는 개인 데이터를 전혀 읽지 않는다. 같은 티커 목록이면 누가
+    넣어도 같은 결과가 나온다 — 로그인 여부와도 무관하다.
     """
     cleaned = [t.strip().upper() for t in (explicit or []) if t and t.strip()]
     if cleaned:
         return cleaned
-    if not auth:
-        raise HTTPException(
-            status_code=401,
-            detail="내 포트폴리오로 최적화하려면 로그인이 필요합니다. "
-                   "또는 종목을 직접 입력해 주세요.",
-        )
-    tickers = [t for t in db_get_holdings(auth["uid"], market=market) if t != "CASH"]
-    if not tickers:
-        raise HTTPException(status_code=400, detail="보유 종목이 없습니다. 종목을 입력해 주세요.")
-    return tickers
+    raise HTTPException(
+        status_code=400,
+        detail="최적화할 종목을 직접 입력해 주세요 (2개 이상).",
+    )
 
 
 def _fetch_returns(tickers: list[str], period: str = "1y") -> pd.DataFrame:
@@ -114,7 +112,7 @@ def _fetch_returns(tickers: list[str], period: str = "1y") -> pd.DataFrame:
 # ── Pydantic 요청 모델 ─────────────────────────────────────────────────────────
 
 class MaxSharpeRequest(BaseModel):
-    tickers:        Optional[list[str]] = None  # None이면 보유 종목 자동 사용
+    tickers:        Optional[list[str]] = None  # 필수 — 비면 400 (보유 종목 자동 사용은 없앴다)
     period:         str = "1y"
     risk_free_rate: float = 0.04
     weight_bounds:  list[float] = [0.0, 1.0]
@@ -137,7 +135,7 @@ class BlackLittermanRequest(BaseModel):
 @router.post("/max-sharpe")
 def max_sharpe(req: MaxSharpeRequest, _auth: Optional[dict] = Depends(optional_user), market: str = Depends(market_param)):
     """과거 데이터 기반 Max Sharpe Ratio 포트폴리오 최적화."""
-    tickers = _resolve_tickers(req.tickers, _auth, market)
+    tickers = _resolve_tickers(req.tickers)
 
     daily_returns = _fetch_returns(tickers, req.period)
     return optimize_max_sharpe(
@@ -150,14 +148,19 @@ def max_sharpe(req: MaxSharpeRequest, _auth: Optional[dict] = Depends(optional_u
 @router.post("/black-litterman")
 def black_litterman(req: BlackLittermanRequest, _auth: Optional[dict] = Depends(optional_user), market: str = Depends(market_param)):
     """Black-Litterman + 시장 국면 시그널 결합 최적화."""
-    tickers  = _resolve_tickers(req.tickers, _auth, market)
-    # 시가총액 대용 비중에만 쓰인다. 비로그인이면 균등 비중으로 대체된다.
-    holdings = db_get_holdings(_auth["uid"], market=market) if _auth else {}
+    tickers  = _resolve_tickers(req.tickers)
 
     daily_returns = _fetch_returns(tickers, req.period)
 
-    # 섹터 맵 (holdings에서 추출)
-    sector_map = {t: holdings.get(t, {}).get("sector", "") for t in tickers}
+    # 섹터는 **공개 출처**에서 읽는다 (services/sector_lookup).
+    #
+    # 예전에는 `holdings` 의 sector 컬럼에서 뽑았다. 그러면 같은 티커 목록을
+    # 넣어도 보유 구성이 다른 사용자끼리 sector_map 이 달라지고 → 국면 뷰가
+    # 달라지고 → 최종 비중이 달라졌다. 티커를 직접 입력해도 결과가 그 사람의
+    # 계좌에 의존했다는 뜻이라, 개별성이 여기로 새고 있었다.
+    # 섹터는 종목의 공개 속성이므로 개인 데이터에서 읽을 이유가 없다.
+    from backend.services.sector_lookup import sector_map as public_sector_map
+    sector_map = public_sector_map(tickers, market=market)
 
     # View 결정: 직접 입력 우선, 없으면 regime 기반 자동 생성
     views = req.views
@@ -180,7 +183,7 @@ def black_litterman(req: BlackLittermanRequest, _auth: Optional[dict] = Depends(
 # ══════════════════════════════════════════════════════════════════════════════
 
 class AIOptimizeRequest(BaseModel):
-    tickers:              Optional[list[str]] = None   # None → 보유 종목 자동 사용
+    tickers:              Optional[list[str]] = None   # 필수 — 비면 400
     period:               str   = "1y"                 # "3mo" | "6mo" | "1y" | "2y"
     target_return:        float = 0.10                 # 목표 수익률 (Efficient Return 모드)
     risk_free_rate:       float = 0.04
@@ -191,7 +194,7 @@ class AIOptimizeRequest(BaseModel):
 @router.post("/ai-optimize")
 def ai_optimize(req: AIOptimizeRequest, _auth: Optional[dict] = Depends(optional_user), market: str = Depends(market_param)):
     """동기 최적화 (하위 호환 유지)."""
-    tickers = _resolve_tickers(req.tickers, _auth, market)
+    tickers = _resolve_tickers(req.tickers)
     wb = tuple(req.weight_bounds) if len(req.weight_bounds) == 2 else (0.0, 1.0)
     try:
         return run_ai_optimization(
@@ -214,7 +217,7 @@ def start_ai_optimize_job(
     market: str = Depends(market_param),
 ):
     """비동기 최적화 잡 시작 → job_id 반환. 완료 여부는 GET으로 폴링."""
-    tickers = _resolve_tickers(req.tickers, _auth, market)
+    tickers = _resolve_tickers(req.tickers)
     wb = tuple(req.weight_bounds) if len(req.weight_bounds) == 2 else (0.0, 1.0)
 
     job_id = str(uuid.uuid4())

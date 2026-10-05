@@ -37,7 +37,8 @@ export default function TimingEngine({ holdings }: TimingEngineProps) {
       </div>
       <div className="flex-1 min-h-0 overflow-y-auto">
         {tab === 0 && <RegimePanel holdings={holdings} />}
-        {tab === 1 && <TradeSignalsPanel holdings={holdings} />}
+        {/* 매매신호는 개인 데이터를 쓰지 않는다 — holdings 를 넘기지 않는다. */}
+        {tab === 1 && <TradeSignalsPanel />}
         {tab === 2 && <PairsTradingPanel holdings={holdings} />}
       </div>
     </div>

@@ -1042,14 +1042,30 @@ def _industry_prompt_part2(meta: dict, market: str = "US") -> str:
 
 # ── 레포트 파이프라인 ─────────────────────────────────────────────────────────────
 
+# 분석 등급별 **단계당** 최대 출력 토큰. 리포트는 두 단계(HEADER~V, VI~끝)로 쓴다.
+# 심층은 기본의 1.2배다 (2026-10, 사용자 요청). 기본값을 바꾸면 심층도 같은 비율로
+# 따라가게 곱으로 적는다 — 숫자 두 개를 따로 적으면 한쪽만 고쳐진다.
+_PHASE_MAX_TOKENS_BASIC = 4096
+_DEEP_TOKEN_MULTIPLIER = 1.2
+_PHASE_MAX_TOKENS = {
+    "basic": _PHASE_MAX_TOKENS_BASIC,
+    "deep":  round(_PHASE_MAX_TOKENS_BASIC * _DEEP_TOKEN_MULTIPLIER),   # 4915
+}
+
+
+def _phase_tokens(model_tier: str) -> int:
+    """단계당 최대 토큰. 모르는 등급은 기본값 — 조용히 더 큰 값으로 가지 않는다."""
+    return _PHASE_MAX_TOKENS.get(model_tier, _PHASE_MAX_TOKENS_BASIC)
+
+
 def write_equity_report(
     ticker: str, model_tier: str = "basic",
     should_cancel: Optional[Callable[[], bool]] = None,
     market: str = "US",
 ) -> dict:
     """종목 리서치 레포트 생성.
-    model_tier: "basic" → GPT-5.6 Sol 2-phase (각 4096 토큰)
-                "deep"  → Claude Haiku 2-phase (각 4096 토큰)
+    model_tier: "basic" → Claude Haiku 2-phase (단계당 4096 토큰)
+                "deep"  → Claude Sonnet 2-phase (단계당 4915 토큰 — 기본의 1.2배)
 
     should_cancel 이 주어지면 각 단계 사이와 LLM 스트리밍 도중에 확인해,
     사용자가 중단하면 JobCancelled 를 올리고 즉시 빠져나온다.
@@ -1085,15 +1101,22 @@ def write_equity_report(
     _write = _call_haiku if model_tier == "basic" else _call_sonnet
     p1 = _write(
         f"{context_deep}\n\n{_equity_prompt_part1(ticker, company_name, market)}",
-        EQUITY_SYSTEM_PROMPT, max_tokens=4096, should_cancel=should_cancel,
+        EQUITY_SYSTEM_PROMPT, max_tokens=_phase_tokens(model_tier), should_cancel=should_cancel,
     )
     p2 = _write(
         f"{context_deep}\n\n{_equity_prompt_part2(ticker, company_name, market)}",
-        EQUITY_SYSTEM_PROMPT, max_tokens=4096, should_cancel=should_cancel,
+        EQUITY_SYSTEM_PROMPT, max_tokens=_phase_tokens(model_tier), should_cancel=should_cancel,
     )
     raw = p1.strip() + "\n\n" + p2.strip()
 
     sections = _parse_sections(raw)
+
+    # 저장·다운로드되는 본문 자체에는 고지와 AI 생성물 표기를 붙인다. 화면에만
+    # 붙이면 내려받은 마크다운에는 아무 말이 없는 채로 밖으로 나간다.
+    # 섹션은 **붙이기 전에** 나눴다 — 화면은 고지를 자기 자리(항상 보이는 하단)에
+    # 그리고, 섹션 안에 들어가면 펼쳤을 때 두 번 나온다.
+    from backend.services.disclaimer import append_disclaimer, AI_LABEL_REPORT
+    raw = append_disclaimer(raw, ai_label=AI_LABEL_REPORT)
     return {
         "ticker":       ticker,
         "company_name": company_name,
@@ -1111,8 +1134,8 @@ def write_industry_report(
     market: str = "US",
 ) -> dict:
     """산업 리서치 레포트 생성.
-    model_tier: "basic" → GPT-5.6 Sol 2-phase (각 4096 토큰)
-                "deep"  → Claude Haiku 2-phase (각 4096 토큰)
+    model_tier: "basic" → Claude Haiku 2-phase (단계당 4096 토큰)
+                "deep"  → Claude Sonnet 2-phase (단계당 4915 토큰 — 기본의 1.2배)
 
     should_cancel 은 write_equity_report 와 같은 역할이다.
     """
@@ -1145,15 +1168,22 @@ def write_industry_report(
     _write = _call_haiku if model_tier == "basic" else _call_sonnet
     p1 = _write(
         f"{context}\n\n{_industry_prompt_part1(meta, market)}",
-        INDUSTRY_SYSTEM_PROMPT, max_tokens=4096, should_cancel=should_cancel,
+        INDUSTRY_SYSTEM_PROMPT, max_tokens=_phase_tokens(model_tier), should_cancel=should_cancel,
     )
     p2 = _write(
         f"{context}\n\n{_industry_prompt_part2(meta, market)}",
-        INDUSTRY_SYSTEM_PROMPT, max_tokens=4096, should_cancel=should_cancel,
+        INDUSTRY_SYSTEM_PROMPT, max_tokens=_phase_tokens(model_tier), should_cancel=should_cancel,
     )
     raw = p1.strip() + "\n\n" + p2.strip()
 
     sections = _parse_sections(raw)
+
+    # 저장·다운로드되는 본문 자체에는 고지와 AI 생성물 표기를 붙인다. 화면에만
+    # 붙이면 내려받은 마크다운에는 아무 말이 없는 채로 밖으로 나간다.
+    # 섹션은 **붙이기 전에** 나눴다 — 화면은 고지를 자기 자리(항상 보이는 하단)에
+    # 그리고, 섹션 안에 들어가면 펼쳤을 때 두 번 나온다.
+    from backend.services.disclaimer import append_disclaimer, AI_LABEL_REPORT
+    raw = append_disclaimer(raw, ai_label=AI_LABEL_REPORT)
     return {
         "industry_id":      industry_id,
         "industry_name_kr": meta["name_kr"],

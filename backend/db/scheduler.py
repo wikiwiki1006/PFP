@@ -682,11 +682,17 @@ def _update_signal_scan(market: str = "US"):
         return
     volume_df = get_volume_from_db(universe, "1y")
     valid = [c for c in universe if c in close_df.columns]
-    result = sma_macd_rsi_scan(close_df[valid], volume_df, top_n=10)
+    # score_all=True — 유니버스 전 종목의 매수·매도 점수를 같은 프레임에서 함께
+    # 계산해 둔다. 종목 상세(`/api/signals/signal-score`)가 이 값을 꺼내 써야 목록
+    # 점수와 상세 점수가 같은 데이터에서 나온다 (sma_macd_rsi_scan docstring).
+    result = sma_macd_rsi_scan(close_df[valid], volume_df, top_n=10, score_all=True)
     # 라우터가 읽는 키와 같아야 한다. 예전에는 'signal_scan_sp500' 로 저장하고
     # 라우터는 'signal_scan:US' 를 읽어, 미리 계산해 둔 결과가 한 번도 쓰이지
     # 않고 매 요청이 즉석 계산을 다시 하고 있었다.
-    save_common(f"signal_scan:{market}", result, ttl_seconds=_SIGNAL_SCAN_INTERVAL * 5)
+    # 키의 버전(v3)은 저장 내용이 바뀔 때 올린다. 키가 같으면 옛 캐시가 TTL 동안
+    # 그대로 읽혀(여기서는 `scores` 가 없어 상세가 목록과 다른 경로로 떨어진다),
+    # 코드를 고쳐도 몇 시간 동안 옛 동작이 계속된다.
+    save_common(f"signal_scan:v3:{market}", result, ttl_seconds=_SIGNAL_SCAN_INTERVAL * 5)
     # 완화 단계가 적용됐으면(level > 0) 로그에 남긴다 — '진짜 통과 종목이 없는 시장
     # 상황'인지 '수집 타이밍 등으로 인한 일시적 결핍'인지 나중에 원인을 추적할 때 쓴다.
     long_lv, short_lv = result.get("long_filter_level", 0), result.get("short_filter_level", 0)

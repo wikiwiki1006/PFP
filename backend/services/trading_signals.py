@@ -554,6 +554,7 @@ def sma_macd_rsi_scan(
     volume_df: "pd.DataFrame | None",
     top_n: int = 10,
     min_history: int = 210,
+    score_all: bool = False,
 ) -> dict:
     """2단계 매매신호 스캔 (S&P500).
 
@@ -567,6 +568,18 @@ def sma_macd_rsi_scan(
     Step 2 — 후보만 MACD 히스토그램 / RSI(14) 로 통합점수(0~100) 산출 후 상위 top_n.
 
     거래량 데이터가 아예 없는 티커는 완화 최종 단계 전까지는 후보에서 빠진다.
+
+    `score_all` — True 면 응답에 `scores` 를 더한다: 유니버스 **전 종목**의 매수·매도
+    점수(`score_ticker_both_sides` 형태)를 이 스캔과 **같은 프레임**에서 계산한 것.
+
+    왜 필요한가. 종목 상세 화면(`/api/signals/signal-score`)은 예전에 점수를 따로
+    계산했다 — 가격은 `get_close_df`(장중 실시간 봉 포함, 오늘까지), 거래량은 DB
+    (스캔 기준일까지). 그래서 목록의 점수와 상세의 점수가 **다른 날짜의 데이터**로
+    나왔다. 실측(2026-10-01, 스캔 기준일 09-09): HPE 목록 80 / 상세 50, FICO 79 / 39,
+    BG 67 / 37. 거래량 배율은 양쪽이 같았고(같은 DB) 가격만 달랐다(FICO 983 vs 592).
+    상세는 오늘 가격에 3주 전 거래량을 섞은, 어느 날의 점수도 아닌 값이었다.
+    공식은 이미 하나(`_score_ticker_side`)였다 — 갈린 것은 입력이다. 그래서 입력을
+    하나로 만든다: 상세는 여기서 계산한 값을 꺼내 쓴다.
     """
     empty = {
         "long_picks": [], "short_picks": [], "scanned": 0, "as_of": None,
@@ -641,7 +654,7 @@ def sma_macd_rsi_scan(
     shorts.sort(key=lambda r: r["score"], reverse=True)
 
     as_of = close.index[-1]
-    return {
+    out = {
         "long_picks":  longs[:top_n],
         "short_picks": shorts[:top_n],
         "scanned":     len(valid),
@@ -651,6 +664,18 @@ def sma_macd_rsi_scan(
         "short_filter_level": short_level,
         "short_filter_note":  short_note,
     }
+    if score_all:
+        # 위 picks 와 **같은 `close` · `vol`** 을 넘긴다 — 그래서 목록에 오른 종목은
+        # 상세 점수가 목록 점수와 정확히 같다. 다른 프레임을 다시 읽어 계산하면
+        # 그 순간 두 숫자가 또 갈린다.
+        scores: dict = {}
+        for t in valid:
+            vt = vol[t] if t in vol.columns else None
+            r = score_ticker_both_sides(t, close[t], vt, min_history=min_history)
+            if not r.get("insufficient_history"):
+                scores[t] = r
+        out["scores"] = scores
+    return out
 
 
 def score_ticker_both_sides(

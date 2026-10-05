@@ -1,11 +1,12 @@
-import { useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Search, ChevronLeft, ChevronRight } from 'lucide-react'
+import { Search, ChevronLeft, ChevronRight, X } from 'lucide-react'
+import { useIsMobile } from '@/lib/useIsMobile'
 import { getSignalScan, getSignalScore } from '@/api'
 import { getMarket } from '@/lib/market'
 import BollingerChart from './BollingerChart'
 import { COLOR_UP, COLOR_DOWN } from './colors'
-import type { SignalScanPick, SignalScanResult, HoldingsMap } from '@/types'
+import type { SignalScanPick, SignalScanResult } from '@/types'
 import TickerLabel from '@/components/TickerLabel'
 import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
 import { tickerByExactName } from '@/lib/suggestions'
@@ -17,10 +18,6 @@ import { tickerByExactName } from '@/lib/suggestions'
 function scanErrorMessage(err: unknown): string | null {
   const d = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
   return typeof d === 'string' && d.trim() ? d : null
-}
-
-interface TradeSignalsPanelProps {
-  holdings?: HoldingsMap
 }
 
 function ScoreBar({ label, value, max, color }: { label: string; value: number; max: number; color: string }) {
@@ -48,7 +45,11 @@ function PickRow({
       <div className="flex justify-between items-center">
         {/* 한국은 종목명이 주, 코드가 보조. 미국은 반대 (TickerLabel 참고) */}
         <TickerLabel ticker={p.ticker} name={p.name} />
+        {/* 이 숫자는 상세 화면의 같은 방향 점수와 **같은 값**이다 — 둘 다 스캔이 같은
+            프레임에서 계산한다 (routers/signals.py signal_score, basis="scan").
+            예전에는 상세가 다른 날짜의 데이터로 다시 계산해 숫자가 자주 달랐다. */}
         <span className="font-mono font-bold tabular-nums" style={{ color }}>
+          <span className="text-[9px] font-sans font-normal text-[#64748b] mr-1">{kind === 'long' ? '매수' : '매도'}</span>
           <span className="text-[15px]">{p.score}</span><span className="text-[10px] text-[#64748b]">/100</span>
         </span>
       </div>
@@ -66,20 +67,67 @@ function PickRow({
   )
 }
 
+/** 매수 또는 매도 목록 한 칸. 렌더 안에서 컴포넌트를 정의하면 렌더마다 새 타입이
+    되어 React 가 목록 전체를 다시 마운트한다 — 모듈 수준에 둔다. */
+function SideList({ title, color, picks, level, note, kind, selected, onSelect }: {
+  title: string; color: string; picks: SignalScanPick[]
+  level?: number; note?: string; kind: 'long' | 'short'
+  selected: string | null; onSelect: (t: string) => void
+}) {
+  return (
+    <div>
+      <div className="text-[11px] font-bold tracking-widest mb-1.5 flex items-center gap-1.5 flex-wrap" style={{ color }}>
+        {title} <span className="text-[#374151]">{picks.length}</span>
+        {!!level && (
+          <span className="text-[9px] font-normal text-[#f59e0b] normal-case tracking-normal"
+            title="원래 기준으로 top 10이 안 채워져 조건을 완화했습니다.">
+            ⚠ 완화됨: {note}
+          </span>
+        )}
+      </div>
+      <div className="space-y-1.5">
+        {picks.map(p => (
+          <PickRow key={p.ticker} p={p} kind={kind}
+            selected={selected === p.ticker} onClick={() => onSelect(p.ticker)} />
+        ))}
+        {picks.length === 0 && (
+          <div className="text-[11px] text-[#64748b]">1차 필터를 통과한 {kind === 'long' ? '매수' : '매도'} 후보가 없습니다.</div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 /** 종목 하나의 매수/매도 참고 점수 — Signal Scan 상위 10개 리스트에 없어도(순위 밖,
-    보유 종목, 검색한 임의 티커 등) 볼 수 있게 한다. 상세 차트(BollingerChart) 위에 표시. */
-function TickerScoreCard({ ticker }: { ticker: string }) {
+    검색한 임의 티커 등) 볼 수 있게 한다. 상세 차트(BollingerChart) 위에 표시.
+
+    `listAsOf` 는 왼쪽 목록의 기준일이다. 상세가 스캔 스냅샷(basis=scan)인데 날짜가
+    목록과 다르면 — 목록을 받은 뒤 스캔이 새로 돌았다 — `onStale` 로 목록을 다시
+    받는다. 그러지 않으면 같은 종목이 목록과 상세에서 다른 날의 점수로 나온다. */
+function TickerScoreCard({ ticker, listAsOf, onStale }: {
+  ticker: string; listAsOf?: string | null; onStale?: () => void
+}) {
   const q = useQuery({
-    queryKey: ['signal-score', ticker],
+    // 시장을 키에 넣는다 (§1.1) — 같은 문자열 티커가 시장마다 다른 응답일 수 있다.
+    queryKey: ['signal-score', getMarket(), ticker],
     queryFn:  () => getSignalScore(ticker),
     staleTime: 300_000,
     retry: false,
   })
+  const scoreAsOf = q.data?.as_of ?? null
+  const fromScan  = q.data?.basis === 'scan'
+  const { refetch: refetchScore } = q
+  useEffect(() => {
+    if (!fromScan || !listAsOf || !scoreAsOf || scoreAsOf === listAsOf) return
+    // YYYY-MM-DD 라 문자열 비교가 곧 날짜 비교다. 낡은 쪽을 다시 받는다.
+    if (scoreAsOf > listAsOf) onStale?.()
+    else void refetchScore()
+  }, [fromScan, listAsOf, scoreAsOf, onStale, refetchScore])
 
   if (q.isLoading) return <div className="text-xs text-[#64748b] mb-3">매매신호 점수 계산 중…</div>
   if (q.isError || !q.data) return null
 
-  const { long, long_filter_pass, short, short_filter_pass } = q.data
+  const { long, long_filter_pass, short, short_filter_pass, as_of, basis } = q.data
   if (!long && !short) {
     return (
       <div className="text-xs text-[#64748b] mb-3">
@@ -94,7 +142,15 @@ function TickerScoreCard({ ticker }: { ticker: string }) {
   ]
 
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-3">
+    <div className="mb-3">
+    {/* 점수의 기준일. 스캔 유니버스 종목은 왼쪽 목록과 같은 스냅샷(basis=scan)이라
+        숫자가 같고, 유니버스 밖 종목은 같은 공식으로 따로 계산한다. */}
+    <div className="text-[10px] text-[#475569] mb-1.5">
+      {as_of ? `${as_of} 종가 기준` : '기준일 정보 없음'}
+      {basis === 'on_demand' && ' · 스캔 대상 밖 종목이라 따로 계산'}
+      {basis === 'scan_unavailable' && ' · 스캔 결과를 아직 만들 수 없어 따로 계산'}
+    </div>
+    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
       {sides.map(({ key, side, pass, label, color }) => {
         if (!side) {
           return (
@@ -125,32 +181,24 @@ function TickerScoreCard({ ticker }: { ticker: string }) {
         )
       })}
     </div>
+    </div>
   )
 }
 
-function HoldingRow({
-  ticker, selected, onClick,
-}: { ticker: string; selected: boolean; onClick: () => void }) {
-  const names = useTickerNames()
-  return (
-    <button
-      onClick={onClick}
-      className={`w-full text-left px-3 py-2 rounded border transition-colors font-bold text-sm ${
-        selected ? 'border-[#f59e0b] bg-[#f59e0b]/10 text-[#f59e0b]' : 'border-[#1e2d40] text-[#e2e8f0] hover:bg-[#0a1525]'
-      }`}
-    >
-      {displayTicker(ticker, names)}
-    </button>
-  )
-}
-
-export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelProps) {
+export default function TradeSignalsPanel() {
   const names = useTickerNames()
   const [selected,     setSelected]     = useState<string | null>(null)
   const [search,       setSearch]       = useState('')
   const [sidebarOpen,  setSidebarOpen]  = useState(true)
+  // 모바일: 종목을 고르면 오른쪽에서 상세 서랍이 나온다. 예전에는 목록 아래에 상세가
+  // 쌓여 차트를 보려면 목록을 끝까지 내려야 했고, 다른 종목을 보려면 다시 올라와야 했다.
+  const isMobile = useIsMobile()
+  const [drawerOpen, setDrawerOpen] = useState(false)
+  const pick = useCallback((t: string) => { setSelected(t); setDrawerOpen(true) }, [])
 
-  const holdTickers = Object.keys(holdings).filter(t => t !== 'CASH')
+  // 보유 종목 목록을 없앴다. 예전에는 왼쪽에 '보유종목' 칸이 있어 내 종목만
+  // 따로 신호를 보여 줬는데, 그러면 같은 화면이 사용자마다 다른 목록을 낸다.
+  // 스캔 결과는 이제 누구에게나 같다 — 검색으로는 어떤 종목이든 볼 수 있다.
 
   // 키에 시장이 들어가야 한다 (§1.1). 요청 자체는 axios 인터셉터가 market 을
   // 붙여 주지만, **캐시는 키로만 갈린다** — 키가 같으면 한 시장의 스캔 결과가
@@ -171,13 +219,16 @@ export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelPr
   // 공용 타입(types/index.ts)에는 아직 없는 필드라 여기서만 넓혀 읽는다.
   const universeLabel = (scanQ.data as (SignalScanResult & { universe_label?: string | null }) | undefined)
     ?.universe_label ?? null
+  // 상세 점수가 더 새 스냅샷이면 목록을 다시 받는다 (TickerScoreCard 참고).
+  const { refetch: refetchScanQuery } = scanQ
+  const refetchScan = useCallback(() => { void refetchScanQuery() }, [refetchScanQuery])
 
   function submitSearch() {
     // 한국은 이름으로 찾는다 — 코드를 화면 어디에도 안 보여 주므로 사용자가 코드를
     // 알 방법이 없다. 이름이 사전과 정확히 같으면 그 티커, 아니면 입력을 코드로 읽는다.
     const typed = search.trim()
     const t = tickerByExactName(typed, names) ?? typed.toUpperCase()
-    if (t) setSelected(t)
+    if (t) pick(t)
     setSearch('')
   }
 
@@ -197,7 +248,7 @@ export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelPr
 
       {/* left list panel */}
       {sidebarOpen && (
-        <div className="w-full md:w-[300px] flex-shrink-0 max-h-[42vh] md:max-h-none overflow-y-auto border-b md:border-b-0 md:border-r border-[#1e2d40] p-3 space-y-3">
+        <div className="w-full md:w-[300px] flex-shrink-0 md:overflow-y-auto border-b md:border-b-0 md:border-r border-[#1e2d40] p-3 space-y-3">
           {/* search */}
           <div className="relative">
             <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#374151]" />
@@ -209,20 +260,6 @@ export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelPr
               className="w-full bg-[#060b14] border border-[#1e2d40] rounded pl-8 pr-3 py-2 text-sm text-[#e2e8f0] placeholder:text-[#374151] focus:outline-none focus:border-[#10b981]"
             />
           </div>
-
-          {/* holdings signals */}
-          {holdTickers.length > 0 && (
-            <div>
-              <div className="text-[11px] font-bold tracking-widest text-[#f59e0b] mb-1.5">
-                보유종목 <span className="text-[#374151]">{holdTickers.length}</span>
-              </div>
-              <div className="space-y-1.5">
-                {holdTickers.map(t => (
-                  <HoldingRow key={t} ticker={t} selected={selected === t} onClick={() => setSelected(t)} />
-                ))}
-              </div>
-            </div>
-          )}
 
           {/* 시장별 스캔 결과 (미국 S&P500 · 한국 KOSPI200·KOSDAQ150) */}
           {scanQ.isLoading && <div className="text-sm text-[#64748b]">스캔 중… (최초 1회)</div>}
@@ -238,60 +275,36 @@ export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelPr
             </div>
           )}
 
-          {scanQ.data && (
-            <>
-              <div>
-                <div className="text-[11px] font-bold tracking-widest mb-1.5 flex items-center gap-1.5 flex-wrap" style={{ color: COLOR_UP }}>
-                  매수 신호 <span className="text-[#374151]">{scanQ.data.long_picks.length}</span>
-                  {!!scanQ.data.long_filter_level && (
-                    <span className="text-[9px] font-normal text-[#f59e0b] normal-case tracking-normal"
-                      title="원래 기준으로 top 10이 안 채워져 조건을 완화했습니다.">
-                      ⚠ 완화됨: {scanQ.data.long_filter_note}
-                    </span>
-                  )}
+          {scanQ.data && (() => {
+            const d = scanQ.data
+            return (
+              <>
+                <SideList title="매수 신호" color={COLOR_UP} kind="long" picks={d.long_picks}
+                  level={d.long_filter_level} note={d.long_filter_note}
+                  selected={selected} onSelect={pick} />
+                <SideList title="매도 신호" color={COLOR_DOWN} kind="short" picks={d.short_picks}
+                  level={d.short_filter_level} note={d.short_filter_note}
+                  selected={selected} onSelect={pick} />
+                {/* 스캔 대상 이름은 서버가 유니버스를 고르는 자리에서 같이 준다
+                    (`universe_label`). 화면이 "S&P500" 을 박아 두면 한국 화면이 미국
+                    유니버스를 스캔했다고 말한다(§1.1). 이름이 없으면 지어내지 않는다. */}
+                <div className="text-[10px] text-[#374151] pt-1">
+                  {universeLabel ? `${universeLabel} ` : ''}
+                  {d.scanned}개 종목 · SMA 1차 필터 + MACD/RSI 스코어링
+                  {d.as_of ? ` · ${d.as_of} 종가 기준` : ''}
                 </div>
-                <div className="space-y-1.5">
-                  {scanQ.data.long_picks.map(p => (
-                    <PickRow key={p.ticker} p={p} kind="long" selected={selected === p.ticker} onClick={() => setSelected(p.ticker)} />
-                  ))}
-                  {scanQ.data.long_picks.length === 0 && (
-                    <div className="text-[11px] text-[#64748b]">1차 필터를 통과한 매수 후보가 없습니다.</div>
-                  )}
+                <div className="text-[10px] text-[#475569] leading-relaxed border-t border-[#1e2d40] pt-2 mt-1">
+                  기술적 지표로 계산한 참고 정보입니다. 특정 종목의 매매를 권유하지 않으며,
+                  투자 결과에 대한 책임은 투자자 본인에게 있습니다.
                 </div>
-              </div>
-              <div>
-                <div className="text-[11px] font-bold tracking-widest mb-1.5 flex items-center gap-1.5 flex-wrap" style={{ color: COLOR_DOWN }}>
-                  매도 신호 <span className="text-[#374151]">{scanQ.data.short_picks.length}</span>
-                  {!!scanQ.data.short_filter_level && (
-                    <span className="text-[9px] font-normal text-[#f59e0b] normal-case tracking-normal"
-                      title="원래 기준으로 top 10이 안 채워져 조건을 완화했습니다.">
-                      ⚠ 완화됨: {scanQ.data.short_filter_note}
-                    </span>
-                  )}
-                </div>
-                <div className="space-y-1.5">
-                  {scanQ.data.short_picks.map(p => (
-                    <PickRow key={p.ticker} p={p} kind="short" selected={selected === p.ticker} onClick={() => setSelected(p.ticker)} />
-                  ))}
-                  {scanQ.data.short_picks.length === 0 && (
-                    <div className="text-[11px] text-[#64748b]">1차 필터를 통과한 매도 후보가 없습니다.</div>
-                  )}
-                </div>
-              </div>
-              {/* 스캔 대상 이름은 서버가 유니버스를 고르는 자리에서 같이 준다
-                  (`universe_label`). 화면이 "S&P500" 을 박아 두면 한국 화면이 미국
-                  유니버스를 스캔했다고 말한다(§1.1). 이름이 없으면 지어내지 않는다. */}
-              <div className="text-[10px] text-[#374151] pt-1">
-                {universeLabel ? `${universeLabel} ` : ''}
-                {scanQ.data.scanned}개 종목 · SMA 1차 필터 + MACD/RSI 스코어링
-                {scanQ.data.as_of ? ` · ${scanQ.data.as_of} 기준` : ''}
-              </div>
-            </>
-          )}
+              </>
+            )
+          })()}
         </div>
       )}
 
-      {/* right chart panel */}
+      {/* right chart panel — 데스크톱 */}
+      {!isMobile && (
       <div className="flex-1 md:overflow-y-auto p-2 md:p-4 min-w-0">
         {!selected ? (
           <div className="text-sm text-[#64748b] flex items-center justify-center h-full">
@@ -303,11 +316,50 @@ export default function TradeSignalsPanel({ holdings = {} }: TradeSignalsPanelPr
             <div className={`text-lg font-bold text-[#e2e8f0] mb-3${names[selected] ? '' : ' font-mono'}`}>
               {displayTicker(selected, names)}
             </div>
-            <TickerScoreCard key={`score-${selected}`} ticker={selected} />
+            <TickerScoreCard key={`score-${selected}`} ticker={selected}
+              listAsOf={scanQ.data?.as_of ?? null} onStale={refetchScan} />
             <BollingerChart key={selected} ticker={selected} height={460} />
           </>
         )}
       </div>
+      )}
+
+      {/* 모바일 상세 서랍 — 오른쪽에서 밀려 나온다. 바깥(어두운 막)이나 닫기를 누르면 접힌다. */}
+      {isMobile && selected && (
+        <>
+          <div
+            onClick={() => setDrawerOpen(false)}
+            className={`fixed inset-0 z-[60] bg-black/50 transition-opacity ${drawerOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
+          />
+          <div
+            role="dialog" aria-modal="true" aria-label={`${displayTicker(selected, names)} 상세`}
+            className={`fixed top-0 bottom-0 right-0 z-[61] w-[94vw] max-w-[520px] bg-[#0b0f1a] border-l border-[#1e2d40] shadow-2xl flex flex-col transition-transform duration-200 ${drawerOpen ? 'translate-x-0' : 'translate-x-full'}`}
+          >
+            <div className="flex-shrink-0 flex items-center gap-2 px-3 py-2.5 border-b border-[#1e2d40] bg-[#060b14] pt-[max(0.625rem,env(safe-area-inset-top))]">
+              <button onClick={() => setDrawerOpen(false)} aria-label="상세 닫기"
+                className="min-w-[44px] min-h-[44px] -ml-2 flex items-center justify-center text-[#94a3b8] active:text-[#e2e8f0]">
+                <ChevronRight className="w-5 h-5" />
+              </button>
+              <div className={`flex-1 min-w-0 truncate text-base font-bold text-[#e2e8f0]${names[selected] ? '' : ' font-mono'}`}>
+                {displayTicker(selected, names)}
+              </div>
+              <button onClick={() => setDrawerOpen(false)} aria-label="닫기"
+                className="min-w-[44px] min-h-[44px] flex items-center justify-center text-[#94a3b8] active:text-[#e2e8f0]">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto overscroll-contain p-2 pb-[max(1rem,env(safe-area-inset-bottom))]">
+              {drawerOpen && (
+                <>
+                  <TickerScoreCard key={`score-${selected}`} ticker={selected}
+                    listAsOf={scanQ.data?.as_of ?? null} onStale={refetchScan} />
+                  <BollingerChart key={selected} ticker={selected} height={400} />
+                </>
+              )}
+            </div>
+          </div>
+        </>
+      )}
     </div>
   )
 }

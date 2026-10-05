@@ -22,7 +22,7 @@ export default function TimingEngine() {
         <Zap className="w-4 h-4 text-[#ef4444]" />
         <div>
           <h1 className="text-base font-bold text-[#e2e8f0]">트레이딩 신호</h1>
-          <p className="text-[11px] text-[#4a5568]">종목 추세, 급등/급락 신호, 유사 종목 분석 정보를 제공합니다.</p>
+          <p className="text-[11px] text-[#4a5568]">종목의 추세·과열·침체 구간과 유사 종목 쌍을 기술적 지표로 계산해 보여 줍니다. 매매 권유가 아닙니다.</p>
         </div>
       </div>
       {/* 이 박스(테두리+좌우 여백)가 안의 차트들 최대 폭을 깎아먹는다 — 모바일에서는

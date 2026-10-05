@@ -13,6 +13,9 @@ import {
   listIndustries, searchTickers,
 } from '@/api'
 import { cn } from '@/lib/utils'
+import Disclaimer, {
+  DISCLAIMER_TEXT, AI_LABEL_REPORT, AiGeneratedNote, stripAppendix,
+} from '@/components/Disclaimer'
 import { useLoginPrompt } from '@/components/auth/LockedPreview'
 import AuthGate from '@/components/auth/AuthGate'
 import { useAuth } from '@/lib/AuthContext'
@@ -185,7 +188,7 @@ function buildEquityPdfHtml(result: EquityResult, dateStr: string, title: string
   const bodyHtml = entries.map(([key, content], i) => `
     <div class="sec-card">
       <div class="sec-hdr"><span class="sec-badge">${i + 1}</span><span>${sectionTitle(key)}</span></div>
-      <div class="sec-body">${mdToHtml(content)}</div>
+      <div class="sec-body">${mdToHtml(stripAppendix(content))}</div>
     </div>
   `).join('')
   return `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
@@ -220,7 +223,7 @@ function buildEquityPdfHtml(result: EquityResult, dateStr: string, title: string
     <div class="title">${title.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
     <div class="sub">종목 리서치 레포트 · ${dateStr}</div>
   </div>
-  <div class="body">${bodyHtml}<div class="footer">본 레포트는 AI 자동 생성 참고용으로, 투자 조언이 아닙니다.</div></div>
+  <div class="body">${bodyHtml}<div class="footer">${DISCLAIMER_TEXT}<br/><br/>${AI_LABEL_REPORT}</div></div>
   </body></html>`
 }
 
@@ -229,7 +232,7 @@ function buildIndustryPdfHtml(result: IndustryResult, dateStr: string): string {
   const bodyHtml = entries.map(([key, content], i) => `
     <div class="sec-card">
       <div class="sec-hdr"><span class="sec-badge">${i + 1}</span><span>${sectionTitle(key)}</span></div>
-      <div class="sec-body">${mdToHtml(content)}</div>
+      <div class="sec-body">${mdToHtml(stripAppendix(content))}</div>
     </div>
   `).join('')
   return `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
@@ -264,7 +267,7 @@ function buildIndustryPdfHtml(result: IndustryResult, dateStr: string): string {
     <div class="title">${result.industry_name_kr}</div>
     <div class="sub">산업 리서치 레포트 · ${dateStr}</div>
   </div>
-  <div class="body">${bodyHtml}<div class="footer">본 레포트는 AI 자동 생성 참고용으로, 투자 조언이 아닙니다.</div></div>
+  <div class="body">${bodyHtml}<div class="footer">${DISCLAIMER_TEXT}<br/><br/>${AI_LABEL_REPORT}</div></div>
   </body></html>`
 }
 
@@ -275,7 +278,7 @@ function buildGenericPdfHtml(title: string, subtitle: string, sections: Record<s
   const bodyHtml = entries.map(([key, content], i) => `
     <div class="sec-card">
       <div class="sec-hdr"><span class="sec-badge">${i + 1}</span><span>${sectionTitle(key)}</span></div>
-      <div class="sec-body">${mdToHtml(content)}</div>
+      <div class="sec-body">${mdToHtml(stripAppendix(content))}</div>
     </div>
   `).join('')
   return `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
@@ -310,7 +313,7 @@ function buildGenericPdfHtml(title: string, subtitle: string, sections: Record<s
     <div class="title">${title.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
     <div class="sub">${subtitle}</div>
   </div>
-  <div class="body">${bodyHtml}<div class="footer">본 레포트는 AI 자동 생성 참고용으로, 투자 조언이 아닙니다.</div></div>
+  <div class="body">${bodyHtml}<div class="footer">${DISCLAIMER_TEXT}<br/><br/>${AI_LABEL_REPORT}</div></div>
   </body></html>`
 }
 
@@ -390,6 +393,31 @@ function ProgressBar({ progress, elapsedMs, type }: {
 }
 
 // ── 레포트 섹션 카드 ──────────────────────────────────────────────────────────
+/** 리포트 상단 안내 — 이 리포트가 **개인 맞춤이 아니라는** 사실.
+ *
+ *  리포트는 (대상, 분석 등급, 시장) 단위로 한 번 만들어 공용 캐시(scope='shared')로
+ *  모두에게 같은 것을 준다 (routers/reports.py `_cached_shared_result`). 그래서
+ *  '같은 분석 등급' 을 함께 적는다 — 기본과 심층은 서로 다른 리포트다. 이 사실을
+ *  빼고 '모두에게 동일' 이라고만 쓰면 등급이 다른 사람에게는 거짓이 된다. */
+function SharedReportNotice({ subject }: { subject: '종목' | '산업' | '대상' }) {
+  return (
+    <div className="text-[10px] text-[#64748b] leading-relaxed">
+      이 리포트는 같은 {subject}·같은 분석 등급을 요청한 모든 이용자에게 동일하게 제공됩니다.
+      개인의 보유 종목이나 투자 성향을 반영하지 않습니다.
+    </div>
+  )
+}
+
+/** 리포트 하단 — 면책 고지 + AI 생성물 표기(맨 끝). 섹션이 접혀 있어도 보이는 자리다. */
+function ReportFooterNotes() {
+  return (
+    <div className="border-t border-[#1e2d40] pt-3 space-y-1.5">
+      <Disclaimer />
+      <AiGeneratedNote text={AI_LABEL_REPORT} />
+    </div>
+  )
+}
+
 function ReportSection({ title, content, defaultExpanded = false, sectionIndex }: {
   title: string
   content: string
@@ -418,7 +446,7 @@ function ReportSection({ title, content, defaultExpanded = false, sectionIndex }
       {expanded && (
         <div className="px-4 pb-5 border-t border-[#1e2d40] pt-3">
           <div className="lens-md">
-            <ReactMarkdown remarkPlugins={MARKDOWN_PLUGINS}>{content}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={MARKDOWN_PLUGINS}>{stripAppendix(content)}</ReactMarkdown>
           </div>
         </div>
       )}
@@ -999,6 +1027,7 @@ function EquityTab() {
               </>
             )}
           </div>
+          <SharedReportNotice subject="종목" />
           {headerContent && <ReportHeaderCard headerContent={headerContent} type="equity" />}
           <div className="space-y-1.5">
             {sections.filter(([k]) => k !== 'header').map(([key, content], i) => (
@@ -1011,6 +1040,7 @@ function EquityTab() {
               />
             ))}
           </div>
+          <ReportFooterNotes />
         </div>
       )}
     </div>
@@ -1405,6 +1435,7 @@ function IndustryTab() {
               <span className="text-sm text-[#64748b] ml-2">({result.industry_name_en})</span>
             )}
           </div>
+          <SharedReportNotice subject="산업" />
           {headerContent && <ReportHeaderCard headerContent={headerContent} type="industry" />}
           <div className="space-y-1.5">
             {sections.filter(([k]) => k !== 'header').map(([key, content], i) => (
@@ -1417,6 +1448,7 @@ function IndustryTab() {
               />
             ))}
           </div>
+          <ReportFooterNotes />
         </div>
       )}
     </div>
@@ -1602,6 +1634,7 @@ function HistoryTab() {
               PDF
             </button>
           </div>
+          <SharedReportNotice subject="대상" />
           {viewHeader && <ReportHeaderCard headerContent={viewHeader} type={viewType} />}
           <div className="space-y-1.5">
             {viewSections.filter(([k]) => k !== 'header').map(([key, content], i) => (
@@ -1614,6 +1647,7 @@ function HistoryTab() {
               />
             ))}
           </div>
+          <ReportFooterNotes />
         </div>
       )}
     </div>

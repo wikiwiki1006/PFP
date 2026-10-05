@@ -1,21 +1,20 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { Globe, Play, ChevronDown, ChevronRight, Download, History, X, Square, Lock } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import { MARKDOWN_PLUGINS } from '@/lib/markdown'
 import { ErrorMessage } from '@/components/LoadingSpinner'
 import { FinancialTips } from '@/components/FinancialTips'
-import { getMacroModes, startMacroAnalysis, getMacroJob, cancelMacroJob, getHoldings, getMacroReportHistory, getMacroReportFile } from '@/api'
+import { getMacroModes, startMacroAnalysis, getMacroJob, cancelMacroJob, getMacroReportHistory, getMacroReportFile } from '@/api'
 import { useFeatures } from '@/lib/useFeatures'
 import type { MacroAnalysisResult, MacroAgent } from '@/types'
 import { cn } from '@/lib/utils'
 import { useLoginPrompt } from '@/components/auth/LockedPreview'
-import { useDemoQuery } from '@/lib/useDemoQuery'
-import { demoHoldingsRaw } from '@/lib/demoData'
 import { marketSession } from '@/lib/marketStorage'
 import { useMarket } from '@/lib/useMarket'
 import { useTickerNames, displayTicker } from '@/lib/useTickerNames'
 import { stringDetail } from '@/components/serverError'
+import { DISCLAIMER_TEXT, AI_LABEL_SCENARIO, AiGeneratedNote } from '@/components/Disclaimer'
 
 // ── sessionStorage 키 ──────────────────────────────────────────────────────────
 const SK_PENDING   = 'macro_pending'
@@ -25,6 +24,7 @@ const SK_EVENT     = 'macro_event'
 const SK_MODEL     = 'macro_model'
 const SK_MODE      = 'macro_mode'
 const SK_JOB_ID    = 'macro_job_id'
+const SK_TICKERS   = 'macro_tickers'
 
 // 모드별 예상 소요 시간 (ms)
 const MODE_MAX_MS: Record<string, number> = {
@@ -50,7 +50,7 @@ const MODE_LABELS: Record<string, string> = {
 
 const MODE_DESCRIPTIONS: Record<string, string> = {
   fast:     '이벤트분석·투자전략·최종판정',
-  standard: 'fast + 시장반응·포트폴리오 액션',
+  standard: 'fast + 시장반응·종목별 영향',
   full:     'standard + 과거 유사사례 분석·리스크 분석',
 }
 
@@ -65,8 +65,8 @@ const PRESETS = [
   { label: '연착륙',         event: '물가가 목표 수준으로 안정되고 고용도 크게 나빠지지 않은 채 중앙은행이 금리 인하로 돌아섰습니다. 경기 침체 없이 성장세가 유지되면서 위험자산에 대한 투자 심리가 개선되고 있습니다.' },
 ]
 
-// Agent 8 은 JSON 원문 대신 ActionTable 표로 렌더링
-const ACTION_AGENT_ID  = 8
+// Agent 8 은 JSON 원문 대신 ImpactTable 표로 렌더링
+const IMPACT_AGENT_ID  = 8
 const VERDICT_AGENT_ID = 9
 
 // ── 판정 카드 렌더러 (Agent 9 전용) ──────────────────────────────────────────
@@ -142,16 +142,29 @@ function ProgressBar({ progress, elapsedMs, mode }: { progress: number; elapsedM
 
 // ── AgentCard ─────────────────────────────────────────────────────────────────
 
+// 옛 기록(키 `portfolio_actions`)의 종목 영향 에이전트 원문은 보유 종목별 매수·매도
+// 지시 JSON 이다. 지금 화면은 그 표(ImpactTable 의 옛 모습)를 없앴으므로, 원문을 그대로
+// 마크다운으로 흘리면 날것의 JSON 이 — 그리고 없앤 매매 지시가 — 그대로 보인다.
+const LEGACY_IMPACT_NOTICE =
+  '이 기록은 예전 형식(보유 종목별 대응 표)으로 만들어져 이 항목을 표시하지 않습니다. ' +
+  '같은 이벤트를 다시 분석하면 지금 형식(입력 종목별 이벤트 영향)으로 볼 수 있습니다.'
+
+function isLegacyScenario(result: unknown): boolean {
+  return !!result && typeof result === 'object' && 'portfolio_actions' in (result as object)
+}
+
 function AgentCard({
-  agent, index, portfolioActions, verdictCards,
+  agent, index, tickerImpacts, verdictCards, legacyImpact,
 }: {
   agent: MacroAgent
   index: number
-  portfolioActions?: Array<Record<string, unknown>>
+  tickerImpacts?: Array<Record<string, unknown>>
   verdictCards?: import('@/types').VerdictCard[]
+  /** 옛 형식 기록이면 true — 종목 영향 에이전트 원문을 그리지 않는다. */
+  legacyImpact?: boolean
 }) {
   const [expanded, setExpanded] = useState(false)
-  const isActionAgent  = Number(agent.id) === ACTION_AGENT_ID
+  const isImpactAgent  = Number(agent.id) === IMPACT_AGENT_ID
   const isVerdictAgent = Number(agent.id) === VERDICT_AGENT_ID
 
   return (
@@ -181,8 +194,10 @@ function AgentCard({
         <div className="px-4 pb-5 border-t border-[#1e2d40] pt-3">
           {isVerdictAgent && verdictCards && verdictCards.length > 0 ? (
             <VerdictCardsDisplay cards={verdictCards} />
-          ) : isActionAgent && portfolioActions && portfolioActions.length > 0 ? (
-            <ActionTable actions={portfolioActions} />
+          ) : isImpactAgent && tickerImpacts && tickerImpacts.length > 0 ? (
+            <ImpactTable impacts={tickerImpacts} />
+          ) : isImpactAgent && legacyImpact ? (
+            <div className="text-xs text-[#94a3b8] leading-relaxed">{LEGACY_IMPACT_NOTICE}</div>
           ) : (
             <div className="macro-md">
               <ReactMarkdown remarkPlugins={MARKDOWN_PLUGINS}>{agent.text}</ReactMarkdown>
@@ -194,37 +209,42 @@ function AgentCard({
   )
 }
 
-// ── 포트폴리오 액션 테이블 ────────────────────────────────────────────────────
+// ── 종목별 영향 테이블 ────────────────────────────────────────────────────────
+//
+// 예전에는 '포트폴리오 액션 플랜' 이었다 — 보유 종목마다 매수/매도/유지와
+// 시급도(즉시·1개월 내)를 찍어 주는 표였고, 입력이 그 사람의 holdings 였다.
+// 특정인의 보유 상태를 전제한 매매 지시라 투자자문업 쪽으로 넘어간다.
+// 지금은 '입력한 종목에 이벤트가 어떤 영향을 주는가' 만 서술한다.
 
-const URGENCY_COLOR: Record<string, string> = {
-  '즉시': '#ef4444', '1개월 내': '#f59e0b', '3개월 내': '#10b981',
+const HORIZON_COLOR: Record<string, string> = {
+  '단기(1개월)': '#f59e0b', '중기(3개월)': '#60a5fa', '장기(1년)': '#10b981',
 }
 
-function ActionTable({ actions }: { actions: Array<Record<string, unknown>> }) {
+function ImpactTable({ impacts }: { impacts: Array<Record<string, unknown>> }) {
   const names = useTickerNames()
   const market = useMarket()
-  if (!actions.length) return null
+  if (!impacts.length) return null
   return (
     <div className="bg-[#060b14] border border-[#1e2d40] rounded-lg overflow-hidden">
       <div className="px-4 py-2.5 border-b border-[#1e2d40]">
-        <span className="text-[11px] text-[#64748b] font-bold tracking-wider">포트폴리오 액션 플랜</span>
+        <span className="text-[11px] text-[#64748b] font-bold tracking-wider">종목별 이벤트 영향</span>
       </div>
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-[#1e2d40]">
-              {[market === 'KR' ? '종목' : '티커', '액션', '시급도', '추천 이유'].map(h => (
+              {[market === 'KR' ? '종목' : '티커', '영향', '시계', '근거'].map(h => (
                 <th key={h} className="py-2.5 px-4 text-left text-[11px] font-bold text-[#64748b] tracking-wider">{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {actions.map((a, i) => {
-              const act    = String(a.action ?? '').toUpperCase()
-              const isBuy  = /BUY|INCREASE|ADD|매수/.test(act)
-              const isSell = /SELL|REDUCE|매도/.test(act)
-              const urgency = String(a.urgency ?? '—')
-              const urgColor = URGENCY_COLOR[urgency] ?? '#94a3b8'
+            {impacts.map((a, i) => {
+              const imp    = String(a.impact ?? '')
+              const isPos  = /긍정|POSITIVE/i.test(imp)
+              const isNeg  = /부정|NEGATIVE/i.test(imp)
+              const horizon = String(a.horizon ?? '—')
+              const horColor = HORIZON_COLOR[horizon] ?? '#94a3b8'
               return (
                 <tr key={i} className="border-b border-[#0f172a] hover:bg-[#0a1628]">
                   {/* 한국은 종목명으로 (사전에 없는 값 — AI 가 지어낸 심볼 등 — 은
@@ -235,14 +255,14 @@ function ActionTable({ actions }: { actions: Array<Record<string, unknown>> }) {
                   <td className="py-3 px-4">
                     <span className={cn(
                       'text-xs px-2.5 py-1 rounded-full font-bold',
-                      isBuy  ? 'bg-[#10b981]/20 text-[#10b981]'
-                      : isSell ? 'bg-[#ef4444]/20 text-[#ef4444]'
+                      isPos  ? 'bg-[#10b981]/20 text-[#10b981]'
+                      : isNeg ? 'bg-[#ef4444]/20 text-[#ef4444]'
                       : 'bg-[#64748b]/20 text-[#94a3b8]'
                     )}>
-                      {String(a.action ?? '—')}
+                      {String(a.impact ?? '—')}
                     </span>
                   </td>
-                  <td className="py-3 px-4 text-xs font-semibold" style={{ color: urgColor }}>{urgency}</td>
+                  <td className="py-3 px-4 text-xs font-semibold" style={{ color: horColor }}>{horizon}</td>
                   <td className="py-3 px-4 text-sm text-[#cbd5e1] leading-relaxed">{String(a.reason ?? '—')}</td>
                 </tr>
               )
@@ -294,32 +314,32 @@ function buildPdfHtml(
   // 읽히지 않게 칸마다 이스케이프한다.
   const escCell = (v: unknown) => String(v ?? '—')
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
-  function actionTableHtml(actions: Array<Record<string, unknown>>): string {
-    if (!actions?.length) return ''
-    const rows = actions.map(a => {
-      const act = String(a.action ?? '').toUpperCase()
-      const isBuy  = /BUY|INCREASE|ADD|매수/.test(act)
-      const isSell = /SELL|REDUCE|매도/.test(act)
-      const color = isBuy ? '#16a34a' : isSell ? '#dc2626' : '#4b5563'
-      const urg = String(a.urgency ?? '—')
-      const urgColor = urg === '즉시' ? '#dc2626' : urg === '1개월 내' ? '#d97706' : '#16a34a'
+  function impactTableHtml(impacts: Array<Record<string, unknown>>): string {
+    if (!impacts?.length) return ''
+    const rows = impacts.map(a => {
+      const imp = String(a.impact ?? '')
+      const isPos = /긍정|POSITIVE/i.test(imp)
+      const isNeg = /부정|NEGATIVE/i.test(imp)
+      const color = isPos ? '#16a34a' : isNeg ? '#dc2626' : '#4b5563'
+      const hor = String(a.horizon ?? '—')
+      const horColor = hor === '단기(1개월)' ? '#d97706' : hor === '중기(3개월)' ? '#2563eb' : '#16a34a'
       const raw = a.ticker == null ? null : String(a.ticker)
       const label = raw == null ? '—' : nameOf(raw)
       // 이름(한글)에는 고정폭을 쓰지 않는다. 티커가 그대로 나가는 경우(미국·사전에 없음)만.
       const mono = raw != null && label === raw ? 'font-family:monospace;' : ''
       return `<tr>
         <td style="${mono}font-weight:700;white-space:nowrap;width:90px">${escCell(label)}</td>
-        <td style="width:80px;white-space:nowrap"><span style="color:${color};font-weight:700;border:1px solid ${color};padding:2px 6px;border-radius:4px;font-size:11px;display:inline-block">${escCell(a.action)}</span></td>
-        <td style="color:${urgColor};font-weight:600;white-space:nowrap;width:80px">${escCell(urg)}</td>
+        <td style="width:80px;white-space:nowrap"><span style="color:${color};font-weight:700;border:1px solid ${color};padding:2px 6px;border-radius:4px;font-size:11px;display:inline-block">${escCell(a.impact)}</span></td>
+        <td style="color:${horColor};font-weight:600;white-space:nowrap;width:80px">${escCell(hor)}</td>
         <td style="word-break:break-word;line-height:1.5">${escCell(a.reason)}</td>
       </tr>`
     }).join('')
-    return `<h3>포트폴리오 액션 플랜</h3>
+    return `<h3>종목별 이벤트 영향</h3>
       <table style="table-layout:fixed"><thead><tr>
         <th style="width:90px">${escCell(tickerHeader)}</th>
-        <th style="width:80px">액션</th>
-        <th style="width:80px">시급도</th>
-        <th>추천 이유</th>
+        <th style="width:80px">영향</th>
+        <th style="width:80px">시계</th>
+        <th>근거</th>
       </tr></thead>
       <tbody>${rows}</tbody></table>`
   }
@@ -351,11 +371,13 @@ function buildPdfHtml(
 
   const agentSections = result.agents?.map((agent, i) => {
     const isVerdict = Number(agent.id) === 9
-    const isAction  = Number(agent.id) === 8
+    const isImpact  = Number(agent.id) === 8
     const body = isVerdict && result.verdict_cards?.length
       ? verdictCardsHtml(result.verdict_cards)
-      : isAction && result.portfolio_actions?.length
-      ? actionTableHtml(result.portfolio_actions)
+      : isImpact && result.ticker_impacts?.length
+      ? impactTableHtml(result.ticker_impacts)
+      : isImpact && isLegacyScenario(result)
+      ? `<p class="p">${LEGACY_IMPACT_NOTICE}</p>`
       : mdToHtml(agent.text ?? '')
     return `<div class="agent-card">
       <div class="agent-header">
@@ -411,7 +433,7 @@ function buildPdfHtml(
     </div>
     <div class="sec-title">에이전트 분석 (${result.agents?.length ?? 0}개)</div>
     ${agentSections}
-    <div class="footer">본 레포트는 AI 자동 생성 참고용으로, 투자 조언이 아닙니다.</div>
+    <div class="footer">${DISCLAIMER_TEXT}<br/><br/>${AI_LABEL_SCENARIO}</div>
   </div>
   </body></html>`
 }
@@ -431,6 +453,9 @@ export default function MacroScenario() {
   const pageNames = useTickerNames()
   // sessionStorage 에서 이전 상태 복원
   const [event,    setEvent]    = useState(() => marketSession.get(SK_EVENT)    || '')
+  // 분석 대상 종목 — 쉼표로 구분해 직접 적는다. 비워 두면 종목별 영향
+  // 섹션 없이 거시 분석만 나온다 (서버가 '지정된 종목 없음' 으로 받는다).
+  const [tickersRaw, setTickersRaw] = useState(() => marketSession.get(SK_TICKERS) || '')
   // 기본은 '기본 분석'(haiku). 심층 분석은 토큰을 훨씬 많이 쓰므로 사용자가
   // 필요할 때 직접 고르게 한다.
   const [model,    setModel]    = useState(() => marketSession.get(SK_MODEL)    || 'haiku')
@@ -457,7 +482,8 @@ export default function MacroScenario() {
   const [showHist, setShowHist] = useState(false)
 
   const modesQ    = useQuery({ queryKey: ['macro-modes'], queryFn: getMacroModes })
-  const holdingsQ = useDemoQuery(['holdings'], getHoldings, demoHoldingsRaw(), { staleTime: 60_000 })
+  // 보유 종목 조회를 없앴다. 이 화면은 개인 데이터를 읽지 않는다 —
+  // 분석 대상은 아래 `tickersRaw` 에 사용자가 직접 적은 것뿐이다.
   const histQ     = useQuery({
     queryKey: ['macro-report-history'],
     queryFn:  getMacroReportHistory,
@@ -474,6 +500,14 @@ export default function MacroScenario() {
     },
   })
 
+  // 입력한 티커를 목록으로. 쉼표·공백·줄바꿈 아무거나 구분자로 받는다.
+  const tickerList = useMemo(
+    () => Array.from(new Set(
+      tickersRaw.split(/[,\s]+/).map(t => t.trim().toUpperCase()).filter(Boolean),
+    )),
+    [tickersRaw],
+  )
+
   // POST가 응답 오기 전에 사용자가 중단을 눌렀는지 추적
   const wantCancelRef = useRef(false)
 
@@ -483,7 +517,10 @@ export default function MacroScenario() {
       event,
       model,
       mode,
-      portfolio: holdingsQ.data as Record<string, unknown> | undefined,
+      // 보유 종목을 보내지 않는다. 예전에는 holdings 를 통째로 실어
+      // 수량·평균단가까지 서버 프롬프트로 갔다 — 재산상황이 담긴
+      // 개별 자문이 되는 경로였다. 지금은 입력한 티커만 보낸다.
+      tickers: tickerList,
     }),
     onSuccess: ({ job_id }) => {
       if (wantCancelRef.current) {
@@ -602,6 +639,7 @@ export default function MacroScenario() {
   // 분석 시작 핸들러
   const startAnalysis = () => {
     marketSession.set(SK_EVENT,    event)
+    marketSession.set(SK_TICKERS,  tickersRaw)
     marketSession.set(SK_MODEL,    model)
     marketSession.set(SK_MODE,     mode)
     marketSession.set(SK_START,   String(Date.now()))
@@ -776,6 +814,27 @@ export default function MacroScenario() {
             isRunning && 'opacity-50 cursor-not-allowed',
           )}
         />
+        {/* 분석 대상 종목 — 직접 입력만 받는다.
+            예전에는 이 입력이 없었고 화면이 사용자의 보유 종목을 그대로 보냈다. */}
+        <div>
+          <div className="text-[10px] text-[#4a5568] font-bold tracking-wider mb-1.5">
+            분석 대상 종목 <span className="font-normal text-[#374151]">(선택 · 쉼표로 구분)</span>
+          </div>
+          <input
+            value={tickersRaw}
+            onChange={e => setTickersRaw(e.target.value)}
+            readOnly={isRunning}
+            placeholder={pageMarket === 'KR' ? '예: 005930.KS, 000660.KS' : '예: AAPL, MSFT, NVDA'}
+            className={cn(
+              'w-full bg-[#0b0f1a] border border-[#1e2d40] rounded px-3 py-2 text-sm text-[#e2e8f0] focus:outline-none focus:border-[#10b981] placeholder-[#374151]',
+              isRunning && 'opacity-50 cursor-not-allowed',
+            )}
+          />
+          <div className="text-[10px] text-[#374151] mt-1">
+            입력한 종목에 이 이벤트가 어떤 영향을 주는지 분석합니다. 보유 종목은 사용하지 않습니다.
+          </div>
+        </div>
+
         <div className="flex flex-wrap gap-4 items-end">
           <div>
             <div className="text-[10px] text-[#4a5568] font-bold tracking-wider mb-1.5">분석 모드</div>
@@ -878,13 +937,17 @@ export default function MacroScenario() {
                     key={agent.id ?? i}
                     agent={agent}
                     index={i}
-                    portfolioActions={displayResult.portfolio_actions}
+                    tickerImpacts={displayResult.ticker_impacts}
                     verdictCards={displayResult.verdict_cards}
+                    legacyImpact={isLegacyScenario(displayResult)}
                   />
                 ))}
               </div>
             </div>
           )}
+
+          {/* 결과의 맨 끝 — 에이전트 분석은 전부 LLM 이 쓴다. */}
+          <AiGeneratedNote text={AI_LABEL_SCENARIO} className="pt-2 border-t border-[#1e2d40]" />
         </div>
       )}
 

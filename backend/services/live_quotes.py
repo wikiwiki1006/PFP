@@ -216,15 +216,21 @@ def poll_quotes(tickers: list[str], batch_size: int = 200, interval: str = "1m")
                 px = float(s.iloc[-1])
                 # 전일 종가: 마지막 관측 '날짜' 이전의 마지막 값
                 last_day = s.index[-1].date()
-                prior = s[[ts.date() < last_day for ts in s.index]]
+                is_last = [ts.date() == last_day for ts in s.index]
+                prior = s[[not x for x in is_last]]
                 prev = float(prior.iloc[-1]) if not prior.empty else None
+                # 당일 고저는 **마지막 날 행만**으로 잰다. 2일치 프레임 전체의 max/min
+                # 이라 전날 값이 섞였다 — JPYKRW=X 의 당일 고가가 8.508 인데 8.624
+                # (전날 고가)로 저장됐다 (§1.3b: 그럴듯한 오답).
+                today = s[is_last]
                 q = {"price": px, "prev_close": prev,
-                     "day_high": float(s.max()), "day_low": float(s.min())}
+                     "day_high": float(today.max()), "day_low": float(today.min())}
                 if prev:
                     q["change_1d"] = px - prev
                     q["change_1d_pct"] = (px / prev - 1) * 100
                 if vol is not None and t in vol.columns:
                     v = vol[t].dropna()
+                    v = v[[ts.date() == last_day for ts in v.index]]   # 당일 거래량만
                     if not v.empty:
                         q["volume"] = float(v.sum())
                 out[t] = q

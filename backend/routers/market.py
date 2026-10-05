@@ -152,10 +152,11 @@ def macro_data(market: str = Depends(market_param)):
 def portfolio_news(
     tickers: str = Query(..., description="콤마 구분 티커. 예: NVDA,AAPL"),
     max_per: int = Query(default=2, ge=1, le=5),
+    market: str = Depends(market_param),
 ):
-    """보유 종목 + MACRO 뉴스 최신순 정렬."""
+    """보유 종목 + MACRO 뉴스 최신순 정렬. 시장 뉴스는 시장별 (§1.1)."""
     ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
-    return get_portfolio_news(ticker_list, max_per=max_per)
+    return get_portfolio_news(ticker_list, max_per=max_per, market=market)
 
 
 @router.get("/earnings")

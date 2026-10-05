@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import date, datetime, timezone
 from typing import Callable
 
@@ -193,29 +194,73 @@ def _fetch_price_data(holdings: dict, market: str = "US",
     return result
 
 
+_WIRE_PUBLISHERS = {"globenewswire", "prnewswire", "businesswire", "accessnewswire", "accesswire"}
+_NEWS_WINDOW_H = 72      # 브리프는 '전날' 이다 — 주말을 건너도 직전 세션 기사가 들어오게
+
+
 def _fetch_yf_news(ticker: str, max_items: int = 5) -> list[dict]:
+    """종목 헤드라인 (야후). 실패하면 빈 목록 + 경고.
+
+    `yf.Ticker(t).news` 를 쓰지 않는다. 그 엔드포인트(`/xhr/ncp?queryRef=latestNews`)가
+    2026-10 현재 404 를 주는데, 404 본문도 JSON 이라 yfinance 는 예외 없이 `[]` 를
+    돌려준다 — 그래서 전 종목 '뉴스 0건' 이 정상처럼 보였다 (yfinance 1.4.1, main 도 같다).
+    `yf.Search(...).news` 는 동작한다. 다만 검색이라 다른 종목 기사가 섞이므로
+    `relatedTickers` 에 이 종목이 있고 **제목에 회사 이름이나 티커가 나오는** 최근
+    기사만 남긴다 — 관련 종목만 보면 시장 보고서 보도자료(GlobeNewswire)나 다른
+    회사 기사가 절반을 넘었다(2026-10-05 AAPL 20건 중 본인 기사 3건). 한국 종목은 Search 도
+    거의 비어 있어 국내 매체 수집(`_collect_korean_news`)이 주 재료다.
+    """
+    base = ticker.upper()
     try:
-        items = yf.Ticker(ticker).news or []
-        out = []
-        for item in items[:max_items]:
-            title = item.get("title") or item.get("content", {}).get("title", "")
-            pub   = item.get("publisher") or item.get("content", {}).get("provider", {}).get("displayName", "")
-            ts    = item.get("providerPublishTime") or 0
-            link  = item.get("link") or item.get("content", {}).get("canonicalUrl", {}).get("url", "")
-            if title:
-                out.append({
-                    "title":     title,
-                    "publisher": pub,
-                    "time":      datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%m/%d %H:%M") if ts else "—",
-                    "link":      link,
-                })
-        return out
+        found = yf.Search(ticker, news_count=20, max_results=1)
+        items = found.news or []
+        quotes = found.quotes or []
     except Exception:
         # 빈 목록은 "이 종목 뉴스 없음" 과 같은 값이라, 조회가 죽어도 프롬프트에는
         # "수집된 뉴스 없음" 으로만 나간다. 어느 쪽이었는지는 여기에만 남는다.
-        logger.warning("yfinance 뉴스 조회 실패 (%s) — 이 종목 헤드라인 없이 진행",
+        logger.warning("야후 뉴스 검색 실패 (%s) — 이 종목 헤드라인 없이 진행",
                        ticker, exc_info=True)
         return []
+    cutoff = datetime.now(timezone.utc).timestamp() - _NEWS_WINDOW_H * 3600
+    # 제목에서 찾을 이름: 티커 + 회사 이름 첫 단어 ('Apple Inc.' → apple, 'NVIDIA Corporation' → nvidia)
+    q = next((x for x in quotes if str(x.get("symbol", "")).upper() == base), {})
+    words_ = [w for w in re.split(r"[^a-z0-9]+", str(q.get("shortname") or q.get("longname") or "").lower()) if w]
+    keys = {k for k in re.split(r"[^a-z0-9]+", base.lower()) if len(k) >= 2}   # BRK-B → brk, 005930.KS → 005930, ks
+    keys.discard("ks"); keys.discard("kq")
+    if words_ and len(words_[0]) >= 3:
+        keys.add(words_[0])                       # 'Apple Inc.' → apple
+    if len(words_) >= 2:
+        keys.add(words_[0] + words_[1])           # 'JP Morgan Chase' → jpmorgan
+    out = []
+    for item in items:
+        related = [str(r).upper() for r in (item.get("relatedTickers") or [])]
+        if base not in related:
+            continue
+        ts = item.get("providerPublishTime") or 0
+        if ts and ts < cutoff:
+            continue
+        content = item.get("content") or {}
+        title = item.get("title") or content.get("title", "")
+        if not title:
+            continue
+        words = set(re.findall(r"[a-z0-9]+", title.lower()))
+        if not keys & words:
+            continue
+        publisher = item.get("publisher") or content.get("provider", {}).get("displayName", "")
+        # 보도자료 배포사의 '시장 보고서' 는 제목 끝에 대형주 이름을 줄줄이 단다. 여러
+        # 종목이 걸린 배포사 기사는 뺀다 — 회사가 직접 낸 보도자료는 보통 자기 티커 하나다.
+        if publisher.lower().replace(" ", "") in _WIRE_PUBLISHERS and len(related) > 1:
+            continue
+        out.append({
+            "title":     title,
+            "publisher": publisher,
+            "time":      datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%m/%d %H:%M") if ts else "—",
+            "link":      item.get("link") or content.get("canonicalUrl", {}).get("url", ""),
+            "_ts":       ts or None,      # 원 시각 (화면 뉴스 목록 정렬용 — 프롬프트에는 안 쓴다)
+        })
+        if len(out) >= max_items:
+            break
+    return out
 
 
 def _collect_korean_news(tickers: list[str], names: dict) -> str:
@@ -240,16 +285,46 @@ Collect **in English**, concise bullets, last 48 hours:
     return _perplexity_search(prompt, market="KR")
 
 
-def _collect_news(price_data: dict) -> dict:
+def _collect_us_news(tickers: list[str]) -> str:
+    """미국 종목 뉴스를 웹에서 모은다 (Perplexity).
+
+    예전에는 미국 브리프가 야후 헤드라인에만 기댔고, 웹 수집은 3% 넘게 움직인
+    종목이 있을 때만 돌았다. 야후 헤드라인이 끊기자 평범한 날의 미국 브리프는
+    전부 '뉴스 미확보' 로 나갔다 (2026-10-05 pfp_main 의 미국 브리프 2건).
+    """
+    if not tickers:
+        return ""
+    from backend.services.news_sources import focus_block
+    today = datetime.now().strftime("%Y-%m-%d")
+    prompt = f"""Today: {today}
+US stocks in this portfolio: {", ".join(tickers[:12])}
+
+Collect concise bullets, last 48 hours:
+[Per-stock news] 1-2 items each (title, source, date, one line)
+[US session] index moves, sector rotation relevant to these names
+[Macro] rates, Fed, policy or regulation affecting these names
+{focus_block("US")}"""
+    return _perplexity_search(prompt, market="US")
+
+
+def _collect_news(price_data: dict, market: str = "US") -> dict:
     stock_keys = sorted(
         [k for k in price_data if not k.startswith("__")],
         key=lambda t: abs(price_data[t]["chg_pct"]),
         reverse=True,
     )
-    return {t: _fetch_yf_news(t, max_items=5) for t in stock_keys}
+    news = {t: _fetch_yf_news(t, max_items=5) for t in stock_keys}
+    # 한국 종목은 야후 검색에 기사가 원래 거의 없다 — 거기서 울리면 매번 울리는 경보가
+    # 되어 정작 미국 소스가 죽었을 때 묻힌다. 미국만 본다.
+    if market != "KR" and len(stock_keys) >= 2 and not any(news.values()):
+        # 종목이 여럿인데 전부 0건이면 '뉴스 없는 날' 보다 소스 고장일 가능성이 크다.
+        # Ticker.news 가 404 를 [] 로 삼키던 동안 이 신호가 없어서 아무도 몰랐다 (§1.3).
+        logger.warning("야후 헤드라인 전 종목 0건 (%d종목) — 소스 이상 의심", len(stock_keys))
+    return news
 
 
-def _news_section(news_text: str, kr_press: str | None, web_ctx: str) -> str:
+def _news_section(news_text: str, kr_press: str | None, web_ctx: str,
+                  market: str = "KR") -> str:
     """'=== 관련 뉴스 ===' 섹션 본문.
 
     뉴스는 세 곳에서 온다 — 종목별 yfinance 헤드라인, 한국이면 국내 매체 수집
@@ -268,6 +343,10 @@ def _news_section(news_text: str, kr_press: str | None, web_ctx: str) -> str:
     """
     from backend.services.perplexity import window_notice
 
+    # 인자 이름은 kr_press 지만 미국도 웹 뉴스 수집(_collect_us_news) 결과가 이 자리로 온다.
+    press_label = "국내 매체 수집" if market == "KR" else "웹 뉴스 수집"
+    press_missing = ("국내 경제지·증권사 보도를 근거로 인용하지 마라." if market == "KR"
+                     else "웹 기사를 근거로 인용하지 마라.")
     blocks = []
     if news_text.strip():
         blocks.append(news_text.strip("\n"))
@@ -275,7 +354,7 @@ def _news_section(news_text: str, kr_press: str | None, web_ctx: str) -> str:
     if kr_press is not None:
         if kr_press.strip():
             # 요청 범위는 `_collect_korean_news` 의 "last 48 hours" 다.
-            blocks.append(f"[국내 매체 수집]\n{window_notice('48시간')}\n{kr_press.strip()}")
+            blocks.append(f"[{press_label}]\n{window_notice('48시간')}\n{kr_press.strip()}")
         else:
             press_missing_at = len(blocks)
     if web_ctx and web_ctx.strip():
@@ -286,7 +365,7 @@ def _news_section(news_text: str, kr_press: str | None, web_ctx: str) -> str:
         return "수집된 뉴스 없음. 뉴스에 근거한 서술을 하지 말고, 뉴스를 확보하지 못했다고 밝혀라."
     if press_missing_at is not None:
         blocks.insert(press_missing_at,
-                      "[국내 매체 수집] 받은 것 없음 — 국내 경제지·증권사 보도를 근거로 인용하지 마라.")
+                      f"[{press_label}] 받은 것 없음 — {press_missing}")
     return "\n\n".join(blocks)
 
 
@@ -456,7 +535,7 @@ def _build_prompt(holdings: dict, price_data: dict, news: dict,
 절대 변동 3% 이상 종목: {big_movers_str}
 
 === 관련 뉴스 ===
-{_news_section(news_text, kr_press, web_ctx)}
+{_news_section(news_text, kr_press, web_ctx, market)}
 
 === 지시사항 ===
 {style_line}
@@ -505,11 +584,16 @@ def generate_daily_report(
     holdings: dict,
     log: Callable[[str], None] | None = None,
     market: str = "US",
+    on_progress: Callable[[int, str], None] | None = None,
 ) -> tuple[str, dict]:
     """
     포트폴리오 데일리 브리프 생성.
     Returns: (markdown_report, price_data_dict)
+
+    `on_progress(pct, stage)` — 백그라운드 잡(`routers/reports.py`
+    `daily_brief_start`)이 화면에 진행률을 싣는 데 쓴다. 단계 경계에서만 부른다.
     """
+    _progress = on_progress or (lambda pct, stage: None)
     anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
     _log = log or (lambda m: print(f"  {m}"))
     # 키는 **수집 전에** 본다. 예전에는 3단계에서 봐서, 키가 없어도 시세·뉴스를
@@ -517,6 +601,7 @@ def generate_daily_report(
     if not anthropic_key:
         raise RuntimeError("ANTHROPIC_API_KEY가 설정되지 않았습니다.")
 
+    _progress(5, "가격 데이터 수집 중")
     _log("1/3 가격 데이터 수집 중...")
     price_data = _fetch_price_data(holdings, market)
     if not price_data:
@@ -533,16 +618,22 @@ def generate_daily_report(
             + "; ".join(f"{t}: {why}" for t, why in missing.items())
         )
 
+    _progress(30, "뉴스 수집 중")
     _log("2/3  뉴스 헤드라인 수집 중...")
-    news = _collect_news(price_data)
+    news = _collect_news(price_data, market)
     # 한국 종목은 yfinance 뉴스가 사실상 비어 있어 국내 매체로 따로 채운다.
     #
     # **받은 것을 프롬프트까지 넘긴다.** 이 수집은 345f240(2026-09-11) 에서
     # `_generate_with_claude(extra_context=)` 와 함께 들어왔는데 호출부가 그 인자를
     # 넘기지 않아, 그날부터 한국 브리프마다 국내 매체 수집(Perplexity)을 부르고
     # 결과는 버렸다. 뉴스 섹션에는 "수집된 뉴스 없음" 이 나갔다.
-    kr_press: str | None = None          # None = 수집하지 않는 시장
-    if market == "KR":
+    kr_press: str | None = None          # 이름은 kr_ 이지만 두 시장 모두 쓴다
+    if market != "KR":
+        _stocks = [k for k in price_data if not k.startswith("__")]
+        kr_press = _collect_us_news(_stocks)
+        if not kr_press:
+            logger.warning("미국 브리프: 웹 뉴스 수집 결과 없음 — 프롬프트에 없다고 적는다")
+    else:
         _stocks = [k for k in price_data if not k.startswith("__")]
         try:
             from backend.services.markets import name_map_for
@@ -557,10 +648,14 @@ def generate_daily_report(
             # 이 브리프가 국내 매체 없이 나간다는 결과를 남긴다.
             logger.warning("한국 브리프: 국내 매체 수집 결과 없음 — 프롬프트에 없다고 적는다")
 
+    _progress(55, "AI 브리프 작성 중")
     _log("3/3  AI 브리프 생성 중 (약 30~60초)...")
     report = _generate_with_claude(holdings, price_data, news, anthropic_key, _log, market,
                                    kr_press=kr_press)
-    return report, price_data
+    _progress(100, "완료")
+    # 고지는 본문에 직접 붙인다. 화면에만 붙이면 내려받은 브리프에는 빠진다.
+    from backend.services.disclaimer import append_disclaimer, AI_LABEL_BRIEF
+    return append_disclaimer(report, ai_label=AI_LABEL_BRIEF), price_data
 
 
 def _generate_with_claude(holdings, price_data, news, api_key, log,
