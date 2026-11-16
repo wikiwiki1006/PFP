@@ -868,7 +868,7 @@ export default function MacroScenario() {
                     'px-3 py-1.5 text-left rounded font-medium transition-colors min-w-[90px] disabled:opacity-40 disabled:cursor-not-allowed',
                     model === m ? 'bg-[#10b981] text-white' : 'bg-[#0b0f1a] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0]'
                   )}>
-                  <div className="text-[11px] font-bold">{label}</div>
+                  <div className="text-[11px] font-bold whitespace-nowrap">{label}</div>
                   <div className={cn('text-[9px] mt-0.5 leading-tight', model === m ? 'text-emerald-200' : 'text-[#475569]')}>
                     {locked ? '사용 불가' : limited ? '하루 1회 · ' + desc : desc}
                   </div>

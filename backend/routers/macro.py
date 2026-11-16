@@ -161,6 +161,9 @@ def analyze_macro(
                 metadata={"event": ev[:200], "mode": req_mode, "model": req_model},
                 user_id=uid,
                 scope="private",
+                # 시장을 넘긴다 (§1.1). 빠져 있어 한국에서 돌린 시나리오가 'US' 로 저장되고,
+                # 두 시장의 과거 기록 목록이 같은 내용을 보여 줬다.
+                market=market,
             )
 
             # pending 일 때만 done 으로 바꾼다 — 취소된 잡을 되살리지 않는다.
@@ -206,7 +209,7 @@ def cancel_job(job_id: str, _auth: dict = Depends(current_user), market: str = D
 def list_macro_reports(_auth: dict = Depends(current_user), market: str = Depends(market_param)):
     """저장된 시나리오 레포트 목록 반환."""
     uid = _auth["uid"]
-    rows = list_reports(uid, report_type="macro_scenario", limit=30)
+    rows = list_reports(uid, report_type="macro_scenario", limit=30, market=market)
     return [
         {
             "name":       r["name"],

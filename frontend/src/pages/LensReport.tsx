@@ -431,16 +431,19 @@ function ReportSection({ title, content, defaultExpanded = false, sectionIndex }
       <button
         onClick={() => setExpanded(e => !e)}
         className="w-full flex items-center justify-between px-4 py-3 hover:bg-[#0a1628] transition-colors"
+        // 모바일 공통 규칙(main .flex:not(.flex-col) → wrap)이 이 줄을 접어 펼침 화살표가
+        // 다음 줄 맨 앞으로 밀렸다. 이 머리 줄은 접지 않는다 — 긴 제목은 제목 안에서 접힌다.
+        style={{ flexWrap: 'nowrap', gap: 8 }}
       >
-        <div className="flex items-center gap-2.5">
-          <div className="w-5 h-5 rounded-full bg-[#10b981]/20 border border-[#10b981]/30 flex items-center justify-center text-[10px] font-mono text-[#10b981]">
+        <div className="flex items-center gap-2.5 min-w-0" style={{ flexWrap: 'nowrap' }}>
+          <div className="flex-shrink-0 w-5 h-5 rounded-full bg-[#10b981]/20 border border-[#10b981]/30 flex items-center justify-center text-[10px] font-mono text-[#10b981]">
             {sectionIndex + 1}
           </div>
-          <span className="text-sm font-semibold text-[#f1f5f9]">{sectionTitle(title)}</span>
+          <span className="text-sm font-semibold text-[#f1f5f9] min-w-0 text-left">{sectionTitle(title)}</span>
         </div>
         {expanded
-          ? <ChevronDown className="w-4 h-4 text-[#64748b]" />
-          : <ChevronRight className="w-4 h-4 text-[#64748b]" />
+          ? <ChevronDown className="w-4 h-4 text-[#64748b] flex-shrink-0" />
+          : <ChevronRight className="w-4 h-4 text-[#64748b] flex-shrink-0" />
         }
       </button>
       {expanded && (
@@ -958,7 +961,7 @@ function EquityTab() {
                     'px-3 py-1.5 text-left rounded font-medium transition-colors min-w-[80px] disabled:opacity-40 disabled:cursor-not-allowed',
                     modelTier === t ? 'bg-[#10b981] text-white' : 'bg-[#0b0f1a] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0]'
                   )}>
-                  <div className="text-[11px] font-bold">{label}</div>
+                  <div className="text-[11px] font-bold whitespace-nowrap">{label}</div>
                   {locked && <div className="text-[9px] opacity-70">사용 불가</div>}
                   {limited && <div className="text-[9px] opacity-70">하루 1회</div>}
                 </button>
@@ -1383,7 +1386,7 @@ function IndustryTab() {
                   'px-3 py-1.5 text-left rounded font-medium transition-colors min-w-[80px] disabled:opacity-40 disabled:cursor-not-allowed',
                   modelTier === t ? 'bg-[#10b981] text-white' : 'bg-[#0b0f1a] border border-[#1e2d40] text-[#64748b] hover:text-[#e2e8f0]'
                 )}>
-                <div className="text-[11px] font-bold">{label}</div>
+                <div className="text-[11px] font-bold whitespace-nowrap">{label}</div>
                 {locked && <div className="text-[9px] opacity-70">사용 불가</div>}
                 {limited && <div className="text-[9px] opacity-70">하루 1회</div>}
               </button>

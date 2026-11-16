@@ -78,8 +78,8 @@ const OPT_CARDS = [
 // (MARKET_DEFAULTS 의 hint) — 한국 화면에서 미국 티커를 예시로 보여 주면
 // 사용자는 그 형식으로 입력해야 하는 줄 안다.
 const TICKER_HINT: Record<Market, string> = {
-  US: 'AAPL MSFT NVDA... (Enter로 추가, 비우면 보유 종목 자동 사용)',
-  KR: '삼성전자 SK하이닉스... (Enter로 추가, 비우면 보유 종목 자동 사용)',
+  US: 'AAPL MSFT NVDA... (Enter로 추가)',
+  KR: '삼성전자 SK하이닉스... (Enter로 추가)',
 }
 
 const GLOSSARY: Record<string, string> = {
@@ -1025,7 +1025,7 @@ export default function Optimizer() {
           {tickerError ? (
             <p className="text-[10px] text-[#ef4444] mt-1">{tickerError}</p>
           ) : (
-            <p className="text-[10px] text-[#374151] mt-1">Enter로 추가. 미기입 시 보유 종목 자동 사용.</p>
+            <p className="text-[10px] text-[#374151] mt-1">Enter로 추가. 2개 이상 입력하거나 '포트폴리오에서 불러오기'로 보유 종목을 채우세요.</p>
           )}
         </div>
 
@@ -1039,7 +1039,10 @@ export default function Optimizer() {
             <input type="range" min={1} max={50} step={1} value={targetReturn}
               disabled={isRunning}
               onChange={e => setTargetReturn(+e.target.value)}
-              className="w-full accent-[#10b981] disabled:opacity-50" />
+              // 휴대폰: 세로 스와이프는 페이지 스크롤로 넘긴다 — 슬라이더 위에서 스크롤을
+              // 시작하면 목표수익률이 몰래 바뀌었다(10%→26%). 터치 높이도 16px 에서 늘린다.
+              style={{ touchAction: 'pan-y' }}
+              className="w-full h-8 accent-[#10b981] disabled:opacity-50" />
           </div>
 
           {/* Holding period — 이 값이 참조 데이터 기간까지 결정한다 */}
